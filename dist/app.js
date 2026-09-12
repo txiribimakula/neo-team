@@ -5,7 +5,7 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
-let state, selectedIteration = '', tab = 'hierarchy', query = '', pending = false, review, toastTimer;
+let state, selectedIteration = '', tab = 'capacity', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
 const peoplePopover=$('#people-popover');
@@ -42,7 +42,7 @@ document.addEventListener('toggle',layoutStickyHierarchy,true);
 window.addEventListener('resize',layoutStickyHierarchy);
 function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sincronizar' : 'Pendiente de sincronizar';}
 function savedStatus() {
-  const count=Object.keys(state?.workspace?.drafts || {}).length;
+  const count=Object.keys(state?.workspace?.drafts || {}).length+capacityDraftCount();
   return count ? `${count} pendiente${count===1 ? '' : 's'} de sincronizar` : 'Sin cambios pendientes';
 }
 function createItem(parentId) {
@@ -537,6 +537,79 @@ function personMeter(member) {
   const label=meter.status==='over' ? `Exceso: ${number(meter.hours-meter.capacity)} h` : meter.status==='full' ? 'Horas cubiertas' : meter.status==='zero' ? 'Sin capacidad' : meter.status==='unknown' ? (meter.capacity===null ? 'Capacidad sin definir' : `${meter.unknown} sin estimar`) : `${number(meter.capacity-meter.hours)} h libres`;
   return `<span class="person-hours">${number(meter.hours)} h${meter.capacity===null ? '' : ` / ${number(meter.capacity)} h`}</span><span class="person-meter meter-${meter.status}" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(meter.percent)}" aria-valuetext="${escape(label)}"><span style="width:${meter.percent}%"></span></span><span class="person-load-label meter-text-${meter.status}">${escape(label)}</span>`;
 }
+// Step 1: the capacity and days off that the rest of the planning is measured
+// against. Every edit is a local draft until the review writes it to Azure.
+const dayValue = value => String(value ?? '').slice(0,10);
+const nextDay = value => new Date(+new Date(`${value}T00:00:00Z`) + 86400000).toISOString().slice(0,10);
+function capacityDraftCount(ws = state?.workspace) { return Object.values(ws?.capacityDrafts ?? {}).reduce((sum,drafts)=>sum+Object.keys(drafts).length,0); }
+function capacityOf(iterationId, owner) {
+  const capacity=state.workspace.effectiveCapacities?.[iterationId] ?? {};
+  const record=owner==='team' ? { daysOff:capacity.daysOff } : (capacity.teamMembers ?? []).find(m=>m.teamMember?.id===owner);
+  return { activities:(record?.activities ?? []).map(a=>({name:a.name ?? '',capacityPerDay:Number(a.capacityPerDay ?? 0)})),
+    daysOff:(record?.daysOff ?? []).map(r=>({start:dayValue(r.start),end:dayValue(r.end)})).sort((a,b)=>a.start.localeCompare(b.start)) };
+}
+function freeDay(ranges, iteration) {
+  const first=dayValue(iteration.attributes?.startDate) || new Date().toISOString().slice(0,10), last=dayValue(iteration.attributes?.finishDate);
+  let candidate=first;
+  for (const range of [...ranges].sort((a,b)=>a.start.localeCompare(b.start))) if (candidate>=range.start && candidate<=range.end) candidate=nextDay(range.end);
+  if (last && candidate>last) throw new Error('No quedan días libres disponibles dentro de la iteración.');
+  return candidate;
+}
+function rangeEditor(owner, ranges, iteration) {
+  const first=dayValue(iteration.attributes?.startDate), last=dayValue(iteration.attributes?.finishDate);
+  const limits=first && last ? ` min="${first}" max="${last}"` : '';
+  const field=(index,edge,range)=>`<input type="date" data-range data-owner="${escape(owner)}" data-index="${index}" data-edge="${edge}" data-focus="range:${escape(owner)}:${index}:${edge}" value="${escape(range[edge])}"${limits} aria-label="${edge==='start' ? 'Primer' : 'Último'} día libre">`;
+  return `<div class="days-off">${ranges.map((range,index)=>`<div class="days-off-row">${field(index,'start',range)}<span aria-hidden="true">→</span>${field(index,'end',range)}<button class="button small" data-action="remove-range" data-owner="${escape(owner)}" data-index="${index}" data-focus="remove:${escape(owner)}:${index}" aria-label="Quitar estos días libres">Quitar</button></div>`).join('') || '<p class="text-muted">Sin días libres</p>'}<button class="button small" data-action="add-range" data-owner="${escape(owner)}" data-focus="add:${escape(owner)}">+ Días libres</button></div>`;
+}
+function capacityStatusLine(owner, drafts, conflicts) {
+  if (conflicts[owner]) return '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Revisa los cambios para elegir qué versión conservar.</p>';
+  return drafts[owner] ? `<p class="local-note">Pendiente de sincronizar · <button class="link-button" data-action="discard-capacity-entry" data-owner="${escape(owner)}">deshacer</button></p>` : '';
+}
+function capacityView() {
+  const ws=state.workspace, iteration=selected();
+  if (!iteration || !ws.members.length) return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para revisar la capacidad.</div>';
+  const drafts=ws.capacityDrafts?.[iteration.id] ?? {}, conflicts=ws.capacityConflicts?.[iteration.id] ?? {}, hours=ws.capacityHours?.[iteration.id] ?? {};
+  const known=ws.members.filter(m=>hours[m.id]!==null && hours[m.id]!==undefined);
+  const dates=iteration.attributes?.startDate && iteration.attributes?.finishDate ? `Del ${date(iteration.attributes.startDate)} al ${date(iteration.attributes.finishDate)} · ` : '';
+  return `<section class="capacity-step">
+    <header class="capacity-heading"><div><h2>Capacidad de «${escape(iteration.name)}»</h2><p class="text-muted">${dates}${(ws.settings.workingDays ?? []).length} días laborables por semana · ${number(known.reduce((sum,m)=>sum+hours[m.id],0))} h disponibles en el equipo</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer los cambios de capacidad</button>' : ''}</header>
+    <div class="notice">${ws.mode==='demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Los cambios se guardan en local y se envían a Azure DevOps en el paso «Revisar y sincronizar».'}</div>
+    <section class="capacity-card capacity-team"><h3>Días libres del equipo</h3><p class="text-muted">Se descuentan a todas las personas de esta iteración.</p>${rangeEditor('team',capacityOf(iteration.id,'team').daysOff,iteration)}${capacityStatusLine('team',drafts,conflicts)}</section>
+    <div class="capacity-people">${ws.members.map((member,index)=>{
+      const entry=capacityOf(iteration.id,member.id);
+      const activities=entry.activities.length ? entry.activities : [{name:'',capacityPerDay:null}];
+      const total=hours[member.id];
+      return `<section class="capacity-card ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${total===null || total===undefined ? 'Sin capacidad definida' : `${number(total)} h en la iteración`}</span></div></div>
+      <div class="capacity-hours">${activities.map((activity,position)=>`<label class="form-field">${activity.name ? escape(activity.name) : 'Horas por día'}<input type="number" min="0" max="24" step="0.25" data-capacity-hours data-member="${escape(member.id)}" data-activity="${position}" data-focus="hours:${escape(member.id)}:${position}" value="${activity.capacityPerDay ?? ''}" placeholder="0"></label>`).join('')}</div>
+      <div class="capacity-days"><span class="capacity-label">Días libres</span>${rangeEditor(member.id,entry.daysOff,iteration)}</div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
+    }).join('')}</div>
+  </section>`;
+}
+async function saveCapacity(owner, change, focus) {
+  // The request disables every control, so the target is read before sending.
+  const active=focus || capacityFocus(document.activeElement);
+  await request('/api/capacity',{ iterationId:selectedIteration, key:owner, ...change });
+  review=null; render();
+  if (active) $(active)?.focus();
+}
+// Saving re-renders the step, so the control the person moved to is restored.
+function capacityFocus(element) { return element?.dataset?.focus ? `[data-focus="${element.dataset.focus}"]` : ''; }
+async function saveCapacityHours(el) {
+  const entry=capacityOf(selectedIteration,el.dataset.member), position=Number(el.dataset.activity);
+  const value=el.value==='' ? null : Number(el.value);
+  if (value!==null && !Number.isFinite(value)) throw new Error('Indica un número de horas válido.');
+  const activities=entry.activities.length ? entry.activities.map((activity,index)=>index===position ? {...activity,capacityPerDay:value ?? 0} : activity)
+    : value===null ? [] : [{name:'',capacityPerDay:value}];
+  await saveCapacity(el.dataset.member,{ activities });
+}
+async function saveCapacityRange(el) {
+  if (!el.value) return;
+  const owner=el.dataset.owner, position=Number(el.dataset.index);
+  const daysOff=capacityOf(selectedIteration,owner).daysOff.map((range,index)=>index===position ? {...range,[el.dataset.edge]:el.value} : range);
+  // Keep the range valid while the person is still choosing the other end.
+  if (daysOff[position].end<daysOff[position].start) daysOff[position][el.dataset.edge==='start' ? 'end' : 'start']=el.value;
+  await saveCapacity(owner,{ daysOff });
+}
 function plannerView() {
   ensureSelection();const ws=state.workspace,iteration=selected();
   if(!iteration || !ws.members.length)return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para planificar.</div>';
@@ -568,7 +641,7 @@ async function saveParticipation(id,member,selected) {
 }
 function updatePlanningView() {
   const iteration=selected();
-  $('#planning-view').innerHTML=tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView();
+  $('#planning-view').innerHTML=tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView();
   updateBulkCheckbox();
 }
 
@@ -610,10 +683,10 @@ function render() {
   }
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
-  const changes=Object.keys(ws.drafts).length;
+  const changes=Object.keys(ws.drafts).length+capacityDraftCount(ws);
   $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button><select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><details class="workspace-menu"><summary aria-label="Más opciones">···</summary><div>${ws.mode==='demo' ? '<button data-action="azure">Salir del ejemplo</button>' : `<button data-action="import" ${changes ? 'disabled' : ''}>Actualizar datos</button>`}<button data-action="tab" data-tab="board">Vista del equipo</button><button data-action="tab" data-tab="list">Todas las tareas</button><a href="/api/export" download>Exportar</a>${changes ? '<button data-action="discard-all">Descartar cambios</button>' : ''}</div></details></div>
-  <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>1</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>2</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>3</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>
-  <div id="planning-view">${tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
+  <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='capacity' ? 'active' : ''}" data-action="tab" data-tab="capacity" ${tab==='capacity' ? 'aria-current="step"' : ''}><span>1</span>Capacidad</button><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>2</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>3</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>4</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>
+  <div id="planning-view">${tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   updateBulkCheckbox();
 }
@@ -629,17 +702,29 @@ async function stage(id, changes) {
   await request('/api/stage', { edits:[{ id, changes }] }); review = null; render();
 }
 async function reviewChanges() {
-  showModal('Revisar cambios', 'Comprobando la última versión de cada tarea.', '<p class="busy-note"><span class="spinner"></span> Consultando las tareas… Completa el acceso de Microsoft si se solicita.</p>');
+  showModal('Revisar cambios', 'Comprobando la última versión de cada tarea y de la capacidad.', '<p class="busy-note"><span class="spinner"></span> Consultando las tareas… Completa el acceso de Microsoft si se solicita.</p>');
   const result = await request('/api/review'); review = result.review; render(); renderReview();
+}
+function capacityText(entry, owner) {
+  const hours=owner==='team' ? '' : entry.activities?.length ? entry.activities.map(a=>`${number(a.capacityPerDay)} h/día${a.name ? ` · ${a.name}` : ''}`).join(' + ') : '0 h/día';
+  const off=entry.daysOff?.length ? entry.daysOff.map(r=>r.start===r.end ? date(r.start) : `${date(r.start)} – ${date(r.end)}`).join(', ') : 'sin días libres';
+  return [hours,off].filter(Boolean).join(' · ');
+}
+function capacityReview() {
+  const plans=review.capacityPlans ?? [];
+  if (!plans.length) return '';
+  return `<h3 class="review-section">Capacidad y días libres</h3>${plans.map(plan=>`<section class="review-item"><h3>${escape(plan.iteration)} · ${escape(plan.label)}</h3><div class="change-row"><span class="change-label">${plan.key==='team' ? 'Días libres' : 'Capacidad'}</span><span class="change-old">${escape(capacityText(plan.remote,plan.key))}${plan.conflict ? `<small>Al importar: ${escape(capacityText(plan.original,plan.key))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(capacityText(plan.after,plan.key))}${plan.conflict ? ' ⚠' : ''}</span></div>${plan.conflict ? `<p class="local-note">La capacidad ha cambiado en Azure DevOps desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-capacity-remote" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Conservar la de Azure</button><button class="button small" data-action="resolve-capacity-local" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Mantener mis cambios</button></div>` : ''}${plan.applied && !plan.conflict ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`;
 }
 function renderReview() {
   const conflicts = review.plans.filter(p=>p.conflicts.length);
-  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparadas con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length ? '<div class="notice warning" style="margin-bottom:20px">Algunas tareas han cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`, `<button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
+  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas${review.capacityPlans?.length ? ` · ${review.capacityPlans.length} ajuste${review.capacityPlans.length===1 ? '' : 's'} de capacidad` : ''} · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length || review.capacityPlans?.some(p=>p.conflict) ? '<div class="notice warning" style="margin-bottom:20px">Algo ha cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}${capacityReview()}`, `<button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
 }
 async function synchronize() {
   const data = await request('/api/sync', { token:review.token }); review = null; render();
-  const result = data.result;
-  showModal(result.failures.length ? 'Sincronización parcial' : result.demo ? 'Simulación completada' : 'Cambios sincronizados', `${result.successes.length} tareas confirmadas${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.`, `${result.failures.length ? `<div class="notice warning">Los cambios pendientes se conservan en local. Vuelve a revisarlos para reintentar solo lo que falta.</div>${result.failures.map(f=>`<p class="inline-error" style="margin-top:15px">#${f.id}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${result.demo ? 'La simulación solo ha actualizado los datos de ejemplo de este equipo.' : 'La copia local refleja los cambios confirmados por Azure DevOps.'}</div>`}`, `${result.failures.length ? '<button class="button primary" data-action="review">Revisar pendientes</button>' : '<button class="button primary" data-action="close">Volver a la planificación</button>'}`);
+  const result = data.result, capacity = result.capacity ?? { successes:[], failures:[] };
+  const failed = result.failures.length + capacity.failures.length;
+  const confirmed = [`${result.successes.length} tarea${result.successes.length===1 ? '' : 's'}`, ...(capacity.successes.length ? [`${capacity.successes.length} ajuste${capacity.successes.length===1 ? '' : 's'} de capacidad`] : [])];
+  showModal(failed ? 'Sincronización parcial' : result.demo ? 'Simulación completada' : 'Cambios sincronizados', `Se han confirmado ${confirmed.join(' y ')}${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.`, `${failed ? `<div class="notice warning">Los cambios pendientes se conservan en local. Vuelve a revisarlos para reintentar solo lo que falta.</div>${result.failures.map(f=>`<p class="inline-error" style="margin-top:15px">#${f.id}: ${escape(f.error)}</p>`).join('')}${capacity.failures.map(f=>`<p class="inline-error" style="margin-top:15px">${escape(f.label)}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${result.demo ? 'La simulación solo ha actualizado los datos de ejemplo de este equipo.' : 'La copia local refleja los cambios confirmados por Azure DevOps.'}</div>`}`, `${failed ? '<button class="button primary" data-action="review">Revisar pendientes</button>' : '<button class="button primary" data-action="close">Volver a la planificación</button>'}`);
 }
 async function importData() {
   showModal('Actualizar desde Azure DevOps', 'Leyendo el equipo y sus tareas.', '<div id="connection-progress"></div>');
@@ -665,9 +750,26 @@ const actions = {
   'discard-all':()=>showModal('Descartar cambios locales', 'Esta acción afecta al borrador de la planificación actual.', '<p>Se recuperarán los valores de la última importación o sincronización. Azure DevOps no se modificará.</p>','<button class="button" data-action="close">Cancelar</button><button class="button danger" data-action="confirm-discard">Descartar borrador</button>'),
   'confirm-discard':async()=>{await request('/api/discard');modal.close();render();toast('Borrador descartado.');},
   'discard-one':async el=>{await request('/api/discard',{id:Number(el.dataset.task)});modal.close();render();toast('Cambios de la tarea deshechos.');},
+  'add-range':async el=>{
+    const owner=el.dataset.owner,ranges=capacityOf(selectedIteration,owner).daysOff,day=freeDay(ranges,selected());
+    await saveCapacity(owner,{daysOff:[...ranges,{start:day,end:day}]},`[data-focus="range:${owner}:${ranges.length}:start"]`);
+  },
+  'remove-range':async el=>{
+    const owner=el.dataset.owner,index=Number(el.dataset.index);
+    await saveCapacity(owner,{daysOff:capacityOf(selectedIteration,owner).daysOff.filter((_,position)=>position!==index)});
+  },
+  'discard-capacity':async()=>{await request('/api/discard-capacity',{iterationId:selectedIteration});review=null;render();toast('Cambios de capacidad deshechos.');},
+  'discard-capacity-entry':async el=>{await request('/api/discard-capacity',{iterationId:selectedIteration,key:el.dataset.owner});review=null;render();},
+  'resolve-capacity-local':el=>resolveCapacity(el.dataset.iteration,el.dataset.owner,'local'),
+  'resolve-capacity-remote':el=>resolveCapacity(el.dataset.iteration,el.dataset.owner,'remote'),
   'resolve-local':el=>resolveTask(Number(el.dataset.task),'local'),
   'resolve-remote':el=>resolveTask(Number(el.dataset.task),'remote'),
 };
+async function resolveCapacity(iterationId,owner,choice) {
+  await request('/api/resolve-capacity',{iterationId,key:owner,choice}); render();
+  if (Object.keys(state.workspace.drafts).length || capacityDraftCount()) await reviewChanges();
+  else { modal.close(); toast('Se ha conservado la capacidad de Azure DevOps.'); }
+}
 async function resolveTask(id,choice) {
   await request('/api/resolve',{id,choice}); render();
   if (Object.keys(state.workspace.drafts).length) await reviewChanges();
@@ -687,7 +789,7 @@ document.addEventListener('keydown', event => {
   const card = event.target.closest('.task-card');
   if (card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
   const tabButton = event.target.closest('[role="tab"]');
-  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['hierarchy','planning','board','list']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:3))%4]; render(); $(`[data-tab="${tab}"]`).focus(); }
+  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['capacity','hierarchy','planning','board','list']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:4))%5]; render(); $(`[data-tab="${tab}"]`).focus(); }
 });
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
@@ -712,6 +814,8 @@ document.addEventListener('change',async event=>{
   const el=event.target;
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
+    if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
+    if(el.dataset.range!==undefined){await saveCapacityRange(el);return;}
     if(el.dataset.participant){const member=el.dataset.participant;await saveParticipation(peopleItem,member,el.checked);[...peoplePopover.querySelectorAll('input[data-participant]')].find(box=>box.dataset.participant===member)?.focus({preventScroll:true});return;}
     if(el.name==='taskIds'){await saveTaskSelection([Number(el.value)],el.checked);return;}
     if(el.id==='toggle-visible'){

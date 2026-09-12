@@ -85,4 +85,26 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   state=await getState();assert.equal(state.version,beforeInvalid);assert.ok(!state.workspace.items.some(i=>i.title==='Invalid assignee'));
   result=await post('/api/discard',{id:created.id});assert.equal(result.response.status,200);assert.ok(!state.workspace.items.some(i=>i.id===created.id));
 
+  const sprint=state.workspace.iterations[0],firstDay=sprint.attributes.startDate.slice(0,10);
+  const baseHours=state.workspace.capacityHours[sprint.id].ana;
+  result=await post('/api/capacity',{iterationId:sprint.id,key:'ana',activities:[{name:'Development',capacityPerDay:10}]});
+  assert.equal(result.response.status,200);assert.equal(state.workspace.capacityHours[sprint.id].ana,baseHours*2);
+  assert.equal(state.workspace.confirmations[sprint.id]?.[member],undefined,'a capacity change reopens the confirmation');
+  result=await post('/api/capacity',{iterationId:sprint.id,key:'team',daysOff:[{start:firstDay,end:firstDay}]});
+  assert.equal(result.response.status,200);assert.equal(state.workspace.capacityHours[sprint.id].ana,baseHours*2-10);
+  result=await post('/api/capacity',{iterationId:sprint.id,key:'ana',activities:[{name:'Development',capacityPerDay:99}]});
+  assert.equal(result.response.status,400);
+  state=await getState();assert.equal(state.workspace.capacityDrafts[sprint.id].ana.activities[0].capacityPerDay,10,'a rejected capacity leaves the draft untouched');
+  result=await post('/api/discard-capacity',{iterationId:sprint.id,key:'ana'});
+  assert.equal(result.response.status,200);assert.equal(state.workspace.capacityDrafts[sprint.id].ana,undefined);
+  assert.ok(state.workspace.capacityDrafts[sprint.id].team,'discarding one person keeps the rest');
+  const capacityDisk=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));
+  assert.deepEqual(capacityDisk.demo.capacityDrafts[sprint.id].team.daysOff,[{start:firstDay,end:firstDay}]);
+  result=await post('/api/review');assert.ok(result.data.review.token);
+  assert.deepEqual(result.data.review.capacityPlans.map(p=>p.key),['team']);
+  result=await post('/api/sync',{token:result.data.review.token});
+  assert.deepEqual(result.data.result.capacity.failures,[]);
+  assert.equal(result.data.result.capacity.successes.length,1);
+  state=await getState();assert.deepEqual(state.workspace.capacityDrafts,{});
+  assert.deepEqual(state.workspace.capacities[sprint.id].daysOff,[{start:firstDay,end:firstDay}]);
 });

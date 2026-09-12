@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation } from './planner.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges } from './planner.js';
 import { createDemo } from './demo.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
@@ -33,6 +33,7 @@ function configFrom(input, requireTeam = true) {
   if (tenant && !/^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$/.test(tenant)) throw fail('El tenant debe ser un identificador de Microsoft Entra válido.');
   return { organization, project, team, authentication, tenant };
 }
+const pendingChanges = workspace => Object.keys(workspace?.drafts || {}).length + capacityChanges(workspace).length;
 const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
 function publicState() {
   const workspace = planner.workspace();
@@ -116,7 +117,7 @@ const server = http.createServer(async (req, res) => {
           const config = configFrom(input.config);
           const data = structuredClone(store.data);
           if (scope(data.config) !== scope(config)) {
-            if (Object.keys(data.azure?.drafts || {}).length) throw fail('Hay cambios pendientes en el equipo anterior. Sincronízalos o descártalos antes de cambiar de equipo.');
+            if (pendingChanges(data.azure)) throw fail('Hay cambios pendientes en el equipo anterior. Sincronízalos o descártalos antes de cambiar de equipo.');
             data.azure = null;
             stateReview = null;
           }
@@ -125,7 +126,7 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/import') {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
-          if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
+          if (pendingChanges(store.data.azure)) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
           const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
           operation = { ...operation, id, message: 'Iniciando importación…' };
           stateReview = null;
@@ -181,6 +182,20 @@ const server = http.createServer(async (req, res) => {
           if (!workspace) throw fail('Importa datos primero.');
           if (!Array.isArray(input.edits) || !input.edits.length || input.edits.length > 200) throw fail('Cambios no válidos.');
           for (const edit of input.edits) stageChanges(workspace, edit.id, edit.changes);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/capacity') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace) throw fail('Importa datos primero.');
+          stageCapacity(workspace, input.iterationId, input);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/discard-capacity') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace) throw fail('No hay planificación.');
+          discardCapacity(workspace, input.iterationId, input.key);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/resolve-capacity') {
+          const data = structuredClone(store.data);
+          resolveCapacityConflict(data[data.mode], input.iterationId, input.key, input.choice);
           await store.save(data); planner.review = null;
         } else if (path === '/api/discard') {
           const data = structuredClone(store.data), workspace = data[data.mode];

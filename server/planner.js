@@ -44,7 +44,7 @@ export function discardLocal(workspace,id) {
   if (ids.some(id=>workspace.creationAttempts?.[id])) throw new Error('Hay una creación enviada sin confirmar. Revisa y recupera su resultado antes de descartarla.');
   if (id<0 && workspace.items.some(i=>i.parent===id)) throw new Error('Descarta primero los elementos hijos nuevos.');
   workspace.items=workspace.items.filter(i=>!(i.localOnly && ids.includes(i.id)));
-  if(id===undefined){workspace.drafts={};workspace.conflicts={};}
+  if(id===undefined){workspace.drafts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};}
   else {delete workspace.drafts[id];delete workspace.conflicts[id];}
   for(const localId of ids) if(localId<0){delete workspace.participants?.[localId];delete workspace.participantExclusions?.[localId];}
 }
@@ -169,8 +169,139 @@ export function workingCapacity(iteration, capacity, memberId, workingDays = [1,
   return Math.round(count * (record.activities ?? []).reduce((sum, a) => sum + (a.capacityPerDay ?? 0), 0) * 100) / 100;
 }
 
+// Capacity is staged like a work item: only what differs from the imported copy
+// is kept, so undoing an edit leaves nothing pending. Each entry is keyed by the
+// team member id, or by 'team' for the days off shared by the whole team.
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const dayOf = value => value instanceof Date ? value.toISOString().slice(0,10) : typeof value === 'string' ? value.slice(0,10) : '';
+const entryOf = value => ({
+  activities: (value?.activities ?? []).map(a => ({ name: (a.name ?? '').trim(), capacityPerDay: Number(a.capacityPerDay ?? 0) })).sort((a, b) => a.name.localeCompare(b.name)),
+  daysOff: (value?.daysOff ?? []).map(r => ({ start: dayOf(r.start), end: dayOf(r.end) })).sort((a, b) => a.start.localeCompare(b.start)),
+});
+export const sameCapacity = (a, b) => JSON.stringify(entryOf(a)) === JSON.stringify(entryOf(b));
+export function capacityEntry(capacity, key) {
+  return entryOf(key === 'team' ? { daysOff: capacity?.daysOff } : capacity?.teamMembers?.find(m => m.teamMember?.id === key));
+}
+function validActivities(value) {
+  if (!Array.isArray(value) || value.length > 20) throw new Error('Indica hasta 20 actividades por persona.');
+  const activities = value.map(activity => {
+    const name = typeof activity?.name === 'string' ? activity.name.trim() : '';
+    const hours = activity?.capacityPerDay;
+    if (name.length > 128) throw new Error('El nombre de la actividad es demasiado largo.');
+    if (typeof hours !== 'number' || !Number.isFinite(hours) || hours < 0 || hours > 24) throw new Error('Indica entre 0 y 24 horas por día.');
+    return { name, capacityPerDay: Math.round(hours * 100) / 100 };
+  });
+  if (new Set(activities.map(a => a.name.toLowerCase())).size !== activities.length) throw new Error('No repitas la misma actividad.');
+  return activities;
+}
+function validDaysOff(value, iteration) {
+  if (!Array.isArray(value) || value.length > 100) throw new Error('Indica hasta 100 rangos de días libres.');
+  const ranges = value.map(range => {
+    const start = dayOf(range?.start), end = dayOf(range?.end);
+    if (!DAY.test(start) || !DAY.test(end) || !Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end))) throw new Error('Indica las fechas de los días libres con el formato AAAA-MM-DD.');
+    if (end < start) throw new Error('El último día libre no puede ser anterior al primero.');
+    return { start, end };
+  }).sort((a, b) => a.start.localeCompare(b.start));
+  for (let i = 1; i < ranges.length; i++) if (ranges[i].start <= ranges[i-1].end) throw new Error('Los rangos de días libres no pueden solaparse.');
+  // Azure only accepts days off inside the iteration, and days outside it would
+  // not change the capacity either.
+  const first = dayOf(iteration.attributes?.startDate), last = dayOf(iteration.attributes?.finishDate);
+  if (DAY.test(first) && DAY.test(last) && ranges.some(r => r.start < first || r.end > last)) throw new Error(`Los días libres deben estar dentro de «${iteration.name}» (del ${first} al ${last}).`);
+  return ranges;
+}
+export function stageCapacity(workspace, iterationId, change) {
+  if (!workspace) throw new Error('Importa una planificación primero.');
+  const iteration = workspace.iterations.find(i => i.id === iterationId);
+  if (!iteration) throw new Error('Elige una iteración del equipo.');
+  const key = change?.key;
+  if (key !== 'team' && !workspace.members.some(m => m.id === key)) throw new Error('Elige una persona del equipo.');
+  if (!change || (change.activities === undefined && change.daysOff === undefined)) throw new Error('Indica algún cambio de capacidad.');
+  const base = capacityEntry(workspace.capacities?.[iterationId], key);
+  const current = workspace.capacityDrafts?.[iterationId]?.[key] ?? base;
+  // Only what this change carries is validated: values kept from Azure or from
+  // an earlier draft must not block an unrelated edit.
+  const next = {
+    activities: key === 'team' ? [] : change.activities === undefined ? entryOf(current).activities : validActivities(change.activities),
+    daysOff: change.daysOff === undefined ? entryOf(current).daysOff : validDaysOff(change.daysOff, iteration),
+  };
+  workspace.capacityDrafts ??= {};
+  const drafts = { ...workspace.capacityDrafts[iterationId] };
+  if (sameCapacity(next, base)) delete drafts[key]; else drafts[key] = next;
+  if (Object.keys(drafts).length) workspace.capacityDrafts[iterationId] = drafts; else delete workspace.capacityDrafts[iterationId];
+  clearCapacityConflict(workspace, iterationId, key);
+}
+function clearCapacityConflict(workspace, iterationId, key) {
+  const conflicts = workspace.capacityConflicts?.[iterationId];
+  if (!conflicts) return;
+  delete conflicts[key];
+  if (!Object.keys(conflicts).length) delete workspace.capacityConflicts[iterationId];
+}
+export function discardCapacity(workspace, iterationId, key) {
+  if (!workspace) throw new Error('No hay planificación.');
+  if (iterationId === undefined) { workspace.capacityDrafts = {}; workspace.capacityConflicts = {}; return; }
+  if (!workspace.iterations.some(i => i.id === iterationId)) throw new Error('Elige una iteración del equipo.');
+  if (key === undefined) { delete workspace.capacityDrafts?.[iterationId]; delete workspace.capacityConflicts?.[iterationId]; return; }
+  const drafts = workspace.capacityDrafts?.[iterationId];
+  if (!drafts?.[key]) throw new Error('No hay cambios de capacidad pendientes para esta persona.');
+  delete drafts[key];
+  if (!Object.keys(drafts).length) delete workspace.capacityDrafts[iterationId];
+  clearCapacityConflict(workspace, iterationId, key);
+}
+export function capacityChanges(workspace) {
+  return Object.entries(workspace?.capacityDrafts ?? {}).flatMap(([iterationId, drafts]) => Object.entries(drafts).map(([key, entry]) => ({ iterationId, key, entry })));
+}
+export function effectiveCapacity(workspace, iterationId) {
+  const base = workspace.capacities?.[iterationId] ?? {};
+  const drafts = workspace.capacityDrafts?.[iterationId];
+  if (!drafts) return base;
+  const teamMembers = (base.teamMembers ?? []).map(record => drafts[record.teamMember?.id] ? { ...record, ...drafts[record.teamMember.id] } : record);
+  for (const [key, entry] of Object.entries(drafts)) {
+    // A person without capacity in Azure has no record to edit until now.
+    if (key === 'team' || teamMembers.some(record => record.teamMember?.id === key)) continue;
+    const member = workspace.members.find(m => m.id === key);
+    teamMembers.push({ teamMember: { id: key, displayName: member?.displayName, uniqueName: member?.uniqueName }, ...entry });
+  }
+  return { ...base, teamMembers, daysOff: drafts.team?.daysOff ?? base.daysOff ?? [] };
+}
+export function planCapacityReview(workspace, remotes) {
+  return capacityChanges(workspace).map(({ iterationId, key, entry }) => {
+    const remote = capacityEntry(remotes?.[iterationId], key), original = capacityEntry(workspace.capacities?.[iterationId], key);
+    return {
+      iterationId, key, iteration: workspace.iterations.find(i => i.id === iterationId)?.name ?? iterationId,
+      label: key === 'team' ? 'Días libres del equipo' : workspace.members.find(m => m.id === key)?.displayName ?? key,
+      remote, original, after: entry,
+      conflict: !sameCapacity(remote, original) && !sameCapacity(remote, entry),
+      applied: sameCapacity(remote, entry),
+    };
+  });
+}
+export function applyCapacity(workspace, iterationId, key, entry) {
+  workspace.capacities ??= {};
+  const capacity = { teamMembers: [], daysOff: [], ...workspace.capacities[iterationId] };
+  if (key === 'team') capacity.daysOff = entry.daysOff;
+  else {
+    const record = capacity.teamMembers.find(m => m.teamMember?.id === key);
+    const member = workspace.members.find(m => m.id === key);
+    if (record) Object.assign(record, { activities: entry.activities, daysOff: entry.daysOff });
+    else capacity.teamMembers = [...capacity.teamMembers, { teamMember: { id: key, displayName: member?.displayName, uniqueName: member?.uniqueName }, ...entry }];
+  }
+  workspace.capacities[iterationId] = capacity;
+  const drafts = workspace.capacityDrafts?.[iterationId];
+  if (drafts) { delete drafts[key]; if (!Object.keys(drafts).length) delete workspace.capacityDrafts[iterationId]; }
+  clearCapacityConflict(workspace, iterationId, key);
+}
+export function resolveCapacityConflict(workspace, iterationId, key, choice) {
+  const remote = workspace?.capacityConflicts?.[iterationId]?.[key];
+  if (!remote) throw new Error('Revisa los cambios para obtener la capacidad actual de Azure DevOps.');
+  if (!['remote', 'local'].includes(choice)) throw new Error('Resolución inválida.');
+  const mine = workspace.capacityDrafts?.[iterationId]?.[key];
+  applyCapacity(workspace, iterationId, key, remote);
+  if (choice === 'local' && mine) stageCapacity(workspace, iterationId, { key, ...mine });
+}
+
 export function planningWorkspace(workspace) {
-  return {...workspace,effectiveItems:effectiveItems(workspace),capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,workspace.capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
+  const capacities = Object.fromEntries(workspace.iterations.map(i => [i.id, effectiveCapacity(workspace, i.id)]));
+  return {...workspace,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 export function confirmPerson(workspace, member, iterationId) {
   if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
@@ -219,7 +350,8 @@ export class Planner {
     if (!workspace) throw new Error('Importa una planificación primero.');
     const ids = Object.keys(workspace.drafts).map(Number);
     const creations=effectiveItems(workspace).filter(i=>i.localOnly).sort((a,b)=>b.id-a.id);
-    if (!ids.length) throw new Error('No hay cambios pendientes.');
+    const capacityIterations = [...new Set(capacityChanges(workspace).map(change => change.iterationId))];
+    if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
     const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.azure.getItems(workspace.config, ids.filter(id=>id>0));
     const plans = planReview(workspace, remoteItems);
@@ -227,17 +359,21 @@ export class Planner {
     const parents=workspace.mode==='demo' ? workspace.items.filter(i=>parentIds.includes(i.id)) : await this.azure.getItems(workspace.config,parentIds);
     if(parentIds.some(id=>!parents.find(i=>i.id===id))) throw new Error('No se pudo comprobar el padre. No se enviará ningún cambio.');
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
+    const remoteCapacities = {};
+    for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId);
+    const capacityPlans = planCapacityReview(workspace, remoteCapacities);
     const data = structuredClone(this.store.data);
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
+    data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents };
-    return { ...this.review, token: plans.some(p => p.conflicts.length) ? null : this.review.token };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, capacityPlans };
+    return { ...this.review, token: plans.some(p => p.conflicts.length) || capacityPlans.some(p => p.conflict) ? null : this.review.token };
   }
   async sync(token) {
     const review = this.review;
     if (!review || !token || review.token !== token || review.version !== this.store.data.version) throw new Error('La revisión ha caducado. Revisa los cambios de nuevo.');
     this.review = null;
-    if (review.plans.some(p => p.conflicts.length)) throw new Error('Resuelve los conflictos antes de sincronizar.');
+    if (review.plans.some(p => p.conflicts.length) || (review.capacityPlans ?? []).some(p => p.conflict)) throw new Error('Resuelve los conflictos antes de sincronizar.');
     const workspace = this.workspace();
     if (workspace.mode === 'azure') {
       await this.azure.open(workspace.config);
@@ -287,6 +423,34 @@ export class Planner {
       await this.store.save(data);
       successes.push(plan.id);
     }
-    return { successes, failures, demo: workspace.mode === 'demo' };
+    const capacity = await this.syncCapacity(review, workspace);
+    return { successes, failures, capacity, demo: workspace.mode === 'demo' };
+  }
+  // Capacity has no revision number, so the value read during the review acts as
+  // the expected state and is checked again just before writing.
+  async syncCapacity(review, workspace) {
+    const successes = [], failures = [];
+    const byIteration = new Map();
+    for (const plan of review.capacityPlans ?? []) byIteration.set(plan.iterationId, [...(byIteration.get(plan.iterationId) ?? []), plan]);
+    for (const [iterationId, plans] of byIteration) {
+      let current;
+      try { current = workspace.mode === 'demo' ? this.workspace().capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId); }
+      catch (error) { for (const plan of plans) failures.push({ label: `${plan.iteration} · ${plan.label}`, error: error.message }); continue; }
+      for (const plan of plans) {
+        try {
+          if (!sameCapacity(capacityEntry(current, plan.key), plan.remote)) throw new Error('La capacidad ha cambiado en Azure DevOps desde la revisión. Revisa de nuevo antes de sincronizar.');
+          const confirmed = workspace.mode === 'demo' || plan.applied ? plan.after
+            : plan.key === 'team' ? await this.azure.updateTeamDaysOff(workspace.config, iterationId, plan.after.daysOff)
+            : await this.azure.updateMemberCapacity(workspace.config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
+          if (!sameCapacity(confirmed, plan.after)) throw new Error('La respuesta no confirma la capacidad enviada. Vuelve a revisarla.');
+          const data = structuredClone(this.store.data), next = data[data.mode];
+          applyCapacity(next, iterationId, plan.key, plan.after);
+          next.lastSyncedAt = new Date().toISOString();
+          await this.store.save(data);
+          successes.push(`${plan.iteration} · ${plan.label}`);
+        } catch (error) { failures.push({ label: `${plan.iteration} · ${plan.label}`, error: error.message }); }
+      }
+    }
+    return { successes, failures };
   }
 }

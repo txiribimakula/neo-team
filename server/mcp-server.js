@@ -68,6 +68,25 @@ server.tool('neo_team_days_off', 'Read team-wide days off for an iteration.', {
   const api = await (await connectionProvider()).getWorkApi();
   return { content: [{ type: 'text', text: JSON.stringify(await api.getTeamDaysOff({ project, team }, iterationId)) }] };
 });
+// Capacity writes replace the complete value of one member, or the team-wide
+// days off, so a stale partial patch cannot mix with what Azure already has.
+const dayRange = z.object({ start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
+const asDates = ranges => ranges.map(({ start, end }) => ({ start: new Date(`${start}T00:00:00Z`), end: new Date(`${end}T00:00:00Z`) }));
+server.tool('neo_team_capacity_write', 'Replace the activities and days off of one team member in an iteration.', {
+  project: z.string().min(1), team: z.string().min(1), iterationId: z.string().min(1), teamMemberId: z.string().min(1),
+  activities: z.array(z.object({ name: z.string().max(128), capacityPerDay: z.number().min(0).max(24) })).max(20),
+  daysOff: z.array(dayRange).max(100),
+}, async ({ project, team, iterationId, teamMemberId, activities, daysOff }) => {
+  const api = await (await connectionProvider()).getWorkApi();
+  const updated = await api.updateCapacityWithIdentityRef({ activities, daysOff: asDates(daysOff) }, { project, team }, iterationId, teamMemberId);
+  return { content: [{ type: 'text', text: JSON.stringify(updated) }] };
+});
+server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an iteration.', {
+  project: z.string().min(1), team: z.string().min(1), iterationId: z.string().min(1), daysOff: z.array(dayRange).max(100),
+}, async ({ project, team, iterationId, daysOff }) => {
+  const api = await (await connectionProvider()).getWorkApi();
+  return { content: [{ type: 'text', text: JSON.stringify(await api.updateTeamDaysOff({ daysOff: asDates(daysOff) }, { project, team }, iterationId)) }] };
+});
 // Atomic creation includes the parent link and a recovery tag in the same request.
 server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {
   project:z.string().min(1), type:z.enum(['Epic','Feature','User Story','Task','Bug']),

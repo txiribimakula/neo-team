@@ -54,7 +54,7 @@ export class AzureGateway {
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_work_item_states']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -98,6 +98,20 @@ export class AzureGateway {
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
   }
+  async capacity(config, iterationId) {
+    const context = { project: config.project, team: config.team };
+    const capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId });
+    const daysOff = await this.call('neo_team_days_off', { ...context, iterationId });
+    return { ...capacity, daysOff: daysOff.daysOff ?? [] };
+  }
+  async updateMemberCapacity(config, iterationId, teamMemberId, activities, daysOff) {
+    const raw = await this.call('neo_team_capacity_write', { project: config.project, team: config.team, iterationId, teamMemberId, activities, daysOff });
+    return { activities: raw.activities ?? [], daysOff: raw.daysOff ?? [] };
+  }
+  async updateTeamDaysOff(config, iterationId, daysOff) {
+    const raw = await this.call('neo_team_days_off_write', { project: config.project, team: config.team, iterationId, daysOff });
+    return { activities: [], daysOff: raw.daysOff ?? [] };
+  }
   async import(config, onProgress = () => {}, stateRules = []) {
     let counts = {};
     const report = (phase, message, updates = {}) => {
@@ -140,9 +154,7 @@ export class AzureGateway {
       addRelations(await this.call('wit_work_item', { action: 'list_for_iteration', ...context, iterationId: iteration.id }));
       report('capacity', `Obteniendo capacidad y días libres de «${iteration.name}»…`, { discovered: ids.size });
       try {
-        const capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId: iteration.id });
-        const daysOff = await this.call('neo_team_days_off', { ...context, iterationId: iteration.id });
-        capacities[iteration.id] = { ...capacity, daysOff: daysOff.daysOff ?? [] };
+        capacities[iteration.id] = await this.capacity(config, iteration.id);
       } catch { warnings.push(`No se pudo consultar la capacidad completa de «${iteration.name}». Se mostrará como desconocida.`); }
       report('capacity', `Iteración «${iteration.name}» consultada.`, { iterationsRead: counts.iterationsRead + 1, capacities: Object.keys(capacities).length, warnings: warnings.length });
     }
