@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Organiza las iteraciones de tu equipo en local y revisa los cambios antes de sincronizarlos con Azure DevOps.">
+  <title>Neo Team · Planificador de iteraciones</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+
+    <div class="workspace">
+      <header class="topbar"><div class="product-name">neo<span>team</span><span class="divider">/</span><span class="workspace-label">Planificación</span></div><div class="header-actions"><span id="save-status" role="status"></span><button class="button subtle" id="connection-button">Conectar Azure DevOps</button></div></header>
+      <main id="app" aria-label="Planificación"></main>
+    </div>
+  </div>
+  <div id="people-popover" popover="auto" role="group" aria-label="Personas de la rama"></div>
+  <dialog id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

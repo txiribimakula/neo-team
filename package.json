@@ -1,0 +1,20 @@
+{
+  "name": "neo-team",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Planificación local de iteraciones con Azure DevOps MCP",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node --watch server/index.js",
+    "start": "node server/index.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check server/index.js && node --check server/azure.js && node --check server/planner.js && node --check dist/app.js"
+  },
+  "dependencies": {
+    "@azure-devops/mcp": "2.10.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "azure-devops-node-api": "15.1.2",
+    "zod": "3.25.76"
+  }
+}

@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { once } from 'node:events';
+import { request as httpRequest } from 'node:http';
+
+test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF and stale-write protection',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'neo-http-'));
+  const port=14319;
+  const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,NEO_TEAM_PORT:String(port),NEO_TEAM_DATA_DIR:directory},stdio:['ignore','pipe','pipe']});
+  t.after(async()=>{if(child.exitCode===null){child.kill('SIGTERM');await once(child,'exit');}await rm(directory,{recursive:true,force:true});});
+  await new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(new Error('Server did not start')),10000);
+    child.stdout.on('data',chunk=>{if(chunk.toString().includes('Neo Team:')){clearTimeout(timeout);resolve();}});
+    child.once('exit',code=>{clearTimeout(timeout);reject(new Error(`Server exited ${code}`));});
+  });
+  const url=`http://127.0.0.1:${port}`;
+  const getState=async()=> (await fetch(url+'/api/state')).json();
+  let state=await getState();assert.equal(state.workspace,null);
+  const post=async(path,input={},version=state.version)=>{
+    const response=await fetch(url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Neo-CSRF':state.csrf},body:JSON.stringify({...input,version})});
+    const data=await response.json();if(data.state)state=data.state;else if(data.csrf)state=data;
+    return {response,data};
+  };
+  let result=await post('/api/config',{config:{organization:'https://dev.azure.com/example',project:'Project',team:'Team',authentication:'interactive'}});
+  assert.equal(result.response.status,200);assert.equal(state.config.organization,'example');
+  assert.equal(state.workspace,null,'configuration makes no calls to Azure');
+  result=await post('/api/mode',{mode:'demo'});assert.equal(result.response.status,200);assert.equal(state.mode,'demo');
+  const oldVersion=state.version;
+  result=await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:24}},{id:1045,changes:{priority:1}}]});assert.equal(result.response.status,200);
+  assert.equal(state.workspace.effectiveItems.find(i=>i.id===1042).remainingWork,24);
+  result=await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:1}}]},oldVersion);assert.equal(result.response.status,409);
+  result=await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:30}},{id:99999,changes:{priority:1}}]});assert.equal(result.response.status,400);
+  state=await getState();assert.equal(state.workspace.effectiveItems.find(i=>i.id===1042).remainingWork,24,'an invalid batch does not partially apply');
+  const malicious=await fetch(url+'/api/stage',{method:'POST',headers:{'Content-Type':'application/json','Origin':'https://evil.example','X-Neo-CSRF':state.csrf},body:JSON.stringify({version:state.version,edits:[]})});assert.equal(malicious.status,403);
+  const noCsrf=await fetch(url+'/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(noCsrf.status,403);
+  const rebindingStatus=await new Promise((resolve,reject)=>{
+    const req=httpRequest(url+'/api/state',{headers:{Host:`evil.example:${port}`}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.end();
+  });assert.equal(rebindingStatus,403);
+  const exported=await (await fetch(url+'/api/export')).json();assert.equal(exported.workspace.drafts[1042].remainingWork,24);
+  result=await post('/api/review');assert.ok(result.data.review.token);
+  result=await post('/api/sync',{token:result.data.review.token});assert.deepEqual(result.data.result.successes,[1042,1045]);assert.equal(result.data.result.demo,true);
+  assert.deepEqual(state.workspace.drafts,{});
+  await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:26}}]});
+  await post('/api/mode',{mode:'azure'});assert.equal(state.workspace,null);
+  await post('/api/mode',{mode:'demo'});assert.equal(state.workspace.drafts[1042].remainingWork,26,'switching workspaces retains the draft');
+  result=await post('/api/participants',{assignments:[{id:1001,members:['ana@example.test','marcos@example.test']}]});
+  assert.equal(result.response.status,200);
+  result=await post('/api/plan-tasks',{member:'ana@example.test',ids:[1053],iterationId:'sprint-24'});
+  assert.equal(result.response.status,200);assert.equal(state.workspace.drafts[1053].assignedTo,'ana@example.test');
+  const undo=result.data.undo;assert.ok(undo.token);
+  result=await post('/api/plan-tasks',{member:'marcos@example.test',ids:[1053],iterationId:'sprint-24'});
+  assert.equal(result.response.status,400,'shared eligibility must not silently take another owner task');
+  result=await post('/api/undo-plan',{token:undo.token});assert.equal(result.response.status,200);assert.equal(state.workspace.drafts[1053],undefined);
+  state=await getState();assert.deepEqual(state.workspace.participants[1001],['ana@example.test','marcos@example.test']);
+  result=await post('/api/task-selection',{member:'ana@example.test',ids:[1053],iterationId:'sprint-24',selected:true});assert.equal(result.response.status,200);
+  state=await getState();assert.equal(state.workspace.effectiveItems.find(i=>i.id===1053).assignedTo,'ana@example.test');
+  result=await post('/api/task-selection',{member:'ana@example.test',ids:[1053],iterationId:'sprint-24',selected:false});assert.equal(result.response.status,200);
+  state=await getState();assert.equal(state.workspace.effectiveItems.find(i=>i.id===1053).assignedTo,'');
+  result=await post('/api/participation',{id:1001,member:'ana@example.test',selected:false,iterationId:'sprint-24'});assert.equal(result.response.status,200);
+  state=await getState();assert.ok(state.workspace.participantExclusions[1001].includes('ana@example.test'));assert.ok(state.workspace.participants[1001].includes('marcos@example.test'));
+  assert.equal(state.workspace.effectiveItems.find(i=>i.id===1042).assignedTo,'');
+  const moduleResponse=await fetch(url+'/hierarchy.js');assert.equal(moduleResponse.status,200);
+  const saved=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));assert.equal(saved.demo.drafts[1042].remainingWork,26);assert.equal(saved.config.project,'Project');
+});

@@ -1,0 +1,6 @@
+node_modules/
+.neo-team/
+.env
+.DS_Store
+.sites-runtime/
+coverage/

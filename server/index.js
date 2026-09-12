@@ -1,0 +1,145 @@
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { LocalStore } from './store.js';
+import { AzureGateway } from './azure.js';
+import { Planner, effectiveItems, stageChanges, resolveConflict, workingCapacity, setParticipants, selectTasks, toggleParticipation } from './planner.js';
+import { createDemo } from './demo.js';
+
+const root = fileURLToPath(new URL('../dist/', import.meta.url));
+const port = Number(process.env.NEO_TEAM_PORT || 4310);
+const types = { html: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8', svg: 'image/svg+xml' };
+const store = new LocalStore(resolve(process.env.NEO_TEAM_DATA_DIR || fileURLToPath(new URL('../.neo-team/', import.meta.url))));
+await store.load();
+const azure = new AzureGateway(), planner = new Planner(store, azure);
+const csrf = randomBytes(32).toString('hex');
+let busy = false;
+const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
+function configFrom(input, requireTeam = true) {
+  let organization = String(input?.organization || '').trim();
+  if (organization.startsWith('https://dev.azure.com/')) organization = organization.replace(/^https:\/\/dev\.azure\.com\//,'').replace(/\/$/,'');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization)) throw fail('Indica el nombre de tu organización o su URL https://dev.azure.com/organización.');
+  const project = String(input?.project || '').trim(), team = String(input?.team || '').trim();
+  if (requireTeam && (!project || !team || project.length > 200 || team.length > 200)) throw fail('Indica un proyecto y un equipo válidos.');
+  const authentication = input?.authentication || 'interactive';
+  if (!['interactive', 'azcli'].includes(authentication)) throw fail('Método de autenticación no válido.');
+  const tenant = String(input?.tenant || '').trim();
+  if (tenant && !/^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$/.test(tenant)) throw fail('El tenant debe ser un identificador de Microsoft Entra válido.');
+  return { organization, project, team, authentication, tenant };
+}
+const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
+function publicState() {
+  const workspace = planner.workspace();
+  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy,
+    workspace: workspace ? { ...workspace, effectiveItems: effectiveItems(workspace), capacityHours: Object.fromEntries(workspace.iterations.map(i => [i.id, Object.fromEntries(workspace.members.map(m => [m.id, workingCapacity(i, workspace.capacities[i.id], m.id, workspace.settings.workingDays)]))])) } : null };
+}
+async function body(req) {
+  if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Se requiere JSON.', 415);
+  let text = '';
+  for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 100000) throw fail('Petición demasiado grande.', 413); }
+  try { return JSON.parse(text || '{}'); } catch { throw fail('JSON no válido.'); }
+}
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  try {
+    const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+    if (!allowedHosts.includes(req.headers.host)) throw fail('Host no permitido.', 403);
+    if (req.headers.origin && !allowedHosts.map(h=>`http://${h}`).includes(req.headers.origin)) throw fail('Origen no permitido.', 403);
+    const path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
+    if (req.method === 'GET' && path === '/api/state') return json(res, publicState());
+    if (req.method === 'GET' && path === '/api/export') {
+      res.setHeader('Content-Disposition', 'attachment; filename="neo-team-planificacion.json"');
+      return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
+    }
+    if (req.method === 'POST' && path.startsWith('/api/')) {
+      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      const input = await body(req);
+      if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
+      if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
+      busy = true;
+      try {
+        if (path === '/api/projects') {
+          await azure.open(configFrom(input.config, false));
+          return json(res, { projects: await azure.projects() });
+        }
+        if (path === '/api/teams') {
+          const config = configFrom(input.config, false);
+          if (!config.project) throw fail('Indica el proyecto.');
+          await azure.open(config);
+          return json(res, { teams: await azure.teams(config.project) });
+        }
+        if (path === '/api/config') {
+          const config = configFrom(input.config);
+          const data = structuredClone(store.data);
+          if (scope(data.config) !== scope(config)) {
+            if (Object.keys(data.azure?.drafts || {}).length) throw fail('Hay cambios pendientes en el equipo anterior. Sincronízalos o descártalos antes de cambiar de equipo.');
+            data.azure = null;
+          }
+          data.config = config;
+          if (data.azure) data.azure.config = config;
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/import') {
+          if (!store.data.config) throw fail('Configura Azure DevOps primero.');
+          if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
+          const workspace = await azure.import(store.data.config);
+          workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
+          workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
+          const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/mode') {
+          if (!['demo', 'azure'].includes(input.mode)) throw fail('Modo no válido.');
+          const data = structuredClone(store.data); data.mode = input.mode;
+          if (input.mode === 'demo' && !data.demo) data.demo = createDemo();
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/task-selection' || path === '/api/participation') {
+          const data=structuredClone(store.data),workspace=data[data.mode];
+          if(path==='/api/task-selection') selectTasks(workspace,input.member,input.ids,input.iterationId,input.selected);
+          else toggleParticipation(workspace,input.id,input.member,input.selected,input.iterationId);
+          await store.save(data);planner.review=null;
+        } else if (path === '/api/plan-tasks') {
+          const undo=await planner.planBatch(input.member,input.ids,input.iterationId);
+          return json(res,{state:publicState(),undo});
+        } else if (path === '/api/undo-plan') {
+          await planner.undoPlan(input.token);
+        } else if (path === '/api/participants') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          setParticipants(workspace, input.assignments);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/stage') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace) throw fail('Importa datos primero.');
+          if (!Array.isArray(input.edits) || !input.edits.length || input.edits.length > 200) throw fail('Cambios no válidos.');
+          for (const edit of input.edits) stageChanges(workspace, edit.id, edit.changes);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/discard') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace) throw fail('No hay planificación.');
+          if (input.id !== undefined) { delete workspace.drafts[input.id]; delete workspace.conflicts[input.id]; }
+          else { workspace.drafts = {}; workspace.conflicts = {}; }
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/resolve') {
+          const data = structuredClone(store.data);
+          resolveConflict(data[data.mode], input.id, input.choice);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/review') return json(res, { review: await planner.prepareReview(), state: publicState() });
+        else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState() });
+        else throw fail('Operación no encontrada.', 404);
+        return json(res, publicState());
+      } finally { busy = false; }
+    }
+    if (req.method !== 'GET') throw fail('Método no permitido.', 405);
+    const file = path === '/' ? 'index.html' : path.slice(1);
+    if (!['index.html', 'app.js', 'hierarchy.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    res.setHeader('Content-Type', types[file.split('.').at(-1)]);
+    res.end(await readFile(root + file));
+  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.' }, error.status || 400); }
+});
+server.listen(port, '127.0.0.1', () => console.log(`Neo Team: http://127.0.0.1:${port}`));
+async function shutdown() { server.close(); await azure.close(); process.exit(0); }
+process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
