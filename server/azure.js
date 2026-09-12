@@ -27,6 +27,16 @@ function normalizeIteration(iteration, project, label) {
   return { ...iteration, path };
 }
 
+function isPastIteration(iteration, today) {
+  const { timeFrame, finishDate } = iteration?.attributes || {};
+  if (timeFrame === 0 || String(timeFrame).toLowerCase() === 'past') return true;
+  if ([1, 2, 'current', 'future'].includes(typeof timeFrame === 'string' ? timeFrame.toLowerCase() : timeFrame)) return false;
+  // Dates in Azure iteration metadata are calendar dates, with an inclusive end.
+  // Keep undated iterations: they cannot reliably be classified as historical.
+  const finish = typeof finishDate === 'string' ? finishDate.slice(0, 10) : '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(finish) && Number.isFinite(Date.parse(finish)) && finish < today;
+}
+
 export class AzureGateway {
   async open(config) {
     const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
@@ -104,8 +114,9 @@ export class AzureGateway {
     report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
-    const iterations = rawIterations.map(iteration => normalizeIteration(iteration, config.project, 'una iteración del equipo'));
-    report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length });
+    const today = new Date().toISOString().slice(0, 10);
+    const iterations = rawIterations.filter(iteration => !isPastIteration(iteration, today)).map(iteration => normalizeIteration(iteration, config.project, 'una iteración del equipo'));
+    report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
     const members = await this.call('neo_team_members', context);
     if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
     report('backlogs', 'Consultando los niveles de backlog…', { members: members.length });

@@ -38,7 +38,7 @@ Abre **http://127.0.0.1:4310**. Para desarrollar, `npm run dev` reinicia el serv
 - Sincroniza únicamente los campos editados: `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority` y `Microsoft.VSTS.Scheduling.RemainingWork`.
 - Las tarjetas se ordenan por prioridad e identificador. Mover una tarjeta cambia su asignación e iteración; no escribe el orden de Azure (`StackRank`). El reparto de participantes no crea cambios remotos en los padres. Solo las tareas y bugs elegidos pasan al borrador de la iteración.
 - Esta versión no crea ni elimina work items ni modifica capacidades, estados, fechas de iteración o relaciones. **Actualizar datos** requiere sincronizar o descartar el borrador previo.
-- La importación consulta todas las iteraciones asignadas al equipo y recorre las tareas sin un límite silencioso. En equipos con muchos años de iteraciones puede tardar varios minutos. Un fallo de importación conserva la copia anterior.
+- La importación excluye las iteraciones pasadas antes de consultar sus tareas y capacidades. Mantiene la actual, las futuras y las que no tienen fechas suficientes para clasificarlas; el progreso indica cuántas anteriores se han excluido. Recorre las tareas sin un límite silencioso. Un fallo de importación conserva la copia anterior.
 
 ## MCP y autenticación
 

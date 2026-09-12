@@ -42,7 +42,7 @@ test('import uses MCP for complete members, hierarchy, capacities and team scope
   assert.deepEqual([...new Set(progress.map(p=>p.phase))],['connection','settings','iterations','members','backlogs','capacity','items','parents','saving']);
   assert.deepEqual(progress[0].counts,{},'earlier progress snapshots must not change');
   assert.ok(progress.some(p=>p.phase==='items' && p.counts.discovered===3),'new child discoveries update the total');
-  assert.deepEqual(progress.at(-1).counts,{settings:1,iterations:1,members:1,backlogs:1,backlogTotal:1,discovered:3,capacities:1,iterationsRead:1,warnings:1,read:3,imported:3,parents:1,excluded:0});
+  assert.deepEqual(progress.at(-1).counts,{settings:1,iterations:1,iterationsExcluded:0,members:1,backlogs:1,backlogTotal:1,discovered:3,capacities:1,iterationsRead:1,warnings:1,read:3,imported:3,parents:1,excluded:0});
 });
 test('real bundled MCP initializes and advertises the required schemas without authentication',async t=>{
   const gateway=new AzureGateway();t.after(()=>gateway.close());
@@ -140,4 +140,30 @@ test('import excludes completed and removed custom states while keeping open chi
   const completeCall=gateway.call;
   gateway.call=async(name,args)=>name==='neo_work_item_states' ? null : completeCall(name,args);
   await assert.rejects(()=>gateway.import(config),/consultar los estados/);
+});
+
+test('import skips past iterations before requesting their tasks, capacity or holidays',async()=>{
+  const today=new Date().toISOString().slice(0,10);
+  const yesterday=new Date(Date.parse(today)-86400000).toISOString();
+  const tomorrow=new Date(Date.parse(today)+86400000).toISOString();
+  const definitions=[
+    ['past-text',{timeFrame:'past'}],['past-number',{timeFrame:0}],
+    ['past-date',{finishDate:yesterday}],
+    ['current-text',{timeFrame:'current'}],['current-number',{timeFrame:1}],
+    ['future-text',{timeFrame:'future'}],['future-number',{timeFrame:2}],
+    ['ends-today',{finishDate:today+'T00:00:00Z'}],['future-date',{finishDate:tomorrow}],
+    ['undated',{}],
+  ];
+  const iterations=definitions.map(([id,attributes])=>({id,name:id,path:`Project\\${id}`,attributes}));
+  const gateway=backlogGateway({iterations}),base=gateway.call,calls=[],progress=[];
+  gateway.call=async(name,args)=>{calls.push({name,args});return base(name,args);};
+  const result=await gateway.import({organization:'org',project:'Project',team:'Team'},p=>progress.push(p));
+  const expected=definitions.map(([id])=>id).filter(id=>!id.startsWith('past-'));
+  assert.deepEqual(result.iterations.map(i=>i.id),expected);
+  assert.deepEqual(Object.keys(result.capacities),expected);
+  assert.ok(!calls.some(c=>c.args.iterationId?.startsWith('past-')));
+  for(const id of expected)assert.equal(calls.filter(c=>c.args.iterationId===id).length,3);
+  assert.equal(progress.at(-1).counts.iterationsExcluded,3);
+  assert.equal(progress.at(-1).counts.iterations,7);
+  assert.equal(progress.at(-1).counts.iterationsRead,7);
 });

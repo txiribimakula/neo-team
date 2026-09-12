@@ -326,6 +326,7 @@ async function importWithProgress(target, existing = null) {
       c.settings !== undefined && 'Configuración obtenida',
       c.members !== undefined && `${c.members} integrantes`,
       c.iterations !== undefined && `${c.iterations} iteraciones`,
+      c.iterationsExcluded !== undefined && `${c.iterationsExcluded} iteraciones anteriores excluidas`,
       c.backlogs !== undefined && `${c.backlogs} / ${c.backlogTotal} backlogs leídos`,
       c.iterationsRead !== undefined && `${c.iterationsRead} / ${c.iterations} iteraciones consultadas · ${c.capacities} capacidades obtenidas`,
       c.discovered !== undefined && `${c.discovered} elementos detectados`,
