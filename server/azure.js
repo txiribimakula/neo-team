@@ -98,7 +98,7 @@ export class AzureGateway {
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
   }
-  async import(config, onProgress = () => {}) {
+  async import(config, onProgress = () => {}, stateRules = []) {
     let counts = {};
     const report = (phase, message, updates = {}) => {
       counts = { ...counts, ...updates };
@@ -149,20 +149,32 @@ export class AzureGateway {
     // Follow hierarchy links through MCP so unscheduled child tasks are included.
     const items = [], fetched = new Map();
     const stateCategories = new Map(), excluded = new Set();
+    const stateKey = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
     const isOpen = async raw => {
       const type = raw.fields?.['System.WorkItemType'], state = raw.fields?.['System.State'];
       const project = raw.fields?.['System.TeamProject'] || config.project;
       const typeKey = JSON.stringify([project, type]);
       if (!type || !state) throw new Error(`No se pudo comprobar si el elemento #${raw.id} sigue abierto: falta su tipo o estado.`);
+      const rule = stateRules.find(rule => stateKey(rule.organization) === stateKey(config.organization) && stateKey(rule.project) === stateKey(project) && stateKey(rule.type) === stateKey(type) && stateKey(rule.state) === stateKey(state));
+      if (rule) { if (rule.action === 'exclude') excluded.add(raw.id); return rule.action === 'include'; }
+      if (stateKey(state) === 'discarded') { excluded.add(raw.id); return false; }
+      const needsDecision = (message, states = []) => Object.assign(new Error(message), {
+        stateReview: { organization: config.organization, project, type, state, item: { id: raw.id, fields: raw.fields }, states },
+      });
       if (!stateCategories.has(typeKey)) {
-        const states = await this.call('neo_work_item_states', { project, type });
-        if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}». No se ha completado la importación.`);
-        stateCategories.set(typeKey, new Map(states.map(s => [s.name, s.category?.toLowerCase()])));
+        let states;
+        try { states = await this.call('neo_work_item_states', { project, type }); }
+        catch { throw needsDecision(`No se pudieron consultar los estados de «${type}». Indica cómo tratar «${state}».`); }
+        if (!Array.isArray(states)) throw needsDecision(`No se pudieron consultar los estados de «${type}». Indica cómo tratar «${state}».`);
+        stateCategories.set(typeKey, states.filter(s => s && stateKey(s.name)).map(s => ({ name: s.name, category: stateKey(s.category || s.stateCategory).replace(/\s/g, '') })));
       }
-      const category = stateCategories.get(typeKey).get(state);
+      const stateName = stateKey(state);
+      // Explicit workflow categories take precedence over conventional names.
+      // Some responses omit categories for standard terminal states.
+      const category = stateCategories.get(typeKey).find(s => stateKey(s.name) === stateName)?.category || ({ closed: 'completed', done: 'completed', removed: 'removed' })[stateName];
       if (['completed', 'removed'].includes(category)) { excluded.add(raw.id); return false; }
       if (['proposed', 'inprogress', 'resolved'].includes(category)) return true;
-      throw new Error(`No se pudo determinar la categoría del estado «${state}» de «${type}». No se ha completado la importación.`);
+      throw needsDecision(`No se pudo determinar la categoría del estado «${state}» de «${type}». Indica si debe importarse.`, stateCategories.get(typeKey));
     };
     const queue = [...ids];
     report('items', 'Leyendo los detalles y las tareas hijas abiertas…', { read: 0, imported: 0, excluded: 0 });
@@ -198,7 +210,7 @@ export class AzureGateway {
           const item = normalizeItem(raw);
           item.contextOnly = true; items.push(item); included.add(item.id); parentCount++;
         }
-      } catch { warnings.push(`No se pudo leer el padre #${parent}. Sus tareas seguirán visibles sin ese nivel de la jerarquía.`); }
+      } catch (error) { if (error.stateReview) throw error; warnings.push(`No se pudo leer el padre #${parent}. Sus tareas seguirán visibles sin ese nivel de la jerarquía.`); }
       report('parents', 'Completando la jerarquía…', { parents: parentCount, imported: items.length, warnings: warnings.length, excluded: excluded.size });
     }
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });

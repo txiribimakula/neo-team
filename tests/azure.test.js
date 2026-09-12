@@ -167,3 +167,36 @@ test('import skips past iterations before requesting their tasks, capacity or ho
   assert.equal(progress.at(-1).counts.iterations,7);
   assert.equal(progress.at(-1).counts.iterationsRead,7);
 });
+
+test('state matching handles casing, whitespace and missing categories on standard closed states',async()=>{
+  const gateway=backlogGateway(),base=gateway.call;
+  let state=' closed ',metadata=[{name:'Closed',category:'Completed'}];
+  gateway.call=async(name,args)=>{
+    if(name==='neo_work_item_states')return metadata;
+    if(name==='wit_backlog' && args.action==='list')return [{id:'stories'}];
+    if(name==='wit_backlog' && args.action==='list_work_items')return {workItems:[{target:{id:1}}]};
+    if(name==='wit_work_item' && args.action==='get')return {id:1,rev:1,fields:{'System.Title':'Story','System.WorkItemType':'User Story','System.State':state,'System.TeamProject':'Project','System.AreaPath':'Project','System.IterationPath':'Project'}};
+    return base(name,args);
+  };
+  const config={organization:'org',project:'Project',team:'Team'};
+  for(const row of [
+    {state:' closed ',metadata:[{name:'Closed',category:'Completed'}]},
+    {state:'Closed',metadata:[{name:' closed ',category:' completed '}]},
+    {state:'CLOSED',metadata:[{name:'Closed',color:'339933'}]},
+    {state:'Done',metadata:[]},
+    {state:'Removed',metadata:[{name:'Removed',category:null}]},
+    {state:'Entregado',metadata:[{name:'ENTREGADO',stateCategory:'Completed'}]},
+  ]){
+    ({state,metadata}=row);
+    const progress=[];
+    const result=await gateway.import(config,p=>progress.push(p));
+    assert.deepEqual(result.items,[],`${state} must be excluded`);
+    assert.equal(progress.at(-1).counts.excluded,1);
+  }
+  state='Closed';metadata=[{name:'closed',category:' InProgress '}];
+  assert.equal((await gateway.import(config)).items.length,1,'a configured category overrides the standard name');
+  state='En curso';metadata=[{name:'EN CURSO ',category:' In Progress '}];
+  assert.equal((await gateway.import(config)).items.length,1);
+  state='Personalizado';metadata=[{name:'Personalizado',color:'339933'}];
+  await assert.rejects(()=>gateway.import(config),/categoría del estado/,'unknown custom states are never silently treated as open');
+});

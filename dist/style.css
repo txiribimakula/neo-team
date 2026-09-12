@@ -93,3 +93,10 @@
 .import-progress-time{display:block;color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
 .import-progress [data-cancel-operation]{margin-top:12px}
 .import-progress [hidden]{display:none}
+.state-review-fields{margin-top:20px;font-size:13px}
+.state-review-fields summary{cursor:pointer;font-weight:600;margin-bottom:12px}
+.state-review-fields .table-wrap{max-height:320px;overflow:auto}
+.state-review-fields table{table-layout:fixed;width:100%}
+.state-review-fields td{white-space:normal;overflow-wrap:anywhere;vertical-align:top}
+.state-review-fields td:first-child{width:40%}
+.state-review-fields pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:inherit}

@@ -18,6 +18,7 @@ const csrf = randomBytes(32).toString('hex');
 let busy = false;
 let importProgress = null;
 let operation = null;
+let stateReview = null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
@@ -35,7 +36,7 @@ function configFrom(input, requireTeam = true) {
 const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
 function publicState() {
   const workspace = planner.workspace();
-  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy, operation: busy ? operation : null,
+  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy, operation: busy ? operation : null, stateReview,
     workspace: workspace ? planningWorkspace(workspace) : null };
 }
 async function body(req) {
@@ -96,12 +97,28 @@ const server = http.createServer(async (req, res) => {
           await azure.open(config);
           return json(res, { teams: await azure.teams(config.project) });
         }
-        if (path === '/api/config') {
+        if (path === '/api/state-rules') {
+          if (!stateReview) throw fail('No hay un estado pendiente de revisar.');
+          const choices = input.choices;
+          const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+          const allowed = new Set([stateReview.state, ...stateReview.states.map(s => s.name)].map(normalize));
+          if (!Array.isArray(choices) || !choices.length || choices.length > 200 || choices.some(choice => !allowed.has(normalize(choice.state)) || !['include', 'exclude'].includes(choice.action)) || !choices.some(choice => normalize(choice.state) === normalize(stateReview.state))) throw fail('Indica cómo tratar el estado pendiente: importar o excluir.');
+          const data = structuredClone(store.data);
+          data.stateRules ||= [];
+          for (const choice of choices) {
+            const rule = { organization: stateReview.organization, project: stateReview.project, type: stateReview.type, state: choice.state.trim(), action: choice.action };
+            data.stateRules = data.stateRules.filter(previous => !['organization', 'project', 'type', 'state'].every(key => normalize(previous[key]) === normalize(rule[key])));
+            data.stateRules.push(rule);
+          }
+          await store.save(data);
+          stateReview = null;
+        } else if (path === '/api/config') {
           const config = configFrom(input.config);
           const data = structuredClone(store.data);
           if (scope(data.config) !== scope(config)) {
             if (Object.keys(data.azure?.drafts || {}).length) throw fail('Hay cambios pendientes en el equipo anterior. Sincronízalos o descártalos antes de cambiar de equipo.');
             data.azure = null;
+            stateReview = null;
           }
           data.config = config;
           if (data.azure) data.azure.config = config;
@@ -111,13 +128,14 @@ const server = http.createServer(async (req, res) => {
           if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
           const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
           operation = { ...operation, id, message: 'Iniciando importación…' };
+          stateReview = null;
           importProgress = operation;
           try {
             const workspace = await azure.import(store.data.config, progress => {
               if (operation.cancelRequested) throw fail('Importación cancelada.');
               operation = { ...operation, ...progress, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
               importProgress = operation;
-            });
+            }, store.data.stateRules || []);
             if (operation.cancelRequested) throw fail('Importación cancelada.');
             operation = { ...operation, cancellable: false, phase: 'saving', message: 'Guardando la copia local…', updatedAt: Date.now() };
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
@@ -128,7 +146,8 @@ const server = http.createServer(async (req, res) => {
             operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
             importProgress = operation;
           } catch (error) {
-            operation = { ...operation, status: 'failed', message: `Importación detenida: ${error.message}` };
+            stateReview = error.stateReview || null;
+            operation = { ...operation, status: 'failed', message: `Importación detenida: ${error.message}`, stateReview };
             importProgress = operation;
             throw error;
           }
@@ -191,7 +210,7 @@ const server = http.createServer(async (req, res) => {
     if (!['index.html', 'app.js', 'hierarchy.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
-  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.' }, error.status || 400); }
+  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}) }, error.status || 400); }
 });
 server.listen(port, '127.0.0.1', () => console.log(`Neo Team: http://127.0.0.1:${port}`));
 async function shutdown() { server.close(); await azure.close(); process.exit(0); }

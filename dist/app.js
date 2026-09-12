@@ -60,6 +60,7 @@ function updateCreationParents(parentId) {
 }
 function toast(text) { clearTimeout(toastTimer); $('#toast').textContent = text; $('#toast').hidden = false; toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 5000); }
 function errorInModal(error) {
+  if (error.stateReview) { showStateReview(error.stateReview); return; }
   const target = $('#modal-error');
   if (modal.open && target) { target.textContent = error.message; target.hidden = false; }
   else toast(error.message);
@@ -75,7 +76,7 @@ async function request(path, input = {}) {
     const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) });
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || 'No se pudo completar la operación.');
+      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { stateReview: data.stateReview });
     }
     if (data.state) state = data.state;
     else if (data.csrf) state = data;
@@ -350,7 +351,7 @@ async function importWithProgress(target, existing = null) {
       if (existing) {
         if (!progress) fail(new Error('La operación ya no está disponible. Actualiza los datos para comprobar el resultado.'));
         else if (progress.status === 'complete') finish();
-        else if (['failed', 'cancelled'].includes(progress.status)) fail(new Error(progress.error || progress.message));
+        else if (['failed', 'cancelled'].includes(progress.status)) fail(Object.assign(new Error(progress.error || progress.message), { stateReview: progress.stateReview }));
       }
       $('.import-progress-connection', target).textContent = '';
     } catch {
@@ -381,6 +382,20 @@ async function importWithProgress(target, existing = null) {
   }
 }
 let recoveringOperation = false;
+function showStateReview(review) {
+  const normalize = value => value.trim().toLowerCase();
+  const states = new Map(review.states.map(item => [normalize(item.name), item]));
+  if (!states.has(normalize(review.state))) states.set(normalize(review.state), { name: review.state, category: '' });
+  showModal('Revisar estados de importación', `Proyecto ${review.project} · ${review.type}. Indica qué estados deben entrar en la planificación.`, `
+    <p>No se ha podido clasificar <strong>${escape(review.state)}</strong>. Tus decisiones se guardarán para este proyecto y tipo de elemento.</p>
+    <form id="state-rules-form">${[...states.values()].map((item, index) => {
+      const required = normalize(item.name) === normalize(review.state);
+      return `<label class="form-field">${escape(item.name)}${required ? ' · pendiente de decidir' : ''}<select name="rule-${index}" data-state="${escape(item.name)}" ${required ? 'required' : ''}><option value="">${required ? 'Elige cómo tratar este estado' : item.category ? `Según Azure (${escape(item.category)})` : normalize(item.name) === 'discarded' ? 'Excluir descartados' : 'Sin decisión guardada'}</option><option value="exclude">Excluir: cerrado o descartado</option><option value="include">Importar: sigue abierto</option></select></label>`;
+    }).join('')}</form>
+    <details class="state-review-fields" open><summary>Campos del elemento #${escape(review.item.id)}</summary><div class="table-wrap"><table><thead><tr><th>Campo</th><th>Valor</th></tr></thead><tbody>${Object.entries(review.item.fields).map(([name, value]) => `<tr><td>${escape(name)}</td><td><pre>${escape(typeof value === 'object' ? JSON.stringify(value, null, 2) : value)}</pre></td></tr>`).join('')}</tbody></table></div></details>`,
+    '<button class="button" data-action="close">Decidir más tarde</button><button class="button primary" type="submit" form="state-rules-form">Guardar y reintentar importación</button>');
+  modal.classList.add('connection-modal');
+}
 async function resumeOperation() {
   if (recoveringOperation || pending || !state?.operation || !state.busy) return;
   recoveringOperation = true;
@@ -677,6 +692,12 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if (event.target.id === 'state-rules-form') {
+      const choices = [...event.target.querySelectorAll('select[data-state]')].filter(el => el.value).map(el => ({ state: el.dataset.state, action: el.value }));
+      await request('/api/state-rules', { choices });
+      await importData();
+      return;
+    }
     if(event.target.id==='create-form'){const input=Object.fromEntries(new FormData(event.target));input.parent=Number(input.parent)||null;if(input.remainingWork)input.remainingWork=Number(input.remainingWork);else delete input.remainingWork;await request('/api/create',input);modal.close();render();toast('Elemento creado en local. Pendiente de sincronizar.');return;}
     if (event.target.id === 'connection-form') await saveConfig(true);
     if (event.target.id === 'task-form') {
@@ -750,6 +771,6 @@ async function registerTools() {
   for (const tool of tools) { try { await document.modelContext.registerTool(tool,{signal:lifecycle.signal}); } catch { /* Browsers without stable WebMCP still use the complete UI. */ } }
 }
 window.addEventListener('pagehide',()=>lifecycle.abort(),{once:true});
-loadState().then(() => { registerTools(); return resumeOperation(); }).catch(error=>{
+loadState().then(() => { registerTools(); if (!state.busy && state.stateReview) showStateReview(state.stateReview); else return resumeOperation(); }).catch(error=>{
   $('#app').innerHTML=`<div class="notice error">${escape(error.message)} Recarga esta página cuando el servidor local esté disponible.</div>`;
 });
