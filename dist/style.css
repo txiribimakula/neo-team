@@ -78,3 +78,14 @@
 .connection-status{min-height:20px;overflow-wrap:anywhere}
 .connection-status.error{color:#a94338}
 @media(prefers-reduced-motion:reduce){.connection-control .spinner{animation:none}}
+
+.import-progress{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:8px;background:#f5f8f2}
+.import-progress-heading{display:flex;align-items:center;gap:10px;font-size:14px}
+.import-progress .spinner[hidden]{display:none}
+.import-progress-phase{font-size:14px;line-height:1.5;margin:12px 0;overflow-wrap:anywhere}
+.import-progress-counts{display:flex;flex-wrap:wrap;gap:6px 14px;list-style:none;padding:0;margin:12px 0;font-size:13px;color:var(--green)}
+.import-progress-counts:empty{display:none}
+.import-progress-note,.import-progress-connection{display:block;font-size:12px;line-height:1.5;color:var(--muted)}
+.import-progress-connection:empty{display:none}
+.import-progress.failed{background:#fff8f3;border-color:#edcdb8}
+.import-progress.failed .import-progress-heading{color:#a94338}

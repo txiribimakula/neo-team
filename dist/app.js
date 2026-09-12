@@ -110,7 +110,7 @@ function connection() {
       ${connectionField('project', 'Proyecto', c.project)}
       ${connectionField('team', 'Equipo', c.team)}
       <details><summary class="text-muted" style="font-size:14px;cursor:pointer;margin-bottom:14px">Opciones avanzadas</summary><label class="form-field">Tenant de Microsoft Entra (opcional)<input name="tenant" placeholder="Identificador del directorio" value="${escape(c.tenant)}"><small>Déjalo vacío para detectar el directorio de tu organización.</small></label></details>
-      <p id="connection-progress" class="busy-note" role="status" hidden></p>
+      <div id="connection-progress" hidden></div>
       <div class="notice">Se importarán integrantes, iteraciones, backlog y capacidad. Podrás preparar cambios en local y revisarlos antes de sincronizarlos.</div>
     </form>`, '<button class="button" data-action="save-config">Guardar configuración</button><button class="button primary" type="submit" form="connection-form">Conectar e importar ↙</button>');
   modal.classList.add('connection-modal');
@@ -283,14 +283,72 @@ function setupConnectionPickers() {
   }, { signal: connectionPickerEvents.signal });
   updateAvailability();
 }
+async function importWithProgress(target) {
+  const importId = crypto.randomUUID();
+  const controller = new AbortController();
+  let stopped = false, timer;
+  $('#modal-error').hidden = true;
+  target.hidden = false;
+  target.className = 'import-progress';
+  target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small>`;
+  target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const renderProgress = progress => {
+    $('.import-progress-phase', target).textContent = progress.message;
+    const c = progress.counts || {};
+    const entries = [
+      c.settings !== undefined && 'Configuración obtenida',
+      c.members !== undefined && `${c.members} integrantes`,
+      c.iterations !== undefined && `${c.iterations} iteraciones`,
+      c.backlogs !== undefined && `${c.backlogs} / ${c.backlogTotal} backlogs leídos`,
+      c.iterationsRead !== undefined && `${c.iterationsRead} / ${c.iterations} iteraciones consultadas · ${c.capacities} capacidades obtenidas`,
+      c.discovered !== undefined && `${c.discovered} elementos detectados`,
+      c.read !== undefined && `${c.read} elementos leídos`,
+      c.imported !== undefined && `${c.imported} elementos para importar`,
+      c.excluded !== undefined && `${c.excluded} completados o retirados excluidos`,
+      c.parents !== undefined && `${c.parents} padres de contexto obtenidos`,
+      c.warnings > 0 && `${c.warnings} avisos · algunos datos no se pudieron consultar`,
+    ].filter(Boolean);
+    $('.import-progress-counts', target).innerHTML = entries.map(text => `<li>${escape(text)}</li>`).join('');
+  };
+  const poll = async () => {
+    try {
+      const response = await fetch(`/api/import-progress?id=${encodeURIComponent(importId)}`, { headers: { 'X-Neo-CSRF': state.csrf }, signal: controller.signal });
+      if (!response.ok) throw new Error('Progress unavailable');
+      const data = await response.json();
+      if (stopped) return;
+      if (data.progress) renderProgress(data.progress);
+      $('.import-progress-connection', target).textContent = '';
+    } catch {
+      if (!stopped) $('.import-progress-connection', target).textContent = 'No se pudo actualizar el progreso. Reintentando…';
+    } finally {
+      if (!stopped) timer = setTimeout(poll, 700);
+    }
+  };
+  const operation = request('/api/import', { importId });
+  void poll();
+  try {
+    const data = await operation;
+    $('.import-progress-phase', target).textContent = 'Importación completada. Copia local guardada.';
+    return data;
+  } catch (error) {
+    target.classList.add('failed');
+    $('.import-progress-heading strong', target).textContent = 'Importación detenida';
+    $('.import-progress-note', target).textContent = 'La importación no se ha completado. Puedes volver a intentarlo.';
+    throw error;
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+    controller.abort();
+    $('.spinner', target).hidden = true;
+    $('.import-progress-connection', target).textContent = '';
+  }
+}
 async function saveConfig(importNow) {
   const form = $('#connection-form'); if (!form.reportValidity()) return;
   const config = getConfig();
   await request('/api/config', { config }); render();
   if (!importNow) { modal.close(); toast('Configuración guardada. Puedes importar los datos cuando quieras.'); return; }
-  $('#connection-progress').hidden = false;
-  $('#connection-progress').textContent = 'Importando el equipo y sus tareas… Completa el acceso de Microsoft si se abre el navegador. En backlogs grandes puede tardar varios minutos.';
-  await request('/api/import');
+  await importWithProgress($('#connection-progress'));
   modal.close(); selectedIteration = ''; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
 }
 function selected() {
@@ -507,8 +565,8 @@ async function synchronize() {
   showModal(result.failures.length ? 'Sincronización parcial' : result.demo ? 'Simulación completada' : 'Cambios sincronizados', `${result.successes.length} tareas confirmadas${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.`, `${result.failures.length ? `<div class="notice warning">Los cambios pendientes se conservan en local. Vuelve a revisarlos para reintentar solo lo que falta.</div>${result.failures.map(f=>`<p class="inline-error" style="margin-top:15px">#${f.id}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${result.demo ? 'La simulación solo ha actualizado los datos de ejemplo de este equipo.' : 'La copia local refleja los cambios confirmados por Azure DevOps.'}</div>`}`, `${result.failures.length ? '<button class="button primary" data-action="review">Revisar pendientes</button>' : '<button class="button primary" data-action="close">Volver a la planificación</button>'}`);
 }
 async function importData() {
-  showModal('Actualizar desde Azure DevOps', 'Leyendo el equipo y sus tareas.', '<p class="busy-note"><span class="spinner"></span> Importando integrantes, backlog, iteraciones y capacidad… En equipos grandes puede tardar varios minutos.</p>');
-  await request('/api/import'); modal.close(); render(); toast('Datos actualizados desde Azure DevOps.');
+  showModal('Actualizar desde Azure DevOps', 'Leyendo el equipo y sus tareas.', '<div id="connection-progress"></div>');
+  await importWithProgress($('#connection-progress')); modal.close(); render(); toast('Datos actualizados desde Azure DevOps.');
 }
 const actions = {
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),

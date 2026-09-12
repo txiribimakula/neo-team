@@ -41,6 +41,13 @@ configureCoreTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1
 configureWorkTools(server, tokenProvider, connectionProvider);
 configureWorkItemTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 
+server.tool('neo_work_item_states', 'Read workflow state categories for a work item type, including custom states.', {
+  project: z.string().min(1), type: z.string().min(1),
+}, async ({ project, type }) => {
+  const api = await (await connectionProvider()).getWorkItemTrackingApi();
+  return { content: [{ type: 'text', text: JSON.stringify(await api.getWorkItemTypeStates(project, type)) }] };
+});
+
 // The official 2.10.0 core tools list teams, but do not expose their complete
 // membership. This read-only extension also includes team-wide holidays.
 server.tool('neo_team_members', 'List every team member, including members without capacity or assigned work.', {

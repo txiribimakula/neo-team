@@ -43,7 +43,7 @@ export class AzureGateway {
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_work_item_states']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       this.client = client; this.key = key;
@@ -81,17 +81,27 @@ export class AzureGateway {
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
   }
-  async import(config) {
+  async import(config, onProgress = () => {}) {
+    let counts = {};
+    const report = (phase, message, updates = {}) => {
+      counts = { ...counts, ...updates };
+      onProgress({ phase, message, counts: { ...counts } });
+    };
+    report('connection', 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.');
     await this.open(config);
     const context = { project: config.project, team: config.team };
+    report('settings', 'Leyendo la configuración del equipo…');
     const rawSettings = await this.call('work', { action: 'get_team_settings', ...context });
     const settings = { ...rawSettings, backlogIteration: normalizeIteration(rawSettings?.backlogIteration, config.project, 'el backlog') };
     if (typeof settings.defaultIteration?.path === 'string') settings.defaultIteration = normalizeIteration(settings.defaultIteration, config.project, 'la iteración predeterminada');
+    report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const iterations = rawIterations.map(iteration => normalizeIteration(iteration, config.project, 'una iteración del equipo'));
+    report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length });
     const members = await this.call('neo_team_members', context);
     if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
+    report('backlogs', 'Consultando los niveles de backlog…', { members: members.length });
     const levels = await this.call('wit_backlog', { action: 'list', ...context });
     if (!Array.isArray(levels)) throw new Error('Azure DevOps no devolvió una lista válida de niveles de backlog del equipo.');
     const ids = new Set();
@@ -99,46 +109,81 @@ export class AzureGateway {
       for (const item of data.workItems ?? []) if (item.target?.id || item.id) ids.add(item.target?.id || item.id);
       for (const rel of data.workItemRelations ?? []) if (rel.target?.id) ids.add(rel.target.id);
     };
-    for (const level of levels) addRelations(await this.call('wit_backlog', { action: 'list_work_items', ...context, backlogId: level.id }));
+    report('backlogs', 'Leyendo los elementos del backlog…', { backlogs: 0, backlogTotal: levels.length, discovered: 0 });
+    for (const level of levels) {
+      report('backlogs', `Leyendo el backlog «${level.name || level.id}»…`);
+      addRelations(await this.call('wit_backlog', { action: 'list_work_items', ...context, backlogId: level.id }));
+      report('backlogs', `Backlog «${level.name || level.id}» obtenido.`, { backlogs: counts.backlogs + 1, discovered: ids.size });
+    }
     const capacities = {}, warnings = [];
+    report('capacity', 'Consultando tareas y capacidad de las iteraciones…', { capacities: 0, iterationsRead: 0 });
     for (const iteration of iterations) {
+      report('capacity', `Leyendo tareas de «${iteration.name}»…`);
       addRelations(await this.call('wit_work_item', { action: 'list_for_iteration', ...context, iterationId: iteration.id }));
+      report('capacity', `Obteniendo capacidad y días libres de «${iteration.name}»…`, { discovered: ids.size });
       try {
         const capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId: iteration.id });
         const daysOff = await this.call('neo_team_days_off', { ...context, iterationId: iteration.id });
         capacities[iteration.id] = { ...capacity, daysOff: daysOff.daysOff ?? [] };
       } catch { warnings.push(`No se pudo consultar la capacidad completa de «${iteration.name}». Se mostrará como desconocida.`); }
+      report('capacity', `Iteración «${iteration.name}» consultada.`, { iterationsRead: counts.iterationsRead + 1, capacities: Object.keys(capacities).length, warnings: warnings.length });
     }
     // Follow hierarchy links through MCP so unscheduled child tasks are included.
     const items = [], fetched = new Map();
+    const stateCategories = new Map(), excluded = new Set();
+    const isOpen = async raw => {
+      const type = raw.fields?.['System.WorkItemType'], state = raw.fields?.['System.State'];
+      const project = raw.fields?.['System.TeamProject'] || config.project;
+      const typeKey = JSON.stringify([project, type]);
+      if (!type || !state) throw new Error(`No se pudo comprobar si el elemento #${raw.id} sigue abierto: falta su tipo o estado.`);
+      if (!stateCategories.has(typeKey)) {
+        const states = await this.call('neo_work_item_states', { project, type });
+        if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}». No se ha completado la importación.`);
+        stateCategories.set(typeKey, new Map(states.map(s => [s.name, s.category?.toLowerCase()])));
+      }
+      const category = stateCategories.get(typeKey).get(state);
+      if (['completed', 'removed'].includes(category)) { excluded.add(raw.id); return false; }
+      if (['proposed', 'inprogress', 'resolved'].includes(category)) return true;
+      throw new Error(`No se pudo determinar la categoría del estado «${state}» de «${type}». No se ha completado la importación.`);
+    };
     const queue = [...ids];
+    report('items', 'Leyendo los detalles y las tareas hijas abiertas…', { read: 0, imported: 0, excluded: 0 });
     for (let i = 0; i < queue.length; i++) {
+      report('items', `Leyendo el elemento #${queue[i]} (${i + 1} de ${queue.length} detectados)…`, { read: i, discovered: queue.length, imported: items.length, excluded: excluded.size });
       const raw = await this.call('wit_work_item', { action: 'get', project: config.project, id: queue[i], expand: 'All' });
       fetched.set(raw.id,raw);
       const fields = raw.fields ?? {};
       if (String(fields['System.TeamProject'] ?? '').toLowerCase() !== config.project.toLowerCase()) continue;
       const areas = settings.areaPaths ?? [];
       if (areas.length && !areas.some(a => fields['System.AreaPath'] === a.value || (a.includeChildren && fields['System.AreaPath']?.startsWith(a.value + '\\')))) continue;
-      items.push(normalizeItem(raw));
+      // Traverse closed parents too: they can still have open child tasks.
       for (const relation of raw.relations ?? []) {
         if (relation.rel !== 'System.LinkTypes.Hierarchy-Forward') continue;
         const id = Number(relation.url?.match(/\/workItems\/(\d+)$/i)?.[1]);
         if (id && !ids.has(id)) { ids.add(id); queue.push(id); }
       }
+      if (await isOpen(raw)) items.push(normalizeItem(raw));
     }
     // A portfolio parent may live outside the team's area or visible backlog
     // levels. Fetch ancestors as context without importing sibling team tasks.
+    report('parents', 'Completando los padres abiertos de la jerarquía…', { read: queue.length, discovered: queue.length, imported: items.length, parents: 0, excluded: excluded.size });
     const included = new Set(items.map(i=>i.id)), attempted = new Set();
+    let parentCount = 0;
     for (let index=0; index<items.length; index++) {
       const parent = Number(items[index].parent);
       if (!parent || included.has(parent) || attempted.has(parent)) continue;
       attempted.add(parent);
+      report('parents', `Leyendo el padre #${parent}…`);
       try {
         const raw = fetched.get(parent) || await this.call('wit_work_item',{action:'get',project:config.project,id:parent,expand:'All'});
-        const item = normalizeItem(raw);
-        item.contextOnly = true; items.push(item); included.add(item.id);
+        if (await isOpen(raw)) {
+          const item = normalizeItem(raw);
+          item.contextOnly = true; items.push(item); included.add(item.id); parentCount++;
+        }
       } catch { warnings.push(`No se pudo leer el padre #${parent}. Sus tareas seguirán visibles sin ese nivel de la jerarquía.`); }
+      report('parents', 'Completando la jerarquía…', { parents: parentCount, imported: items.length, warnings: warnings.length, excluded: excluded.size });
     }
+    report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
     return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities, items, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   async findCreation(config, creationKey) {

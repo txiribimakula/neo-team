@@ -32,6 +32,7 @@ Abre **http://127.0.0.1:4310**. Para desarrollar, `npm run dev` reinicia el serv
 
 - Recupera también los padres que no estén en los niveles visibles o áreas del equipo como contexto, sin recorrer sus tareas hermanas ni permitir escrituras remotas sobre esos padres.
 - Importa integrantes completos del equipo, sus iteraciones, los niveles del backlog, los work items de cada iteración y las tareas hijas accesibles dentro de las áreas del equipo.
+- Sólo guarda elementos abiertos: consulta las categorías de estado de cada tipo y excluye `Completed` y `Removed`, incluidos los estados personalizados y los padres cerrados. Conserva las tareas hijas abiertas y los elementos `Resolved` pendientes de validación. El progreso indica cuántos se han excluido; al actualizar los datos también desaparecen de la copia local los que se hayan cerrado desde la importación anterior.
 - Consulta capacidad, calendario laboral, ausencias personales y días libres del equipo. Una capacidad que no se ha podido consultar se muestra como desconocida, acompañada de un aviso.
 - Mantiene las estimaciones en puntos separadas de las horas. La carga utiliza **RemainingWork**; los puntos se muestran como información. No se convierten puntos a horas.
 - Sincroniza únicamente los campos editados: `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority` y `Microsoft.VSTS.Scheduling.RemainingWork`.

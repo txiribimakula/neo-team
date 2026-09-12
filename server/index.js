@@ -16,6 +16,7 @@ await store.load();
 const azure = new AzureGateway(), planner = new Planner(store, azure);
 const csrf = randomBytes(32).toString('hex');
 let busy = false;
+let importProgress = null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
@@ -51,8 +52,13 @@ const server = http.createServer(async (req, res) => {
     const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
     if (!allowedHosts.includes(req.headers.host)) throw fail('Host no permitido.', 403);
     if (req.headers.origin && !allowedHosts.map(h=>`http://${h}`).includes(req.headers.origin)) throw fail('Origen no permitido.', 403);
-    const path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
+    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    const path = url.pathname;
     if (req.method === 'GET' && path === '/api/state') return json(res, publicState());
+    if (req.method === 'GET' && path === '/api/import-progress') {
+      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      return json(res, { progress: importProgress?.id === url.searchParams.get('id') ? importProgress : null });
+    }
     if (req.method === 'GET' && path === '/api/export') {
       res.setHeader('Content-Disposition', 'attachment; filename="neo-team-planificacion.json"');
       return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
@@ -87,12 +93,20 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/import') {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
           if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
-          const workspace = await azure.import(store.data.config);
-          workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
-          workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
-          workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
-          const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
-          await store.save(data); planner.review = null;
+          const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
+          importProgress = { id, status: 'running', phase: 'connection', message: 'Iniciando importación…', counts: {} };
+          try {
+            const workspace = await azure.import(store.data.config, progress => { importProgress = { ...importProgress, ...progress }; });
+            workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
+            workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
+            workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
+            const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
+            await store.save(data); planner.review = null;
+            importProgress = { ...importProgress, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
+          } catch (error) {
+            importProgress = { ...importProgress, status: 'failed', message: `Importación detenida: ${error.message}` };
+            throw error;
+          }
         } else if (path === '/api/mode') {
           if (!['demo', 'azure'].includes(input.mode)) throw fail('Modo no válido.');
           const data = structuredClone(store.data); data.mode = input.mode;

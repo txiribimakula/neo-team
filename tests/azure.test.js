@@ -17,33 +17,38 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   assert.deepEqual(call.args.updates.at(-1),{op:'add',path:'/fields/Microsoft.VSTS.Scheduling.RemainingWork',value:0});
 });
 test('import uses MCP for complete members, hierarchy, capacities and team scope',async()=>{
-  const gateway=new AzureGateway(),calls=[];gateway.open=async()=>{};
+  const gateway=new AzureGateway(),calls=[],progress=[];gateway.open=async()=>{};
   gateway.call=async(name,args)=>{
     calls.push({name,args});
     if(name==='work'&&args.action==='get_team_settings')return {backlogIteration:{path:'Project'},areaPaths:[{value:'Project\\Team',includeChildren:true}],workingDays:[1,2,3,4,5]};
     if(name==='work'&&args.action==='list_team_iterations')return [{id:'s1',path:'Project\\Sprint',name:'Sprint'}];
     if(name==='work'&&args.action==='get_team_capacity')return {teamMembers:[]};
     if(name==='neo_team_days_off')return {daysOff:[]};
+    if(name==='neo_work_item_states')return [{name:'Active',category:'InProgress'}];
     if(name==='neo_team_members')return [{id:'member',displayName:'Member without work',uniqueName:'member@example.test'}];
     if(name==='wit_backlog'&&args.action==='list')return [{id:'stories'}];
     if(name==='wit_backlog'&&args.action==='list_work_items')return {workItems:[{target:{id:1}}]};
     if(name==='wit_work_item'&&args.action==='list_for_iteration')return {workItemRelations:[{target:{id:2}}]};
     if(name==='wit_work_item'&&args.action==='get'&&args.id===5)throw new Error('Parent not accessible');
-    if(name==='wit_work_item'&&args.action==='get')return {id:args.id,rev:1,fields:{'System.Title':`Task ${args.id}`,'System.TeamProject':'Project','System.AreaPath':args.id===3?'Project\\Other':'Project\\Team','System.IterationPath':'Project','System.WorkItemType':args.id===4?'User Story':'Task',...(args.id===1?{'System.Parent':4}:args.id===4?{'System.Parent':5}:{})},relations:args.id===1?[{rel:'System.LinkTypes.Hierarchy-Forward',url:'https://dev.azure.com/org/_apis/wit/workItems/2'},{rel:'System.LinkTypes.Hierarchy-Forward',url:'https://dev.azure.com/org/_apis/wit/workItems/3'}]:[]};
+    if(name==='wit_work_item'&&args.action==='get')return {id:args.id,rev:1,fields:{'System.Title':`Task ${args.id}`,'System.State':'Active','System.TeamProject':'Project','System.AreaPath':args.id===3?'Project\\Other':'Project\\Team','System.IterationPath':'Project','System.WorkItemType':args.id===4?'User Story':'Task',...(args.id===1?{'System.Parent':4}:args.id===4?{'System.Parent':5}:{})},relations:args.id===1?[{rel:'System.LinkTypes.Hierarchy-Forward',url:'https://dev.azure.com/org/_apis/wit/workItems/2'},{rel:'System.LinkTypes.Hierarchy-Forward',url:'https://dev.azure.com/org/_apis/wit/workItems/3'}]:[]};
     throw new Error(`Unexpected tool ${name}`);
   };
-  const result=await gateway.import({organization:'org',project:'Project',team:'Team'});
+  const result=await gateway.import({organization:'org',project:'Project',team:'Team'}, update=>progress.push(update));
   assert.deepEqual(result.items.map(i=>i.id),[1,2,4]);
   assert.equal(result.items.find(i=>i.id===4).contextOnly,true);
   assert.ok(result.warnings.some(w=>w.includes('#5')));assert.equal(result.members[0].displayName,'Member without work');
   assert.equal(calls.filter(c=>c.name==='wit_work_item'&&c.args.id===2).length,1);
   assert.ok(calls.some(c=>c.name==='neo_team_days_off'));assert.deepEqual(result.drafts,{});
+  assert.deepEqual([...new Set(progress.map(p=>p.phase))],['connection','settings','iterations','members','backlogs','capacity','items','parents','saving']);
+  assert.deepEqual(progress[0].counts,{},'earlier progress snapshots must not change');
+  assert.ok(progress.some(p=>p.phase==='items' && p.counts.discovered===3),'new child discoveries update the total');
+  assert.deepEqual(progress.at(-1).counts,{settings:1,iterations:1,members:1,backlogs:1,backlogTotal:1,discovered:3,capacities:1,iterationsRead:1,warnings:1,read:3,imported:3,parents:1,excluded:0});
 });
 test('real bundled MCP initializes and advertises the required schemas without authentication',async t=>{
   const gateway=new AzureGateway();t.after(()=>gateway.close());
   await gateway.open({organization:'example',authentication:'interactive'});
   const {tools}=await gateway.client.listTools();
-  for(const name of ['neo_team_members','neo_team_days_off','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
+  for(const name of ['neo_team_members','neo_team_days_off','neo_work_item_states','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
   const write=tools.find(tool=>tool.name==='wit_work_item_write');
   const schema=JSON.stringify(write.inputSchema);assert.match(schema,/test/);assert.match(schema,/number/);assert.match(schema,/updates/);
 });
@@ -96,4 +101,36 @@ test('creation MCP includes a recovery marker and parent, validates first and re
   assert.equal(calls[1].name,'neo_create_item');assert.equal(calls[1].args.fields['Microsoft.VSTS.Scheduling.RemainingWork'],0);
   assert.equal(calls[1].args.fields['System.Tags'],'neo-create-'+item.creationKey);
   await assert.rejects(()=>gateway.findCreation({project:'Project'},item.creationKey),/varios/);
+});
+
+test('import excludes completed and removed custom states while keeping open children and resolved work',async()=>{
+  const gateway=backlogGateway(),base=gateway.call,calls=[],progress=[];
+  const config={organization:'org',project:'Project',team:'Team'};
+  const states=[{name:'Active',category:'InProgress'},{name:'New',category:'Proposed'},{name:'Resolved',category:'Resolved'},{name:'Closed',category:'Completed'},{name:'Done',category:'Completed'},{name:'Entregado',category:'Completed'},{name:'Descartado',category:'Removed'}];
+  const specs={1:{state:'Active',parent:20},2:{state:'Closed',children:[3]},3:{state:'New',parent:2},4:{state:'Descartado'},5:{state:'Entregado'},6:{state:'Resolved'},7:{state:'Entregado',type:'User Story'},8:{state:'Active'},9:{state:'Done'},10:{state:'Active',parent:9},20:{state:'Closed'}};
+  gateway.call=async(name,args)=>{
+    calls.push({name,args});
+    if(name==='neo_work_item_states')return states.map(s=>({...s,category:args.type==='User Story' && s.name==='Entregado' ? 'InProgress' : s.category}));
+    if(name==='wit_backlog' && args.action==='list')return [{id:'stories'}];
+    if(name==='wit_backlog' && args.action==='list_work_items')return {workItems:[1,2,4,5,6,7,8,10].map(id=>({target:{id}}))};
+    if(name==='wit_work_item' && args.action==='get'){
+      const item=specs[args.id];
+      return {id:args.id,rev:1,fields:{'System.Title':`Item ${args.id}`,'System.WorkItemType':item.type || 'Task','System.State':item.state,'System.TeamProject':'Project','System.AreaPath':'Project','System.IterationPath':'Project','System.Parent':item.parent,'Microsoft.VSTS.Scheduling.RemainingWork':0},relations:(item.children || []).map(id=>({rel:'System.LinkTypes.Hierarchy-Forward',url:`https://dev.azure.com/org/_apis/wit/workItems/${id}`}))};
+    }
+    return base(name,args);
+  };
+  const result=await gateway.import(config,p=>progress.push(p));
+  assert.deepEqual(result.items.map(i=>i.id),[1,6,7,8,10,3]);
+  assert.equal(result.items.find(i=>i.id===3).parent,2,'an open child is retained without importing its closed parent');
+  assert.equal(progress.at(-1).counts.excluded,5,'closed parents already traversed are counted only once');
+  assert.equal(progress.at(-1).counts.imported,6);
+  assert.equal(calls.filter(c=>c.name==='neo_work_item_states').length,2,'state categories are cached per work item type');
+  specs[8].state='Done';
+  const refreshed=await gateway.import(config);
+  assert.ok(!refreshed.items.some(i=>i.id===8),'the next import removes newly completed work');
+  specs[8].state='Unknown';
+  await assert.rejects(()=>gateway.import(config),/categoría del estado «Unknown»/);
+  const completeCall=gateway.call;
+  gateway.call=async(name,args)=>name==='neo_work_item_states' ? null : completeCall(name,args);
+  await assert.rejects(()=>gateway.import(config),/consultar los estados/);
 });
