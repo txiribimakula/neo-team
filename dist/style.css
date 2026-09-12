@@ -21,3 +21,60 @@
 .continuous-planner{display:block}.continuous-planner .planning-people{display:flex;align-items:stretch;gap:10px;overflow-x:auto;padding:0 0 14px;margin:0 0 14px;border:0;border-radius:0;background:#f5f7f6;position:sticky;top:0;z-index:2}.planning-people .planning-person{display:block;min-width:190px;max-width:230px;flex:1;margin:0;padding:12px 14px;background:#fff;border:1px solid var(--line)}.planning-people .planning-person.active{border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}.planning-person .person-name{display:flex;gap:8px;align-items:center;margin-bottom:10px}.person-name .avatar{width:29px;height:29px;font-size:11px}.person-name strong{font-size:14px}.planning-person .person-hours{display:block;font-size:13px;color:var(--ink);font-weight:550}.planning-person .person-meter{display:block;width:100%;height:5px;background:#e9ede6;border-radius:4px;overflow:hidden;margin:8px 0 6px}.person-meter>span{display:block;height:100%;background:#9bb576;border-radius:4px}.person-meter.meter-full>span{background:#3f8b58}.person-meter.meter-over>span{background:#cf6a4c}.person-meter.meter-unknown>span{background:#a8ada3}.planning-person .person-load-label{display:block;font-size:12px;flex:none;color:#718060}.planning-person .person-load-label.meter-text-full{color:#347347}.planning-person .person-load-label.meter-text-over{color:#b64e34}.planning-person .person-load-label.meter-text-unknown,.planning-person .person-load-label.meter-text-zero{color:#858c80}.planning-work-heading{align-items:center;padding:16px 18px;gap:14px;border-bottom:1px solid var(--line);flex-wrap:wrap}.planning-work-heading h2{margin:0;font-size:16px;flex:1}.planning-work-heading>input{width:280px;max-width:100%}.planning-work .picker-toolbar{margin:0;padding:10px 18px;border-bottom:1px solid var(--line);justify-content:space-between}.bulk-selection{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}.bulk-selection input{width:17px;height:17px;accent-color:var(--green)}.planning-work #picker-tree{max-height:none;overflow:visible;border-top:0;min-height:100px;padding:10px 16px}.remove-branch{flex-shrink:0;border:0;background:transparent;color:#7a8572;font-size:12px;padding:5px 7px;border-radius:5px}.remove-branch:hover{background:#f8e9e4;color:#aa503b}.hierarchy-branch>summary .branch-title{min-width:100px}
 #people-popover{position:fixed;inset:auto;margin:0;padding:10px;background:white;color:var(--ink);border:1px solid #d5dfce;border-radius:10px;box-shadow:0 12px 45px #182c2226;overflow-y:auto;z-index:10}#people-popover::backdrop{background:transparent}#people-search{position:sticky;top:0;background:white;margin-bottom:8px}.person-option{display:flex;align-items:center;gap:9px;padding:9px 7px;border-radius:6px;font-size:14px;cursor:pointer}.person-option:hover{background:#f0f5e9}.person-option input{width:17px;height:17px;accent-color:var(--green);flex-shrink:0}.person-option .avatar{width:28px;height:28px;font-size:11px}.person-option>span:last-child{min-width:0;overflow-wrap:anywhere}.person-option small{display:block;color:var(--muted);font-size:12px;margin-top:3px}
 @media(max-width:740px){main{padding:16px 12px}.topbar{padding:0 14px}.header-actions{gap:8px}.header-actions #save-status{display:none}.workspace-controls{flex-wrap:wrap;gap:8px;margin-bottom:12px}.team-label{font-size:12px;max-width:calc(100% - 70px)}.workspace-controls .iteration-select{margin-left:0;flex:1}.step-tabs{gap:18px;margin-bottom:16px}.step-tab{font-size:12px;gap:6px}.step-tab>span{width:21px;height:21px}.hierarchy-toolbar{padding:10px}.hierarchy-toolbar select{flex:1;max-width:none}.hierarchy-toolbar .search{flex-basis:100%;max-width:none}.planning-people .planning-person{min-width:175px;padding:10px}.planning-work-heading{padding:12px}.planning-work-heading>input{width:100%;order:2}.planning-work .picker-toolbar{padding:10px 12px}.planning-work #picker-tree{padding:6px}.remove-branch{margin-left:auto;font-size:12px}.planning-work-heading .show-unavailable{font-size:12px}.step-tab small{padding:1px 4px;font-size:11px}}
+.planning-person-card{display:flex;flex-direction:column;min-width:190px;max-width:230px;flex:1;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}.planning-person-card.active{border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}.planning-people .planning-person-card .planning-person{border:0;background:transparent;min-width:0;max-width:none;width:100%;flex:1;border-radius:0}.person-confirm{margin:0 14px 12px;padding:6px 10px;border:1px solid #afc8a2;border-radius:6px;background:#f0f6e9;color:#355c29;font-size:12px;font-weight:600}.person-confirm:hover{background:#e2eed8}.person-confirm.confirmed{background:transparent;border-color:transparent;color:#347347;opacity:1;cursor:default}@media(max-width:740px){.planning-person-card{min-width:175px}}
+
+/* Keep the complete parent path visible within its own branch. */
+.hierarchy-surface,.planning-work{overflow:visible}
+.hierarchy-branch>summary{position:sticky;top:0;box-shadow:0 2px 3px #26312b0d}
+.hierarchy-branch[open]>summary{border-bottom-color:#cbd8c3}
+.hierarchy-leaf{scroll-margin-top:var(--sticky-path-height,10px)}
+.continuous-planner .planning-people{z-index:40}
+.workspace-menu>div{z-index:50}
+
+/* People stay beside the task hierarchy while planning. */
+.continuous-planner{display:grid;grid-template-columns:230px minmax(0,1fr);gap:18px;align-items:start}
+.continuous-planner .planning-people{flex-direction:column;gap:8px;margin:0;padding:0 3px 3px 0;max-height:100dvh;overflow-x:hidden;overflow-y:auto;min-width:0;scrollbar-width:thin}
+.planning-people .planning-person-card{width:100%;min-width:0;max-width:none;flex:none}
+.planning-people .planning-person-card .planning-person{padding:11px 12px}
+@media(max-width:740px){.continuous-planner{grid-template-columns:136px minmax(0,1fr);gap:10px}.planning-person .person-name{gap:5px;flex-wrap:wrap}.planning-person .person-name strong{font-size:12px}.planning-people .planning-person-card .planning-person{padding:9px}.planning-person .person-hours,.planning-person .person-load-label{font-size:11px}.person-confirm{margin:0 8px 8px;padding:6px;font-size:11px}.planning-work-heading>input{min-width:0}.planning-work .hierarchy-branch>summary{gap:5px;padding:8px}.planning-work .branch-title{min-width:0;overflow-wrap:anywhere}.planning-work .leaf-copy{min-width:0;overflow-wrap:anywhere}.planning-work .hierarchy-children{margin-left:3px;padding-left:4px}}
+@media(max-width:420px){.continuous-planner{grid-template-columns:110px minmax(0,1fr);gap:7px}}
+.branch-title>.pill.changed{display:block;width:fit-content;margin-top:5px;font-size:10px;white-space:normal}.leaf-meta{flex-wrap:wrap}.pill.changed{white-space:normal}.change-old small{display:block;margin-top:5px;font-size:11px}.step-tabs .step-tab:last-child{flex-shrink:1;min-width:0}.step-tab{white-space:normal}
+
+/* The current assignee stays unmistakable beside and above their tasks. */
+.planning-people .planning-person-card.active{background:#e6f2df;border:2px solid #254c38;border-left-width:6px;box-shadow:0 3px 10px #254c381a}
+.planning-person-card.active .person-name strong{color:#173b26;font-weight:800}
+.planning-person-card.active .person-name .avatar{background:#254c38;color:#fff}
+.planning-person .assigning-label{display:block;margin-top:10px;padding:5px 7px;border-radius:5px;background:#254c38;color:#fff;font-size:11px;font-weight:700;text-align:center}
+.active-assignee{display:flex;align-items:center;gap:10px;padding:12px 18px;background:#e6f2df;border-bottom:2px solid #254c38;border-radius:11px 11px 0 0;position:sticky;top:0;z-index:35}
+.active-assignee>.avatar{background:#254c38;color:white;width:36px;height:36px;flex-shrink:0}
+.active-assignee>div{min-width:0}.active-assignee>div>span{display:block;font-size:11px;color:#42613b;margin-bottom:2px}.active-assignee h2{margin:0;font-size:20px;color:#173b26;overflow-wrap:anywhere}
+@media(max-width:740px){.active-assignee{padding:10px;gap:8px}.active-assignee h2{font-size:16px}.active-assignee>.avatar{width:29px;height:29px;font-size:11px}.planning-person .assigning-label{font-size:10px;padding:5px 2px}}
+
+/* Searchable Azure DevOps connection fields. */
+.connection-modal #modal-content{display:flex;flex-direction:column;max-height:calc(90vh - 2px)}
+.connection-modal .modal-head,.connection-modal .modal-footer{flex-shrink:0}
+.connection-modal .modal-body{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.connection-picker{border:1px solid #d5dfd7;border-radius:8px;background:#fff;overflow:hidden}
+.connection-picker:focus-within{border-color:#82a86d;box-shadow:0 0 0 3px #82b74a20}
+.connection-control{display:flex;align-items:center;min-width:0}
+.connection-control input{flex:1;border:0;border-radius:0;background:transparent;min-height:44px}
+.connection-control input:focus-visible{outline:0}
+.connection-control input:disabled{color:var(--muted);cursor:not-allowed;background:#f5f7f6}
+.connection-toggle{align-self:stretch;flex:0 0 42px;border:0;border-left:1px solid #edf0ec;background:transparent;color:var(--green);font-size:20px}
+.connection-toggle:hover:not(:disabled){background:var(--soft)}
+.connection-control .spinner{flex-shrink:0;margin:0 14px}
+.connection-field [hidden]{display:none}
+.connection-field[aria-busy="true"] .connection-control{background:#f5f7f6}
+.connection-dropdown{border-top:1px solid var(--line)}
+.connection-options{max-height:180px;overflow-y:auto;overscroll-behavior:contain;padding:4px}
+.connection-options:empty{display:none}
+.connection-option{display:flex;justify-content:space-between;gap:12px;padding:10px;border-radius:5px;cursor:pointer;font-weight:400;overflow-wrap:anywhere}
+.connection-option:hover,.connection-option.active{background:var(--soft)}
+.connection-option[aria-selected="true"]{color:var(--green);font-weight:600;background:#f1f6e9}
+.connection-empty{padding:14px;margin:0;font-weight:400;font-size:13px;color:var(--muted);line-height:1.5}
+.connection-refresh{display:block;width:100%;text-align:left;border:0;border-top:1px solid var(--line);background:#fafcf9;color:var(--green);padding:10px 14px;font-size:13px}
+.connection-refresh:hover:not(:disabled){background:var(--soft)}
+.connection-refresh:focus-visible{outline-offset:-3px}
+.connection-status{min-height:20px;overflow-wrap:anywhere}
+.connection-status.error{color:#a94338}
+@media(prefers-reduced-motion:reduce){.connection-control .spinner{animation:none}}

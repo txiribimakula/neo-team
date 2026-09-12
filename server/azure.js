@@ -17,6 +17,16 @@ export function parseToolResult(result) {
   throw new Error('El MCP no devolvió datos JSON válidos. No se ha modificado la planificación.');
 }
 
+function normalizeIteration(iteration, project, label) {
+  if (!iteration || typeof iteration.path !== 'string') {
+    throw new Error(`Azure DevOps no devolvió una ruta válida para ${label}. Revisa las iteraciones en la configuración del equipo.`);
+  }
+  // Team settings can return the project root as "" and descendants as
+  // "\\Release\\Sprint". Work item fields require the project-qualified path.
+  const path = iteration.path === '' ? project : iteration.path.startsWith('\\') ? project + iteration.path : iteration.path;
+  return { ...iteration, path };
+}
+
 export class AzureGateway {
   async open(config) {
     const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
@@ -74,11 +84,16 @@ export class AzureGateway {
   async import(config) {
     await this.open(config);
     const context = { project: config.project, team: config.team };
-    const settings = await this.call('work', { action: 'get_team_settings', ...context });
-    const iterations = await this.call('work', { action: 'list_team_iterations', ...context });
+    const rawSettings = await this.call('work', { action: 'get_team_settings', ...context });
+    const settings = { ...rawSettings, backlogIteration: normalizeIteration(rawSettings?.backlogIteration, config.project, 'el backlog') };
+    if (typeof settings.defaultIteration?.path === 'string') settings.defaultIteration = normalizeIteration(settings.defaultIteration, config.project, 'la iteración predeterminada');
+    const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
+    if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
+    const iterations = rawIterations.map(iteration => normalizeIteration(iteration, config.project, 'una iteración del equipo'));
     const members = await this.call('neo_team_members', context);
+    if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
     const levels = await this.call('wit_backlog', { action: 'list', ...context });
-    if (!Array.isArray(iterations) || !Array.isArray(members) || !Array.isArray(levels) || !settings.backlogIteration?.path) throw new Error('El equipo no tiene una configuración de backlog válida.');
+    if (!Array.isArray(levels)) throw new Error('Azure DevOps no devolvió una lista válida de niveles de backlog del equipo.');
     const ids = new Set();
     const addRelations = data => {
       for (const item of data.workItems ?? []) if (item.target?.id || item.id) ids.add(item.target?.id || item.id);
@@ -126,8 +141,22 @@ export class AzureGateway {
     }
     return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities, items, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
+  async findCreation(config, creationKey) {
+    if(!/^[a-f0-9-]{36}$/.test(creationKey)) throw new Error('Identificador de creación no válido.');
+    const result=await this.call('wit_query',{action:'wiql',project:config.project,top:2,wiql:`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Tags] CONTAINS 'neo-create-${creationKey}'`});
+    if(!Array.isArray(result.workItems)) throw new Error('No se pudo comprobar si la creación ya existe.');
+    if(result.workItems.length>1) throw new Error('Hay varios elementos con la misma marca de creación. Revisa Azure antes de continuar.');
+    return result.workItems.length ? (await this.getItems(config,[result.workItems[0].id]))[0] : null;
+  }
+  async create(config,item,validateOnly=false) {
+    const fields={'System.Title':item.title,'System.Tags':`neo-create-${item.creationKey}`,'System.AreaPath':item.areaPath,'System.IterationPath':item.iterationPath,'Microsoft.VSTS.Common.Priority':item.priority};
+    if(item.assignedTo) fields['System.AssignedTo']=item.assignedTo;
+    if(item.remainingWork!==null) fields['Microsoft.VSTS.Scheduling.RemainingWork']=item.remainingWork;
+    const raw=await this.call('neo_create_item',{project:config.project,type:item.type,fields,parent:item.parent,validateOnly});
+    return validateOnly ? raw : normalizeItem(raw);
+  }
   async update(config, id, revision, fields) {
-    const fieldNames = { assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork' };
+    const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork' };
     return normalizeItem(await this.call('wit_work_item_write', {
       action: 'update', project: config.project, id,
       updates: [{ op: 'test', path: '/rev', value: revision }, ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],

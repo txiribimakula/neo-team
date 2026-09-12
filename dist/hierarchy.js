@@ -51,6 +51,17 @@ export function capacityStatus(summary) {
   const status=capacity!==null && hours>capacity+0.005 ? 'over' : capacity===null || unknown>0 ? 'unknown' : capacity===0 ? 'zero' : Math.abs(hours-capacity)<0.005 ? 'full' : 'open';
   return {status,percent,hours,capacity,unknown};
 }
+export function personPlanningStatus(workspace, member, iterationId) {
+  const summary=selectionSummary(workspace,member,iterationId), meter=capacityStatus(summary);
+  const covered=['full','over'].includes(meter.status);
+  const signature=JSON.stringify([summary.capacity,summary.planned.map(i=>[i.id,i.remainingWork ?? null,i.title,i.priority]).sort((a,b)=>a[0]-b[0])]);
+  const canConfirm=covered && meter.unknown===0;
+  return {covered,canConfirm,signature,confirmed:canConfirm && workspace.confirmations?.[iterationId]?.[member]===signature};
+}
+export function orderedPlanningMembers(workspace, iterationId) {
+  return workspace.members.map((member,index)=>({member,index,...personPlanningStatus(workspace,memberKey(member),iterationId)}))
+    .sort((a,b)=>Number(a.covered)-Number(b.covered) || a.index-b.index);
+}
 export function eligibleTasks(workspace, member) {
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
   const tree=hierarchy(items);

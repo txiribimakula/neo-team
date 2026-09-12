@@ -61,4 +61,17 @@ server.tool('neo_team_days_off', 'Read team-wide days off for an iteration.', {
   const api = await (await connectionProvider()).getWorkApi();
   return { content: [{ type: 'text', text: JSON.stringify(await api.getTeamDaysOff({ project, team }, iterationId)) }] };
 });
+// Atomic creation includes the parent link and a recovery tag in the same request.
+server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {
+  project:z.string().min(1), type:z.enum(['Epic','Feature','User Story','Task','Bug']),
+  fields:z.record(z.union([z.string(),z.number()])), parent:z.number().int().positive().nullable(), validateOnly:z.boolean(),
+}, async ({project,type,fields,parent,validateOnly})=>{
+  const api=await (await connectionProvider()).getWorkItemTrackingApi();
+  const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Common.Priority'];
+  if(Object.keys(fields).some(k=>!allowed.includes(k))) throw new Error('Campo no permitido.');
+  const document=Object.entries(fields).map(([name,value])=>({op:'add',path:`/fields/${name}`,value}));
+  if(parent) document.push({op:'add',path:'/relations/-',value:{rel:'System.LinkTypes.Hierarchy-Reverse',url:`https://dev.azure.com/${organization}/_apis/wit/workItems/${parent}`}});
+  const result=await api.createWorkItem({},document,project,type,validateOnly,false,false);
+  return {content:[{type:'text',text:JSON.stringify(result)}]};
+});
 await server.connect(new StdioServerTransport());

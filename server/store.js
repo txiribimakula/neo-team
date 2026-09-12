@@ -2,6 +2,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { upgradeDemoHierarchy } from './demo.js';
+import { invalidateConfirmations } from './planner.js';
 
 export class LocalStore {
   constructor(directory) { this.directory = directory; this.file = join(directory, 'workspace.json'); }
@@ -18,6 +19,8 @@ export class LocalStore {
     }
   }
   async save(next) {
+    invalidateConfirmations(next.demo);
+    invalidateConfirmations(next.azure);
     next.version = this.data.version + 1;
     const temp = join(this.directory, `.workspace-${randomUUID()}.tmp`);
     let handle;

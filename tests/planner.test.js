@@ -127,3 +127,47 @@ test('undo token expires after a subsequent local modification and never overwri
   await assert.rejects(()=>f.planner.undoPlan(undo.token),/ha cambiado/);
   assert.equal(f.workspace().drafts[1053].remainingWork,28);assert.equal(f.workspace().drafts[1053].assignedTo,'ana@example.test');
 });
+
+// Creation tests exercise parent remapping and ambiguous network acknowledgements.
+test('new hierarchy stays local, sync creates parents first, remaps links and clears pending drafts',async t=>{
+  const {createLocalItem,effectiveItems}=await import('../server/planner.js');
+  const f=await fixture(t,'demo'),data=structuredClone(f.store.data),ws=data.demo;
+  const epic=createLocalItem(ws,{type:'Epic',title:'New epic'});
+  const feature=createLocalItem(ws,{type:'Feature',title:'New feature',parent:epic});
+  const story=createLocalItem(ws,{type:'User Story',title:'New story',parent:feature});
+  const task=createLocalItem(ws,{type:'Task',title:'New task',parent:story,remainingWork:5,assignedTo:'ana@example.test'});
+  assert.equal(effectiveItems(ws).find(i=>i.id===task).modified,true);
+  await f.store.save(data);const review=await f.planner.prepareReview();assert.equal(review.plans.length,4);
+  const result=await f.planner.sync(review.token);assert.deepEqual(result.failures,[]);assert.equal(result.successes.length,4);
+  const saved=f.workspace();assert.deepEqual(saved.drafts,{});
+  const created=saved.items.filter(i=>i.title.startsWith('New '));assert.ok(created.every(i=>i.id>0 && !i.localOnly));
+  assert.equal(created.find(i=>i.title==='New task').parent,created.find(i=>i.title==='New story').id);
+});
+test('ambiguous creation is recovered without duplicate writes and cannot be discarded or edited meanwhile',async t=>{
+  const {createLocalItem,discardLocal}=await import('../server/planner.js');
+  const f=await fixture(t);const data=structuredClone(f.store.data);
+  const id=createLocalItem(data.azure,{type:'Task',title:'Recover me',parent:1001,remainingWork:3});await f.store.save(data);
+  let remoteCreated,creates=0,visible=false;
+  f.azure.findCreation=async()=>visible ? remoteCreated : null;
+  f.azure.create=async(_config,item,validate)=>{if(validate)return {};creates++;remoteCreated={...item,id:8000,rev:1};throw new Error('Connection lost');};
+  let review=await f.planner.prepareReview();let result=await f.planner.sync(review.token);assert.equal(result.failures.length,1);assert.equal(creates,1);
+  assert.ok(f.workspace().drafts[id]);assert.throws(()=>discardLocal(f.workspace(),id),/sin confirmar/);
+  assert.throws(()=>stageChanges(f.workspace(),id,{title:'Changed'}),/Recupera/);
+  review=await f.planner.prepareReview();result=await f.planner.sync(review.token);assert.equal(result.failures.length,1);assert.equal(creates,1);
+  visible=true;review=await f.planner.prepareReview();result=await f.planner.sync(review.token);
+  assert.deepEqual(result.failures,[]);assert.equal(creates,1);assert.ok(f.workspace().items.some(i=>i.id===8000));assert.equal(f.workspace().drafts[id],undefined);
+});
+test('parent revision changes stop creation before any remote write',async t=>{
+  const {createLocalItem}=await import('../server/planner.js');const f=await fixture(t),data=structuredClone(f.store.data);
+  createLocalItem(data.azure,{type:'Task',title:'Child',parent:1001});await f.store.save(data);
+  const review=await f.planner.prepareReview();f.remote.get(1001).rev++;
+  f.azure.create=async()=>assert.fail('must not create');
+  await assert.rejects(()=>f.planner.sync(review.token),/ha cambiado/);assert.equal(Object.keys(f.workspace().drafts).length,1);
+});
+test('invalid hierarchy and creation fields are rejected; local creation can be discarded before sending',async t=>{
+  const {createLocalItem,discardLocal}=await import('../server/planner.js');const f=await fixture(t,'demo');
+  assert.throws(()=>createLocalItem(f.workspace(),{type:'Task',title:'No parent'}),/padre/);
+  assert.throws(()=>createLocalItem(f.workspace(),{type:'Feature',title:'Wrong parent',parent:1001}),/nivel/);
+  const id=createLocalItem(f.workspace(),{type:'Bug',title:'New bug',parent:1001});discardLocal(f.workspace(),id);
+  assert.ok(!f.workspace().items.some(i=>i.id===id));assert.equal(f.workspace().drafts[id],undefined);
+});

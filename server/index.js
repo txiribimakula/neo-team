@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { AzureGateway } from './azure.js';
-import { Planner, effectiveItems, stageChanges, resolveConflict, workingCapacity, setParticipants, selectTasks, toggleParticipation } from './planner.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation } from './planner.js';
 import { createDemo } from './demo.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
@@ -34,7 +34,7 @@ const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase())
 function publicState() {
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy,
-    workspace: workspace ? { ...workspace, effectiveItems: effectiveItems(workspace), capacityHours: Object.fromEntries(workspace.iterations.map(i => [i.id, Object.fromEntries(workspace.members.map(m => [m.id, workingCapacity(i, workspace.capacities[i.id], m.id, workspace.settings.workingDays)]))])) } : null };
+    workspace: workspace ? planningWorkspace(workspace) : null };
 }
 async function body(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Se requiere JSON.', 415);
@@ -88,6 +88,7 @@ const server = http.createServer(async (req, res) => {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
           if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
           const workspace = await azure.import(store.data.config);
+          workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
           workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
           workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
           const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
@@ -97,6 +98,12 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data); data.mode = input.mode;
           if (input.mode === 'demo' && !data.demo) data.demo = createDemo();
           await store.save(data); planner.review = null;
+        } else if (path === '/api/create') {
+          const data=structuredClone(store.data);createLocalItem(data[data.mode],input);await store.save(data);planner.review=null;
+        } else if (path === '/api/confirm-person') {
+          const data=structuredClone(store.data);
+          confirmPerson(data[data.mode],input.member,input.iterationId);
+          await store.save(data);planner.review=null;
         } else if (path === '/api/task-selection' || path === '/api/participation') {
           const data=structuredClone(store.data),workspace=data[data.mode];
           if(path==='/api/task-selection') selectTasks(workspace,input.member,input.ids,input.iterationId,input.selected);
@@ -120,8 +127,7 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/discard') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('No hay planificación.');
-          if (input.id !== undefined) { delete workspace.drafts[input.id]; delete workspace.conflicts[input.id]; }
-          else { workspace.drafts = {}; workspace.conflicts = {}; }
+          discardLocal(workspace,input.id);
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve') {
           const data = structuredClone(store.data);

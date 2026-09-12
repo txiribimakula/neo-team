@@ -1,4 +1,4 @@
-import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus } from './hierarchy.js';
+import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -11,6 +11,53 @@ let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
 const peoplePopover=$('#people-popover');
 const collapsed = new Set();
 const modal = $('#modal');
+// Measure real row heights so wrapped parent titles never overlap.
+let stickyFrame;
+function layoutStickyHierarchy() {
+  cancelAnimationFrame(stickyFrame);
+  stickyFrame=requestAnimationFrame(()=>{
+    const assigneeHeight=$('.active-assignee')?.getBoundingClientRect().height || 0;
+    const offsets=new Map();
+    document.querySelectorAll('.hierarchy-branch').forEach(branch=>{
+      const summary=branch.querySelector(':scope > summary');
+      const parent=branch.parentElement.closest('.hierarchy-branch');
+      const previous=offsets.get(parent);
+      const top=previous?.bottom ?? (branch.closest('.planning-work') ? assigneeHeight : 0);
+      const depth=previous ? previous.depth+1 : 0;
+      const bottom=top+summary.getBoundingClientRect().height;
+      summary.style.top=`${top}px`;
+      summary.style.zIndex=String(Math.max(3,30-depth));
+      branch.style.setProperty('--sticky-path-height',`${bottom+10}px`);
+      offsets.set(branch,{bottom,depth});
+    });
+  });
+}
+const stickySizes=new ResizeObserver(layoutStickyHierarchy);
+new MutationObserver(()=>{
+  stickySizes.disconnect();
+  document.querySelectorAll('.hierarchy-branch > summary, .planning-people, .active-assignee').forEach(el=>stickySizes.observe(el));
+  layoutStickyHierarchy();
+}).observe($('#app'),{childList:true,subtree:true});
+document.addEventListener('toggle',layoutStickyHierarchy,true);
+window.addEventListener('resize',layoutStickyHierarchy);
+function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sincronizar' : 'Pendiente de sincronizar';}
+function savedStatus() {
+  const count=Object.keys(state?.workspace?.drafts || {}).length;
+  return count ? `${count} pendiente${count===1 ? '' : 's'} de sincronizar` : 'Sin cambios pendientes';
+}
+function createItem(parentId) {
+  const ws=state.workspace,parent=ws.effectiveItems.find(i=>i.id===parentId);
+  const type=parent ? ({Epic:'Feature',Feature:'User Story','User Story':'Task','Product Backlog Item':'Task',Requirement:'Task'})[parent.type] || 'Task' : 'Epic';
+  showModal('Crear elemento','Se guardará en local hasta revisar y sincronizar.',`<form id="create-form"><label class="form-field">Tipo<select name="type" id="create-type">${['Epic','Feature','User Story','Task','Bug'].map(t=>`<option ${t===type ? 'selected' : ''}>${t}</option>`).join('')}</select></label><label class="form-field">Título<input name="title" required maxlength="255" autofocus></label><label class="form-field">Padre<select name="parent" id="create-parent"></select></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${tab==='planning' && key(m)===pickerMember ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}</select></label><label class="form-field">Iteración<select name="iterationPath">${[{path:ws.settings.backlogIteration.path,name:'Backlog'},...ws.iterations].map(i=>`<option value="${escape(i.path)}" ${tab==='planning' && i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><label class="form-field" id="create-hours">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" placeholder="Sin estimar"></label></form>`,'<button class="button" data-action="close">Cancelar</button><button class="button primary" form="create-form" type="submit">Crear en local</button>');
+  updateCreationParents(parentId);
+}
+function updateCreationParents(parentId) {
+  const type=$('#create-type').value,allowed={Epic:[],Feature:['Epic'],'User Story':['Feature'],Task:['User Story','Product Backlog Item','Requirement'],Bug:['User Story','Product Backlog Item','Requirement']}[type];
+  $('#create-parent').innerHTML='<option value="">'+(type==='Epic' ? 'Sin padre' : 'Selecciona el padre')+'</option>'+state.workspace.effectiveItems.filter(i=>allowed.includes(i.type)).map(i=>`<option value="${i.id}" ${i.id===parentId ? 'selected' : ''}>${escape(i.title)} · ${i.localOnly ? 'nuevo' : '#'+i.id}</option>`).join('');
+  $('#create-parent').required=type!=='Epic';$('#create-parent').disabled=type==='Epic';
+  $('#create-hours').hidden=!['Task','Bug'].includes(type);
+  $('#create-hours input').disabled=$('#create-hours').hidden;
+}
 function toast(text) { clearTimeout(toastTimer); $('#toast').textContent = text; $('#toast').hidden = false; toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 5000); }
 function errorInModal(error) {
   const target = $('#modal-error');
@@ -37,7 +84,7 @@ async function request(path, input = {}) {
     return data;
   } finally {
     pending = false; enabled.forEach(el => el.disabled = false);
-    $('#save-status').textContent = state?.workspace ? 'Guardado en este equipo' : 'Almacenamiento local';
+    $('#save-status').textContent = savedStatus();
   }
 }
 async function loadState(renderNow = true) {
@@ -47,35 +94,194 @@ async function loadState(renderNow = true) {
   if (renderNow) render();
 }
 function showModal(title, subtitle, body, actions = '') {
-  modal.classList.remove('wide-modal');
+  modal.classList.remove('wide-modal', 'connection-modal');
   $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2><p>${escape(subtitle)}</p></div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
   if (!modal.open) modal.showModal();
 }
+let connectionPickerEvents = new AbortController();
 function connection() {
+  connectionPickerEvents.abort();
+  connectionPickerEvents = new AbortController();
   const c = state.config || {};
   showModal('Conecta tu equipo', 'Configura Azure DevOps desde aquí. Los datos se guardan en este equipo.', `
     <form id="connection-form">
       <label class="form-field">Organización<input name="organization" required maxlength="150" placeholder="mi-organizacion o https://dev.azure.com/mi-organizacion" value="${escape(c.organization)}" autocomplete="off"></label>
       <label class="form-field">Acceso<select name="authentication"><option value="interactive">Iniciar sesión con Microsoft</option><option value="azcli" ${c.authentication === 'azcli' ? 'selected' : ''}>Usar mi sesión de Azure CLI</option></select><small>Con Microsoft se abrirá tu navegador para iniciar sesión. La aplicación no solicita tu contraseña.</small></label>
-      <div class="form-field"><label for="project">Proyecto</label><div class="actions"><input id="project" name="project" required maxlength="200" list="projects" placeholder="Nombre del proyecto" value="${escape(c.project)}" autocomplete="off"><button class="button small" type="button" data-action="projects">Buscar proyectos</button></div><datalist id="projects"></datalist></div>
-      <div class="form-field"><label for="team">Equipo</label><div class="actions"><input id="team" name="team" required maxlength="200" list="teams" placeholder="Nombre del equipo" value="${escape(c.team)}" autocomplete="off"><button class="button small" type="button" data-action="teams">Buscar equipos</button></div><datalist id="teams"></datalist></div>
+      ${connectionField('project', 'Proyecto', c.project)}
+      ${connectionField('team', 'Equipo', c.team)}
       <details><summary class="text-muted" style="font-size:14px;cursor:pointer;margin-bottom:14px">Opciones avanzadas</summary><label class="form-field">Tenant de Microsoft Entra (opcional)<input name="tenant" placeholder="Identificador del directorio" value="${escape(c.tenant)}"><small>Déjalo vacío para detectar el directorio de tu organización.</small></label></details>
       <p id="connection-progress" class="busy-note" role="status" hidden></p>
       <div class="notice">Se importarán integrantes, iteraciones, backlog y capacidad. Podrás preparar cambios en local y revisarlos antes de sincronizarlos.</div>
     </form>`, '<button class="button" data-action="save-config">Guardar configuración</button><button class="button primary" type="submit" form="connection-form">Conectar e importar ↙</button>');
+  modal.classList.add('connection-modal');
+  setupConnectionPickers();
+}
+function connectionField(name, label, value) {
+  return `<div class="form-field connection-field" data-picker="${name}">
+    <label for="${name}">${label}</label>
+    <div class="connection-picker">
+      <div class="connection-control">
+        <input id="${name}" name="${name}" required maxlength="200" placeholder="Buscar o escribir ${label.toLowerCase()}…" value="${escape(value)}" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${name}-options" aria-describedby="${name}-status">
+        <span class="spinner" aria-hidden="true" hidden></span>
+        <button class="connection-toggle" type="button" aria-label="Mostrar ${name === 'project' ? 'proyectos' : 'equipos'}" aria-controls="${name}-options" tabindex="-1">⌄</button>
+      </div>
+      <div class="connection-dropdown" hidden>
+        <div id="${name}-options" class="connection-options" role="listbox" aria-label="${label}"></div>
+        <p class="connection-empty" hidden></p>
+        <button type="button" class="connection-refresh">Actualizar lista</button>
+      </div>
+    </div>
+    <small id="${name}-status" class="connection-status" role="status" aria-live="polite"></small>
+  </div>`;
 }
 const getConfig = () => Object.fromEntries(new FormData($('#connection-form')));
-async function lookup(kind) {
-  const config = getConfig();
-  const note = $('#connection-progress'); note.hidden = false; note.textContent = 'Conectando… Completa el acceso de Microsoft en el navegador si se solicita.';
-  try {
-    const data = await request(`/api/${kind}`, { config });
-    $(`#${kind}`).innerHTML = data[kind].map(item => `<option value="${escape(item.name)}"></option>`).join('');
-    note.textContent = `${data[kind].length} ${kind === 'projects' ? 'proyectos' : 'equipos'} disponibles. Elige uno en el campo.`;
-    const input = $(`#${kind === 'projects' ? 'project' : 'team'}`);
-    if (!input.value && data[kind].length === 1) input.value = data[kind][0].name;
-    input.focus();
-  } catch (error) { note.hidden = true; throw error; }
+function setupConnectionPickers() {
+  const form = $('#connection-form');
+  const pickers = {};
+  const normalize = value => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('es');
+  for (const name of ['project', 'team']) {
+    const field = $(`[data-picker="${name}"]`, form), input = $('input', field);
+    const dropdown = $('.connection-dropdown', field), list = $('[role="listbox"]', field);
+    const note = $('.connection-status', field), toggle = $('.connection-toggle', field);
+    const empty = $('.connection-empty', field), spinner = $('.spinner', field);
+    const kind = name === 'project' ? 'projects' : 'teams';
+    const plural = name === 'project' ? 'proyectos' : 'equipos';
+    let items = null, visible = [], active = -1, loading = false;
+    const message = (text, error = false) => {
+      note.textContent = text;
+      note.classList.toggle('error', error);
+    };
+    const close = () => {
+      dropdown.hidden = true;
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+      active = -1;
+    };
+    const highlight = index => {
+      active = index;
+      [...list.children].forEach((option, i) => option.classList.toggle('active', i === active));
+      if (active < 0) input.removeAttribute('aria-activedescendant');
+      else {
+        input.setAttribute('aria-activedescendant', list.children[active].id);
+        list.children[active].scrollIntoView({ block: 'nearest' });
+      }
+    };
+    const open = (filter = '') => {
+      Object.values(pickers).forEach(picker => picker.close());
+      visible = (items || []).filter(item => normalize(item).includes(normalize(filter.trim())));
+      list.innerHTML = visible.map((item, i) => `<div id="${name}-option-${i}" class="connection-option" role="option" aria-selected="${item === input.value}" data-index="${i}"><span>${escape(item)}</span>${item === input.value ? '<span aria-hidden="true">✓</span>' : ''}</div>`).join('');
+      empty.hidden = visible.length > 0;
+      empty.textContent = items?.length ? 'Sin coincidencias. Prueba otra búsqueda o escribe el nombre completo.' : `No se encontraron ${plural}. Puedes actualizar la lista o escribir el nombre completo.`;
+      dropdown.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+    };
+    const lookup = async () => {
+      if (pending || loading) return;
+      const organization = form.elements.organization;
+      if (!organization.reportValidity()) return;
+      if (name === 'team' && !pickers.project.input.reportValidity()) return;
+      const config = getConfig();
+      Object.values(pickers).forEach(picker => picker.close());
+      loading = true;
+      field.setAttribute('aria-busy', 'true');
+      spinner.hidden = false;
+      toggle.hidden = true;
+      message(`Cargando ${plural}… Completa el acceso de Microsoft si se abre el navegador.`);
+      try {
+        const data = await request(`/api/${kind}`, { config });
+        items = [...new Set(data[kind].map(item => item.name))].sort((a, b) => a.localeCompare(b, 'es'));
+        message(items.length ? `${items.length} ${plural} disponibles. Escribe para filtrar y selecciona uno.` : `No hay ${plural} disponibles. Comprueba el acceso o introduce el nombre manualmente.`);
+        input.focus();
+        open();
+      } catch (error) {
+        items = null;
+        message(`No se pudieron cargar los ${plural}: ${error.message} Abre el desplegable para reintentar.`, true);
+        input.focus();
+      } finally {
+        loading = false;
+        field.setAttribute('aria-busy', 'false');
+        spinner.hidden = true;
+        toggle.hidden = false;
+        updateAvailability();
+      }
+    };
+    const show = () => {
+      if (pending || input.disabled) return;
+      if (items === null) void lookup();
+      else open();
+    };
+    const select = index => {
+      if (visible[index] === undefined) return;
+      const changed = input.value !== visible[index];
+      input.value = visible[index];
+      close();
+      if (changed && name === 'project') pickers.team.reset();
+      updateAvailability();
+      input.focus();
+    };
+    pickers[name] = { input, toggle, close, reset() {
+      items = null;
+      input.value = '';
+      close();
+      message('');
+    } };
+    input.addEventListener('click', show);
+    toggle.addEventListener('click', () => {
+      if (dropdown.hidden) { input.focus(); show(); }
+      else { close(); input.focus(); }
+    });
+    input.addEventListener('input', () => {
+      if (name === 'project') pickers.team.reset();
+      updateAvailability();
+      if (items !== null) open(input.value);
+    });
+    input.addEventListener('keydown', event => {
+      if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
+        event.preventDefault();
+        if (dropdown.hidden) { show(); return; }
+        if (visible.length) highlight(active < 0 ? (event.key === 'ArrowDown' ? 0 : visible.length - 1) : (active + (event.key === 'ArrowDown' ? 1 : -1) + visible.length) % visible.length);
+      } else if (event.key === 'Enter' && !dropdown.hidden) {
+        event.preventDefault();
+        if (active >= 0) select(active);
+        else close();
+      } else if (event.key === 'Escape' && !dropdown.hidden) {
+        event.preventDefault(); event.stopPropagation(); close();
+      }
+    });
+    list.addEventListener('mousedown', event => event.preventDefault());
+    list.addEventListener('click', event => {
+      const option = event.target.closest('[data-index]');
+      if (option && !pending) select(Number(option.dataset.index));
+    });
+    $('.connection-refresh', field).addEventListener('click', lookup);
+    field.addEventListener('focusout', event => { if (!field.contains(event.relatedTarget)) close(); });
+  }
+  function updateAvailability() {
+    for (const [name, picker] of Object.entries(pickers)) {
+      const ready = !!form.elements.organization.value.trim() && (name === 'project' || !!pickers.project.input.value.trim());
+      picker.input.disabled = picker.toggle.disabled = pending || !ready;
+      if (!ready) {
+        picker.close();
+        $(`#${name}-status`, form).textContent = name === 'project' ? 'Indica primero la organización.' : 'Indica primero el proyecto.';
+      } else {
+        const note = $(`#${name}-status`, form);
+        if (!note.textContent || note.textContent.startsWith('Indica primero')) note.textContent = 'Abre el desplegable para buscar o escribe el nombre completo.';
+      }
+    }
+  }
+  for (const name of ['organization', 'authentication', 'tenant']) {
+    form.elements[name].addEventListener(name === 'authentication' ? 'change' : 'input', () => {
+      Object.values(pickers).forEach(picker => picker.reset());
+      updateAvailability();
+    });
+  }
+  // Close on pointer clicks outside a picker, including non-focusable modal text.
+  modal.addEventListener('click', event => {
+    Object.entries(pickers).forEach(([name, picker]) => {
+      if (!event.target.closest(`[data-picker="${name}"]`)) picker.close();
+    });
+  }, { signal: connectionPickerEvents.signal });
+  updateAvailability();
 }
 async function saveConfig(importNow) {
   const form = $('#connection-form'); if (!form.reportValidity()) return;
@@ -124,10 +330,10 @@ function treeView({ availableOnly = false, picker = false, member = focusedMembe
   function nodeHtml(node,depth) {
     const sources=participantSources(node,ws,tree);
     const participants=ws.members.filter(m=>sources.has(key(m)));
-    const peopleButton=`<button class="people-button" type="button" data-action="participants" data-task="${node.id}" aria-controls="people-popover" aria-expanded="${peopleItem===node.id}" aria-label="Repartir ${escape(node.title)} entre personas">${participants.slice(0,3).map((m,index)=>`<span class="avatar c${index%4}" title="${escape(m.displayName)}">${escape(initials(m.displayName))}</span>`).join('')}<span>${participants.length ? `${participants.length} personas` : '+ Repartir'}</span></button>`;
+    const peopleButton=`<button class="people-button" type="button" data-action="participants" data-task="${node.id}" aria-controls="people-popover" aria-expanded="${peopleItem===node.id}" aria-label="Repartir ${escape(node.title)} entre personas">${participants.slice(0,3).map((m,index)=>`<span class="avatar c${index%4}" title="${escape(m.displayName)}">${escape(initials(m.displayName))}</span>`).join('')}<span>${participants.length ? `${participants.length} · reparto local` : '+ Repartir'}</span></button>`;
     const type=`<span class="node-type kind-${typeRank(node)}">${escape(node.type)}</span>`;
     if (!isExecutable(node)) {
-      return `<details class="hierarchy-branch" data-node="${node.id}" ${picker || search || !collapsed.has(node.id) ? 'open' : ''}><summary><span class="branch-chevron">›</span>${type}<span class="branch-title">${escape(node.title)} <small>#${node.id}${node.contextOnly ? ' · contexto' : ''}</small></span>${picker ? `<button class="remove-branch" type="button" data-action="remove-branch" data-task="${node.id}" aria-label="Quitar ${escape(node.title)} de ${escape(memberName(member))}" title="Quita la rama y desmarca sus tareas de esta iteración">Quitar rama ×</button>` : peopleButton}</summary><div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('') || '<p class="branch-empty">Sin tareas o bugs disponibles en esta rama.</p>'}</div></details>`;
+      return `<details class="hierarchy-branch" data-node="${node.id}" ${picker || search || !collapsed.has(node.id) ? 'open' : ''}><summary><span class="branch-chevron">›</span>${type}<span class="branch-title">${escape(node.title)} <small>#${node.id}${node.contextOnly ? ' · contexto' : ''}</small>${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</span><button class="button small" data-action="create" data-parent="${node.id}" aria-label="Crear hijo de ${escape(node.title)}">+</button><button class="button small" data-action="edit" data-task="${node.id}">Editar</button>${picker ? `<button class="remove-branch" type="button" data-action="remove-branch" data-task="${node.id}" aria-label="Quitar ${escape(node.title)} de ${escape(memberName(member))}" title="Quita la rama y desmarca sus tareas de esta iteración">Quitar rama ×</button>` : peopleButton}</summary><div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('') || '<p class="branch-empty">Sin tareas o bugs disponibles en esta rama.</p>'}</div></details>`;
     }
     const already=node.iterationPath === iteration?.path && node.assignedTo === member;
     const other=!!node.assignedTo && node.assignedTo !== member;
@@ -135,7 +341,7 @@ function treeView({ availableOnly = false, picker = false, member = focusedMembe
     const effort=node.remainingWork !== null ? `${number(node.remainingWork)} h` : node.points !== null ? `${number(node.points)} pts` : 'Sin estimar';
     const controls=picker ? `<input type="checkbox" name="taskIds" value="${node.id}" aria-label="Seleccionar ${escape(node.title)}" ${disabled ? 'disabled' : ''} ${already ? 'checked' : ''}>` : '';
     const status=picker && other ? `Responsable: ${memberName(node.assignedTo)}` : already ? 'Seleccionada' : iterationName(node.iterationPath);
-    const contents=`${controls}<div class="leaf-copy"><div class="leaf-meta">${type}<span>#${node.id}</span>${node.modified ? '<span class="pill changed">Editada</span>' : ''}</div>${picker ? `<span class="leaf-title">${escape(node.title)}</span>` : `<button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button>`}<span class="leaf-status">${escape(status)}${!picker && node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${picker ? '' : peopleButton}`;
+    const contents=`${controls}<div class="leaf-copy"><div class="leaf-meta">${type}<span>#${node.id}</span>${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div>${picker ? `<span class="leaf-title">${escape(node.title)}</span>` : `<button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button>`}<span class="leaf-status">${escape(status)}${!picker && node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${picker ? '' : peopleButton}`;
     const leaf=picker ? `<label class="hierarchy-leaf ${disabled ? 'unavailable' : ''}">${contents}</label>` : `<div class="hierarchy-leaf" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
@@ -181,7 +387,9 @@ function ensureSelection() {
 }
 function choosePerson(member) {
   if(!state.workspace.members.some(m=>key(m)===member))return;
+  const peopleScroll=$('.planning-people')?.scrollTop || 0;
   pickerMember=member;focusedMember=member;pickerQuery='';tab='planning';render();
+  if($('.planning-people'))$('.planning-people').scrollTop=peopleScroll;
 }
 function pickTasks(member) {
   modal.close();
@@ -197,7 +405,7 @@ function personMeter(member) {
 function plannerView() {
   ensureSelection();const ws=state.workspace,iteration=selected();
   if(!iteration || !ws.members.length)return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para planificar.</div>';
-  return `<div class="continuous-planner"><div class="planning-people" aria-label="Personas del equipo">${ws.members.map((m,index)=>`<button class="planning-person ${key(m)===pickerMember ? 'active' : ''}" data-action="choose-person" data-member="${escape(key(m))}" aria-pressed="${key(m)===pickerMember}"><span class="person-name"><span class="avatar c${index%4}">${escape(initials(m.displayName))}</span><strong>${escape(m.displayName)}</strong></span>${personMeter(m)}</button>`).join('')}</div><section class="planning-work"><div class="planning-work-heading"><h2>${escape(memberName(pickerMember))}</h2><input id="picker-search" placeholder="Buscar tarea o rama" aria-label="Buscar tareas de esta persona" value="${escape(pickerQuery)}"><label class="show-unavailable"><input id="show-unavailable" type="checkbox" ${onlyAvailable ? '' : 'checked'}>Con otro responsable</label></div><div class="picker-toolbar"><label class="bulk-selection"><input id="toggle-visible" type="checkbox">Marcar visibles</label><span class="local-note">Guardado automático en local</span></div><div id="picker-tree">${treeView({picker:true,member:pickerMember,search:pickerQuery})}</div></section></div>`;
+  return `<div class="continuous-planner"><div class="planning-people" aria-label="Personas del equipo">${orderedPlanningMembers(ws,selectedIteration).map(({member:m,index,canConfirm,confirmed})=>`<div class="planning-person-card ${key(m)===pickerMember ? 'active' : ''}"><button class="planning-person" data-action="choose-person" data-member="${escape(key(m))}" aria-pressed="${key(m)===pickerMember}"><span class="person-name"><span class="avatar c${index%4}">${escape(initials(m.displayName))}</span><strong>${escape(m.displayName)}</strong></span>${personMeter(m)}${key(m)===pickerMember ? '<span class="assigning-label">Asignando ahora</span>' : ''}</button>${canConfirm ? `<button class="person-confirm ${confirmed ? 'confirmed' : ''}" data-action="confirm-person" data-member="${escape(key(m))}" aria-label="${confirmed ? 'Reparto confirmado de' : 'Confirmar reparto de'} ${escape(m.displayName)}" ${confirmed ? 'disabled' : ''}>${confirmed ? '✓ Confirmado en local' : 'Confirmar'}</button>` : ''}</div>`).join('')}</div><section class="planning-work" aria-label="Tareas de ${escape(memberName(pickerMember))}"><div class="active-assignee"><span class="avatar">${escape(initials(memberName(pickerMember)))}</span><div><span>Asignando tareas a</span><h2>${escape(memberName(pickerMember))}</h2></div></div><div class="planning-work-heading"><input id="picker-search" placeholder="Buscar tarea o rama" aria-label="Buscar tareas de esta persona" value="${escape(pickerQuery)}"><label class="show-unavailable"><input id="show-unavailable" type="checkbox" ${onlyAvailable ? '' : 'checked'}>Con otro responsable</label></div><div class="picker-toolbar"><label class="bulk-selection"><input id="toggle-visible" type="checkbox">Marcar visibles</label><span class="local-note">Borrador local · asignaciones pendientes de sincronizar</span></div><div id="picker-tree">${treeView({picker:true,member:pickerMember,search:pickerQuery})}</div></section></div>`;
 }
 function updateBulkCheckbox() {
   const boxes=[...document.querySelectorAll('#picker-tree input[name="taskIds"]:not(:disabled)')], toggle=$('#toggle-visible');
@@ -209,9 +417,10 @@ function refreshPicker() {
   $('#picker-tree').innerHTML=treeView({picker:true,member:pickerMember,search:pickerQuery});updateBulkCheckbox();
 }
 function renderSaved(focusId) {
-  const scroll=$('#picker-tree')?.scrollTop || 0;
+  const scroll=$('#picker-tree')?.scrollTop || 0, peopleScroll=$('.planning-people')?.scrollTop || 0;
   render();
   if($('#picker-tree'))$('#picker-tree').scrollTop=scroll;
+  if($('.planning-people'))$('.planning-people').scrollTop=peopleScroll;
   if(focusId)document.querySelector(`input[name="taskIds"][value="${focusId}"]`)?.focus({preventScroll:true});
   if(peopleItem){refreshPeople();positionPeople();}
 }
@@ -231,7 +440,7 @@ function updatePlanningView() {
 function taskCard(item, inBacklog = false) {
   const effort = item.remainingWork !== null ? `${number(item.remainingWork)} h` : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
   return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="true" data-task="${item.id}" data-action="edit" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
-    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>#${item.id}</span><span>· ${escape(item.type)}</span>${item.modified ? '<span class="pill changed">Editada</span>' : ''}</div>
+    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>#${item.id}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div>
     <p class="task-title">${escape(item.title)}</p>
     <div class="task-footer"><div class="task-tags">${item.tags.slice(0,2).map(t=>`<span class="tag">${escape(t)}</span>`).join('')}${item.priority === 1 ? '<span class="tag" style="background:#fceee3;color:#a6743e">P1</span>' : ''}</div><span class="effort">${effort}</span></div>
     ${inBacklog && item.iterationPath !== state.workspace.settings.backlogIteration.path ? `<div class="local-note">${escape(iterationName(item.iterationPath))}</div>` : ''}
@@ -255,20 +464,20 @@ function board(iteration, planned) {
 function table() {
   const eligible = new Set(focusedMember ? eligibleTasks(state.workspace,focusedMember).map(i=>i.id) : []);
   const items = filtered(state.workspace.effectiveItems.filter(i=>!focusedMember || eligible.has(i.id)));
-  return `<div class="table-wrap"><table><thead><tr><th>TAREA</th><th>RESPONSABLE</th><th>ITERACIÓN</th><th>ESTADO</th><th>ESFUERZO</th><th></th></tr></thead><tbody>${items.map(item=>`<tr><td><span class="text-muted">#${item.id} · ${escape(item.type)}</span>${item.modified ? ' <span class="pill changed">Editada</span>' : ''}<span class="table-title">${escape(item.title)}</span></td><td>${escape(memberName(item.assignedTo))}</td><td>${escape(iterationName(item.iterationPath))}</td><td>${escape(item.state)}</td><td>${item.remainingWork !== null ? `${number(item.remainingWork)} h` : item.points !== null ? `${number(item.points)} pts` : '—'}</td><td><button class="button small" data-action="edit" data-task="${item.id}" aria-label="Editar tarea ${item.id}">Editar</button></td></tr>`).join('')}</tbody></table>${!items.length ? '<div class="empty-result">No hay tareas con estos filtros.</div>' : ''}</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>TAREA</th><th>RESPONSABLE</th><th>ITERACIÓN</th><th>ESTADO</th><th>ESFUERZO</th><th></th></tr></thead><tbody>${items.map(item=>`<tr><td><span class="text-muted">#${item.id} · ${escape(item.type)}</span>${item.modified ? ` <span class="pill changed">${pendingLabel(item)}</span>` : ''}<span class="table-title">${escape(item.title)}</span></td><td>${escape(memberName(item.assignedTo))}</td><td>${escape(iterationName(item.iterationPath))}</td><td>${escape(item.state)}</td><td>${item.remainingWork !== null ? `${number(item.remainingWork)} h` : item.points !== null ? `${number(item.points)} pts` : '—'}</td><td><button class="button small" data-action="edit" data-task="${item.id}" aria-label="Editar tarea ${item.id}">Editar</button></td></tr>`).join('')}</tbody></table>${!items.length ? '<div class="empty-result">No hay tareas con estos filtros.</div>' : ''}</div>`;
 }
 function render() {
   const ws=state.workspace;
   $('#connection-button').textContent=state.config ? 'Configuración' : 'Conectar Azure DevOps';
-  $('#save-status').textContent=ws ? 'Guardado en local' : '';
+  $('#save-status').textContent=ws ? savedStatus() : '';
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div>`;return;
   }
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
   const changes=Object.keys(ws.drafts).length;
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><details class="workspace-menu"><summary aria-label="Más opciones">···</summary><div>${ws.mode==='demo' ? '<button data-action="azure">Salir del ejemplo</button>' : `<button data-action="import" ${changes ? 'disabled' : ''}>Actualizar datos</button>`}<button data-action="tab" data-tab="board">Vista del equipo</button><button data-action="tab" data-tab="list">Todas las tareas</button><a href="/api/export" download>Exportar</a>${changes ? '<button data-action="discard-all">Descartar cambios</button>' : ''}</div></details></div>
-  <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>1</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>2</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>3</span>Revisar${changes ? ` <small>${changes}</small>` : ''}</button></nav>
+  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button><select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><details class="workspace-menu"><summary aria-label="Más opciones">···</summary><div>${ws.mode==='demo' ? '<button data-action="azure">Salir del ejemplo</button>' : `<button data-action="import" ${changes ? 'disabled' : ''}>Actualizar datos</button>`}<button data-action="tab" data-tab="board">Vista del equipo</button><button data-action="tab" data-tab="list">Todas las tareas</button><a href="/api/export" download>Exportar</a>${changes ? '<button data-action="discard-all">Descartar cambios</button>' : ''}</div></details></div>
+  <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>1</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>2</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>3</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>
   <div id="planning-view">${tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   updateBulkCheckbox();
@@ -276,10 +485,10 @@ function render() {
 function editTask(id) {
   const ws = state.workspace, item = ws.effectiveItems.find(i=>i.id === id);
   if (!item) throw new Error('La tarea ya no está disponible.');
-  if (!isExecutable(item)) { editParticipants(id); return; }
+  if (item.contextOnly) {toast('Este elemento es solo contexto de otro equipo.');return;}
   const paths = [{ path:ws.settings.backlogIteration.path, name:'Backlog' },...ws.iterations];
   if (!paths.some(i=>i.path === item.iterationPath)) paths.push({ path:item.iterationPath, name:item.iterationPath });
-  showModal(`#${id} · ${item.type}`, item.title, `<form id="task-form" data-task="${id}"><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
+  showModal(`#${id} · ${item.type}`, item.title, `<form id="task-form" data-task="${id}"><label class="form-field">Título<input name="title" required maxlength="255" value="${escape(item.title)}"></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
 }
 async function stage(id, changes) {
   await request('/api/stage', { edits:[{ id, changes }] }); review = null; render();
@@ -290,7 +499,7 @@ async function reviewChanges() {
 }
 function renderReview() {
   const conflicts = review.plans.filter(p=>p.conflicts.length);
-  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparadas con la versión actual de Azure DevOps'}`, `${conflicts.length ? '<div class="notice warning" style="margin-bottom:20px">Algunas tareas han cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>#${p.id} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`, `<button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
+  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparadas con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length ? '<div class="notice warning" style="margin-bottom:20px">Algunas tareas han cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`, `<button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
 }
 async function synchronize() {
   const data = await request('/api/sync', { token:review.token }); review = null; render();
@@ -302,15 +511,17 @@ async function importData() {
   await request('/api/import'); modal.close(); render(); toast('Datos actualizados desde Azure DevOps.');
 }
 const actions = {
-  connect: connection, close: () => modal.close(), projects:()=>lookup('projects'), teams:()=>lookup('teams'), 'save-config':()=>saveConfig(false),
+  connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
   demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; render(); },
   azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; render(); },
   import: importData,
+  create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   participants: el=>editParticipants(Number(el.dataset.task),el),
   'remove-branch': el=>saveParticipation(Number(el.dataset.task),pickerMember,false),
   'pick-tasks': el=>pickTasks(el.dataset.member),
   'choose-person': el=>choosePerson(el.dataset.member),
+  'confirm-person': async el=>{await request('/api/confirm-person',{member:el.dataset.member,iterationId:selectedIteration});renderSaved();},
   'go-sharing': ()=>{tab='hierarchy';focusedMember='';query='';backlogFilter='all';render();},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
@@ -346,6 +557,7 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if(event.target.id==='create-form'){const input=Object.fromEntries(new FormData(event.target));input.parent=Number(input.parent)||null;if(input.remainingWork)input.remainingWork=Number(input.remainingWork);else delete input.remainingWork;await request('/api/create',input);modal.close();render();toast('Elemento creado en local. Pendiente de sincronizar.');return;}
     if (event.target.id === 'connection-form') await saveConfig(true);
     if (event.target.id === 'task-form') {
       const values = Object.fromEntries(new FormData(event.target));
@@ -358,6 +570,7 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   try {
+    if(el.id==='create-type'){updateCreationParents();return;}
     if(el.dataset.participant){const member=el.dataset.participant;await saveParticipation(peopleItem,member,el.checked);[...peoplePopover.querySelectorAll('input[data-participant]')].find(box=>box.dataset.participant===member)?.focus({preventScroll:true});return;}
     if(el.name==='taskIds'){await saveTaskSelection([Number(el.value)],el.checked);return;}
     if(el.id==='toggle-visible'){

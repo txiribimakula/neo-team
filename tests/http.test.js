@@ -65,4 +65,24 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   assert.equal(state.workspace.effectiveItems.find(i=>i.id===1042).assignedTo,'');
   const moduleResponse=await fetch(url+'/hierarchy.js');assert.equal(moduleResponse.status,200);
   const saved=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));assert.equal(saved.demo.drafts[1042].remainingWork,26);assert.equal(saved.config.project,'Project');
+  const member='ana@example.test',iterationId='sprint-24';
+  result=await post('/api/confirm-person',{member,iterationId});assert.equal(result.response.status,400);
+  const capacity=state.workspace.capacityHours[iterationId][state.workspace.members.find(m=>m.uniqueName===member).id];
+  await post('/api/stage',{edits:[{id:1042,changes:{assignedTo:member,iterationPath:state.workspace.iterations[0].path,remainingWork:capacity}}]});
+  result=await post('/api/confirm-person',{member,iterationId});assert.equal(result.response.status,200);
+  state=await getState();assert.ok(state.workspace.confirmations[iterationId][member]);
+  const confirmedDisk=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));
+  assert.equal(confirmedDisk.demo.confirmations[iterationId][member],state.workspace.confirmations[iterationId][member]);
+  await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:capacity+1}}]});
+  assert.equal(state.workspace.confirmations[iterationId]?.[member],undefined);
+
+  result=await post('/api/create',{type:'Task',title:'Created through HTTP',parent:1001,remainingWork:4});
+  assert.equal(result.response.status,200);
+  const created=state.workspace.effectiveItems.find(i=>i.title==='Created through HTTP');assert.ok(created.localOnly && created.modified && created.id<0);
+  state=await getState();assert.ok(state.workspace.drafts[created.id]);
+  const beforeInvalid=state.version;
+  result=await post('/api/create',{type:'Task',title:'Invalid assignee',parent:1001,assignedTo:'missing'});assert.equal(result.response.status,400);
+  state=await getState();assert.equal(state.version,beforeInvalid);assert.ok(!state.workspace.items.some(i=>i.title==='Invalid assignee'));
+  result=await post('/api/discard',{id:created.id});assert.equal(result.response.status,200);assert.ok(!state.workspace.items.some(i=>i.id===created.id));
+
 });
