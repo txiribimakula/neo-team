@@ -89,3 +89,7 @@
 .import-progress-connection:empty{display:none}
 .import-progress.failed{background:#fff8f3;border-color:#edcdb8}
 .import-progress.failed .import-progress-heading{color:#a94338}
+
+.import-progress-time{display:block;color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
+.import-progress [data-cancel-operation]{margin-top:12px}
+.import-progress [hidden]{display:none}

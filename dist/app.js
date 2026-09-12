@@ -67,24 +67,29 @@ function errorInModal(error) {
 async function request(path, input = {}) {
   if (pending) throw new Error('Espera a que termine la operación en curso.');
   pending = true;
-  const enabled = [...document.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')];
+  let recover = false;
+  const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]), input:not(:disabled), select:not(:disabled)')];
   enabled.forEach(el => el.disabled = true);
   $('#save-status').textContent = 'Procesando…';
   try {
     const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) });
     const data = await response.json();
     if (!response.ok) {
-      // Refresh version after partial success, restarts or edits in another tab.
-      await loadState(false).catch(() => {});
-      if (state) render();
       throw new Error(data.error || 'No se pudo completar la operación.');
     }
     if (data.state) state = data.state;
     else if (data.csrf) state = data;
     return data;
+  } catch (error) {
+    // Recover a server operation after a reload, another tab, or a lost response.
+    await loadState(false).catch(() => {});
+    recover = !!(state?.busy && state?.operation);
+    if (state) render();
+    throw error;
   } finally {
     pending = false; enabled.forEach(el => el.disabled = false);
     $('#save-status').textContent = savedStatus();
+    if (recover) setTimeout(() => resumeOperation(), 0);
   }
 }
 async function loadState(renderNow = true) {
@@ -283,16 +288,38 @@ function setupConnectionPickers() {
   }, { signal: connectionPickerEvents.signal });
   updateAvailability();
 }
-async function importWithProgress(target) {
-  const importId = crypto.randomUUID();
+async function importWithProgress(target, existing = null) {
+  const importId = existing?.id || crypto.randomUUID();
+  const isImport = !existing || existing.path === '/api/import';
+  let finish, fail;
+  const completion = existing ? new Promise((resolve, reject) => { finish = resolve; fail = reject; }) : null;
   const controller = new AbortController();
   let stopped = false, timer;
   $('#modal-error').hidden = true;
   target.hidden = false;
   target.className = 'import-progress';
-  target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small>`;
+  target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small><small class="import-progress-time"></small><button type="button" class="button small" data-cancel-operation>Cancelar consulta</button>`;
   target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const cancelButton = $('[data-cancel-operation]', target);
+  if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
+  cancelButton.addEventListener('click', async () => {
+    cancelButton.disabled = true;
+    try {
+      const response = await fetch('/api/cancel-operation', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ id: importId }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      $('.import-progress-connection', target).textContent = 'Cancelando la consulta…';
+    } catch (error) {
+      $('.import-progress-connection', target).textContent = error.message;
+    }
+  });
   const renderProgress = progress => {
+    if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
+    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams'].includes(existing.path) : false;
+    cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
+    const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
+    const idle = progress.updatedAt ? Math.floor((Date.now() - progress.updatedAt) / 1000) : 0;
+    $('.import-progress-time', target).textContent = progress.startedAt ? `${Math.floor(elapsed / 60)} min ${elapsed % 60} s en curso${idle >= 30 ? ` · ${idle} s sin nuevos datos. Azure puede estar esperando la autenticación o una respuesta.` : ''}` : '';
     $('.import-progress-phase', target).textContent = progress.message;
     const c = progress.counts || {};
     const entries = [
@@ -310,13 +337,20 @@ async function importWithProgress(target) {
     ].filter(Boolean);
     $('.import-progress-counts', target).innerHTML = entries.map(text => `<li>${escape(text)}</li>`).join('');
   };
+  if (existing) renderProgress(existing);
   const poll = async () => {
     try {
-      const response = await fetch(`/api/import-progress?id=${encodeURIComponent(importId)}`, { headers: { 'X-Neo-CSRF': state.csrf }, signal: controller.signal });
+      const response = await fetch(`/api/${existing ? 'operation' : 'import-progress'}?id=${encodeURIComponent(importId)}`, { headers: { 'X-Neo-CSRF': state.csrf }, signal: controller.signal });
       if (!response.ok) throw new Error('Progress unavailable');
       const data = await response.json();
       if (stopped) return;
-      if (data.progress) renderProgress(data.progress);
+      const progress = existing ? data.operation : data.progress;
+      if (progress) renderProgress(progress);
+      if (existing) {
+        if (!progress) fail(new Error('La operación ya no está disponible. Actualiza los datos para comprobar el resultado.'));
+        else if (progress.status === 'complete') finish();
+        else if (['failed', 'cancelled'].includes(progress.status)) fail(new Error(progress.error || progress.message));
+      }
       $('.import-progress-connection', target).textContent = '';
     } catch {
       if (!stopped) $('.import-progress-connection', target).textContent = 'No se pudo actualizar el progreso. Reintentando…';
@@ -324,23 +358,50 @@ async function importWithProgress(target) {
       if (!stopped) timer = setTimeout(poll, 700);
     }
   };
-  const operation = request('/api/import', { importId });
+  const operation = completion || request('/api/import', { importId });
   void poll();
   try {
     const data = await operation;
-    $('.import-progress-phase', target).textContent = 'Importación completada. Copia local guardada.';
+    $('.import-progress-phase', target).textContent = isImport ? 'Importación completada. Copia local guardada.' : 'Consulta completada.';
     return data;
   } catch (error) {
     target.classList.add('failed');
-    $('.import-progress-heading strong', target).textContent = 'Importación detenida';
-    $('.import-progress-note', target).textContent = 'La importación no se ha completado. Puedes volver a intentarlo.';
+    $('.import-progress-heading strong', target).textContent = isImport ? 'Importación detenida' : 'Operación detenida';
+    $('.import-progress-note', target).textContent = 'La operación no se ha completado. Puedes volver a intentarlo.';
     throw error;
   } finally {
     stopped = true;
     clearTimeout(timer);
     controller.abort();
     $('.spinner', target).hidden = true;
+    cancelButton.hidden = true;
+    $('.import-progress-time', target).textContent = $('.import-progress-time', target).textContent.replace('en curso', 'transcurridos');
     $('.import-progress-connection', target).textContent = '';
+  }
+}
+let recoveringOperation = false;
+async function resumeOperation() {
+  if (recoveringOperation || pending || !state?.operation || !state.busy) return;
+  recoveringOperation = true;
+  const current = state.operation;
+  showModal(current.title || 'Operación en curso', 'Recuperando el estado de la operación que sigue ejecutándose en el servidor.', '<div id="connection-progress"></div>');
+  pending = true;
+  const enabled = [...document.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')];
+  enabled.forEach(el => el.disabled = true);
+  $('#save-status').textContent = current.title || 'Operación en curso';
+  try {
+    await importWithProgress($('#connection-progress'), current);
+    await loadState();
+    modal.close();
+    toast('Operación completada. Datos actualizados.');
+  } catch (error) {
+    await loadState().catch(() => {});
+    errorInModal(error);
+  } finally {
+    pending = false;
+    recoveringOperation = false;
+    enabled.forEach(el => el.disabled = false);
+    $('#save-status').textContent = savedStatus();
   }
 }
 async function saveConfig(importNow) {
@@ -688,6 +749,6 @@ async function registerTools() {
   for (const tool of tools) { try { await document.modelContext.registerTool(tool,{signal:lifecycle.signal}); } catch { /* Browsers without stable WebMCP still use the complete UI. */ } }
 }
 window.addEventListener('pagehide',()=>lifecycle.abort(),{once:true});
-loadState().then(registerTools).catch(error=>{
+loadState().then(() => { registerTools(); return resumeOperation(); }).catch(error=>{
   $('#app').innerHTML=`<div class="notice error">${escape(error.message)} Recarga esta página cuando el servidor local esté disponible.</div>`;
 });

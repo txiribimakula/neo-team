@@ -17,6 +17,7 @@ const azure = new AzureGateway(), planner = new Planner(store, azure);
 const csrf = randomBytes(32).toString('hex');
 let busy = false;
 let importProgress = null;
+let operation = null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
@@ -34,7 +35,7 @@ function configFrom(input, requireTeam = true) {
 const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
 function publicState() {
   const workspace = planner.workspace();
-  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy,
+  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy, operation: busy ? operation : null,
     workspace: workspace ? planningWorkspace(workspace) : null };
 }
 async function body(req) {
@@ -55,6 +56,10 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const path = url.pathname;
     if (req.method === 'GET' && path === '/api/state') return json(res, publicState());
+    if (req.method === 'GET' && path === '/api/operation') {
+      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      return json(res, { operation: operation?.id === url.searchParams.get('id') ? operation : null });
+    }
     if (req.method === 'GET' && path === '/api/import-progress') {
       if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
       return json(res, { progress: importProgress?.id === url.searchParams.get('id') ? importProgress : null });
@@ -66,15 +71,26 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path.startsWith('/api/')) {
       if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
       const input = await body(req);
+      if (path === '/api/cancel-operation') {
+        if (!busy || !operation || input.id !== operation.id) throw fail('La operación ya terminó o cambió. Actualiza su estado.', 409);
+        if (!operation.cancellable) throw fail('Esta operación no se puede cancelar mientras guarda o sincroniza datos.', 409);
+        operation = { ...operation, cancelRequested: true, cancellable: false, message: 'Cancelando la consulta…', updatedAt: Date.now() };
+        await azure.close();
+        return json(res, { cancelling: true });
+      }
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
+      const labels = { '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/sync': 'Sincronizando cambios' };
+      operation = { id: randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams'].includes(path) };
       try {
         if (path === '/api/projects') {
+          operation.message = 'Conectando y consultando los proyectos de Azure DevOps… La sesión puede reutilizarse sin pedir acceso de nuevo.';
           await azure.open(configFrom(input.config, false));
           return json(res, { projects: await azure.projects() });
         }
         if (path === '/api/teams') {
+          operation.message = 'Conectando y consultando los equipos de Azure DevOps… La sesión puede reutilizarse sin pedir acceso de nuevo.';
           const config = configFrom(input.config, false);
           if (!config.project) throw fail('Indica el proyecto.');
           await azure.open(config);
@@ -94,17 +110,26 @@ const server = http.createServer(async (req, res) => {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
           if (Object.keys(store.data.azure?.drafts || {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
           const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
-          importProgress = { id, status: 'running', phase: 'connection', message: 'Iniciando importación…', counts: {} };
+          operation = { ...operation, id, message: 'Iniciando importación…' };
+          importProgress = operation;
           try {
-            const workspace = await azure.import(store.data.config, progress => { importProgress = { ...importProgress, ...progress }; });
+            const workspace = await azure.import(store.data.config, progress => {
+              if (operation.cancelRequested) throw fail('Importación cancelada.');
+              operation = { ...operation, ...progress, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
+              importProgress = operation;
+            });
+            if (operation.cancelRequested) throw fail('Importación cancelada.');
+            operation = { ...operation, cancellable: false, phase: 'saving', message: 'Guardando la copia local…', updatedAt: Date.now() };
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
             workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
             workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
             const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
             await store.save(data); planner.review = null;
-            importProgress = { ...importProgress, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
+            operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
+            importProgress = operation;
           } catch (error) {
-            importProgress = { ...importProgress, status: 'failed', message: `Importación detenida: ${error.message}` };
+            operation = { ...operation, status: 'failed', message: `Importación detenida: ${error.message}` };
+            importProgress = operation;
             throw error;
           }
         } else if (path === '/api/mode') {
@@ -151,7 +176,15 @@ const server = http.createServer(async (req, res) => {
         else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState() });
         else throw fail('Operación no encontrada.', 404);
         return json(res, publicState());
-      } finally { busy = false; }
+      } catch (error) {
+        operation = { ...operation, status: operation.cancelRequested ? 'cancelled' : 'failed', error: operation.cancelRequested ? 'Consulta cancelada.' : error.message };
+        if (operation.cancelRequested) throw fail('Consulta cancelada.');
+        throw error;
+      } finally {
+        busy = false;
+        operation = { ...operation, status: operation.status === 'running' ? (operation.cancelRequested ? 'cancelled' : 'complete') : operation.status, cancellable: false, updatedAt: Date.now() };
+        if (path === '/api/import') importProgress = operation;
+      }
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);

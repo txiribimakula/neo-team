@@ -52,6 +52,13 @@ test('real bundled MCP initializes and advertises the required schemas without a
   const write=tools.find(tool=>tool.name==='wit_work_item_write');
   const schema=JSON.stringify(write.inputSchema);assert.match(schema,/test/);assert.match(schema,/number/);assert.match(schema,/updates/);
 });
+test('closing the gateway also closes a client that is still connecting',async()=>{
+  const gateway=new AzureGateway();
+  let closed=0;
+  gateway.openingClient={close:async()=>{closed++;}};
+  await gateway.close();
+  assert.equal(closed,1);assert.equal(gateway.openingClient,null);assert.equal(gateway.client,null);
+});
 
 function backlogGateway({backlog = {id:'root',name:'Iteration',path:''}, iterations = [], members = [], levels = []} = {}) {
   const gateway = new AzureGateway();

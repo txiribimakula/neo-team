@@ -33,6 +33,7 @@ export class AzureGateway {
     if (this.key === key && this.client) return;
     await this.close();
     const client = new Client({ name: 'neo-team', version: '0.1.0' });
+    this.openingClient = client;
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [fileURLToPath(new URL('./mcp-server.js', import.meta.url)), config.organization, config.authentication, config.tenant || ''],
@@ -46,11 +47,17 @@ export class AzureGateway {
       for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_work_item_states']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
+      if (this.openingClient !== client) throw new Error('Conexión cancelada.');
+      this.openingClient = null;
       this.client = client; this.key = key;
       client.onclose = () => { if (this.client === client) { this.client = null; this.key = null; } };
-    } catch (error) { await client.close().catch(() => {}); throw error; }
+    } catch (error) { if (this.openingClient === client) this.openingClient = null; await client.close().catch(() => {}); throw error; }
   }
-  async close() { const client = this.client; this.client = null; this.key = null; if (client) await client.close().catch(() => {}); }
+  async close() {
+    const clients = [this.client, this.openingClient].filter(Boolean);
+    this.client = null; this.openingClient = null; this.key = null;
+    await Promise.all(clients.map(client => client.close().catch(() => {})));
+  }
   async call(name, args) {
     if (!this.client) throw new Error('Conecta Azure DevOps para continuar.');
     const result = await this.client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });

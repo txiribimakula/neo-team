@@ -14,11 +14,14 @@ test('import progress is readable during work, isolated by id, and retained on f
     import { createDemo } from ${JSON.stringify(new URL('../server/demo.js',import.meta.url).href)};
     let run=0;
     AzureGateway.prototype.import=async function(config, report) {
+      const current=++run;
       report({phase:'members',message:'Leyendo integrantes…',counts:{members:3}});
       await new Promise(resolve=>setTimeout(resolve,350));
       report({phase:'items',message:'Leyendo elementos…',counts:{members:3,imported:2}});
       await new Promise(resolve=>setTimeout(resolve,350));
-      if (++run===2) throw new Error('Fallo de prueba al leer elementos');
+      if (current===2) throw new Error('Fallo de prueba al leer elementos');
+      report({phase:'saving',message:'Guardando…',counts:{members:3,imported:2}});
+      await new Promise(resolve=>setTimeout(resolve,150));
       return {...createDemo(),mode:'azure',config};
     };
   `;
@@ -47,6 +50,12 @@ test('import progress is readable during work, isolated by id, and retained on f
   };
   const importing=post('/api/import',{importId:'first'});
   assert.equal((await waitForProgress('first','members')).status,'running');
+  const during=await (await fetch(url+'/api/state')).json();
+  assert.equal(during.busy,true);assert.equal(during.operation.id,'first');
+  assert.equal(during.operation.path,'/api/import');assert.equal(during.operation.cancellable,true);
+  assert.ok(during.operation.startedAt);assert.ok(during.operation.updatedAt);
+  const resumed=await (await fetch(url+'/api/operation?id=first',{headers})).json();
+  assert.equal(resumed.operation.id,'first');
   assert.equal(await progress('other'),null);
   assert.equal((await post('/api/import',{importId:'other'})).status,409);
   assert.equal((await waitForProgress('first','items')).counts.imported,2);
@@ -62,4 +71,17 @@ test('import progress is readable during work, isolated by id, and retained on f
   assert.match(failed.message,/Fallo de prueba/);
   state=await (await fetch(url+'/api/state')).json();
   assert.equal(state.busy,false);assert.equal(state.version,savedVersion,'a failed import does not replace saved data');
+  const cancelled=post('/api/import',{importId:'third'});
+  await waitForProgress('third','members');
+  assert.equal((await post('/api/cancel-operation',{id:'wrong'})).status,409);
+  assert.equal((await post('/api/cancel-operation',{id:'third'})).status,200);
+  const cancelResult=await cancelled;
+  assert.equal(cancelResult.status,400);assert.match((await cancelResult.json()).error,/cancelada/);
+  assert.equal((await progress('third')).status,'cancelled');
+  state=await (await fetch(url+'/api/state')).json();
+  assert.equal(state.busy,false);assert.equal(state.version,savedVersion);assert.equal(state.operation,null);
+  const retry=post('/api/import',{importId:'fourth'});
+  await waitForProgress('fourth','saving');
+  assert.equal((await post('/api/cancel-operation',{id:'fourth'})).status,409,'saving cannot be cancelled');
+  assert.equal((await retry).status,200,'a cancelled operation does not keep the server locked');
 });
