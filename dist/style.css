@@ -238,3 +238,5 @@
 .pill.maintenance-resolved{background:#fff4d7;color:#8a6a1f}.pill.maintenance-none{background:#eef1ec;color:var(--muted)}
 /* With several projects, the project is the top parent of each backlog. */
 .node-type.kind-project{background:#dfe8d8;color:#3d5a33}.project-branch>summary{background:#fff;border-color:#c9d6bf}.project-branch>summary .branch-title{font-size:16px;font-weight:700}
+/* Links to the real work item in Azure DevOps. */
+.azure-link{color:#557a3f;text-decoration:none;font-size:12px;font-weight:600;padding:0 4px;border-radius:4px;white-space:nowrap}.azure-link:hover,.azure-link:focus-visible{background:#e6efdc;text-decoration:underline}.azure-open{margin:0 0 14px;font-size:13px}
