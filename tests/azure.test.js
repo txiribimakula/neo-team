@@ -133,3 +133,11 @@ test('MCP preserves source-denial classification for partial security reports',a
   });
   assert.equal(gateway.pendingCall,null);
 });
+test('capacity failures keep the reason, project and iteration for diagnosis',async()=>{
+  const config = {organization:'org',project:'Project',team:'Team'};
+  const failing = error => { const gateway = backlogGateway({iterations:[{id:'s1',name:'Sprint 1',path:'\\Sprint 1'}]}), base = gateway.call; gateway.call = async (name,args) => { if (name === 'neo_team_days_off') { if (error) throw new Error(error); return null; } return base(name,args); }; return gateway; };
+  await assert.rejects(()=>failing(null).capacity(config,'s1'),/no devolvió los días libres de la iteración s1 \(equipo «Team»\)/);
+  const imported = await failing('HTTP 404 al leer los días libres').import(config);
+  assert.deepEqual(imported.warnings,['No se pudo consultar la capacidad de «Sprint 1» en Project: HTTP 404 al leer los días libres']);
+  await assert.rejects(()=>failing('HTTP 403').import(config,()=>{},[],{section:'capacity',snapshot:imported}),/Capacidad de «Sprint 1» en Project: HTTP 403/);
+});

@@ -128,7 +128,13 @@ server.tool('neo_team_days_off', 'Read team-wide days off for an iteration.', {
   project: z.string().min(1), team: z.string().min(1), iterationId: z.string().min(1),
 }, async ({ project, team, iterationId }) => {
   const api = await (await connectionProvider()).getWorkApi();
-  return { content: [{ type: 'text', text: JSON.stringify(await api.getTeamDaysOff({ project, team }, iterationId)) }] };
+  const where = `proyecto «${project}», equipo «${team}», iteración ${iterationId}`;
+  let daysOff;
+  try { daysOff = await api.getTeamDaysOff({ project, team }, iterationId); }
+  catch (error) { throw new Error(`${error.statusCode ? `HTTP ${error.statusCode}` : error.name || 'Error'} al leer los días libres (${where}): ${error.message}`); }
+  // The REST client resolves a 404 as null instead of rejecting.
+  if (!daysOff) throw new Error(`HTTP 404 al leer los días libres (${where}): Azure DevOps no encontró la iteración en ese equipo.`);
+  return { content: [{ type: 'text', text: JSON.stringify(daysOff) }] };
 });
 // Capacity writes replace the complete value of one member, or the team-wide
 // days off, so a stale partial patch cannot mix with what Azure already has.

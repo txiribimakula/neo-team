@@ -95,7 +95,7 @@ export class AzureGateway {
       return result;
     } catch (error) {
       this.pendingCall = null;
-      this.report('error', `${label} falló tras ${seconds(Date.now() - startedAt)}: ${String(error?.message ?? error).slice(0, 200)}`);
+      this.report('error', `${label} falló tras ${seconds(Date.now() - startedAt)}: ${String(error?.message ?? error).slice(0, 500)}`);
       throw error;
     }
   }
@@ -146,6 +146,7 @@ export class AzureGateway {
     const context = { project: config.project, team: config.team };
     const capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId });
     const daysOff = await this.call('neo_team_days_off', { ...context, iterationId });
+    if (!daysOff || typeof daysOff !== 'object') throw new Error(`Azure DevOps no devolvió los días libres de la iteración ${iterationId} (equipo «${config.team}»).`);
     return { ...capacity, daysOff: daysOff.daysOff ?? [] };
   }
   async updateMemberCapacity(config, iterationId, teamMemberId, activities, daysOff) {
@@ -170,7 +171,8 @@ export class AzureGateway {
       const capacities={};
       for(const iteration of snapshot.iterations.filter(i=>!i.past)) {
         report('capacity',`Actualizando capacidad de «${iteration.name}»…`);
-        capacities[iteration.id]=await this.capacity(config,iteration.id);
+        try {capacities[iteration.id]=await this.capacity(config,iteration.id);}
+        catch(error) {error.message=`Capacidad de «${iteration.name}» en ${config.project}: ${error.message}`;throw error;}
       }
       return {...snapshot,capacities};
     }
@@ -246,7 +248,7 @@ export class AzureGateway {
     for(const iteration of section==='tasks' ? [] : iterations) {
       report('capacity',`Consultando capacidad de «${iteration.name}»…`,{imported:items.length});
       try {capacities[iteration.id]=await this.capacity(config,iteration.id);}
-      catch {warnings.push(`No se pudo consultar la capacidad de «${iteration.name}».`);}
+      catch(error) {warnings.push(`No se pudo consultar la capacidad de «${iteration.name}» en ${config.project}: ${String(error?.message ?? error).slice(0,500)}`);}
       report('capacity',`Capacidad consultada: «${iteration.name}».`,{capacities:Object.keys(capacities).length});
     }
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
