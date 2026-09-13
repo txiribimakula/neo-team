@@ -18,12 +18,40 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   await gateway.update({project:'Project'},42,8,{state:'Closed'});
   assert.deepEqual(call.args.updates,[{op:'test',path:'/rev',value:8},{op:'add',path:'/fields/System.State',value:'Closed'}]);
 });
-test('completed state lookup reads custom workflow categories',async()=>{
+test('maintenance lists open Functional Issues of the team areas with one WIQL query and batched details',async()=>{
+  const gateway=new AzureGateway(),calls=[],progress=[];
+  const ids=Array.from({length:201},(_,index)=>500-index);
+  gateway.call=async(name,args)=>{
+    calls.push({name,args});
+    if(name==='work')return {areaPaths:[{value:"Project\\Team's",includeChildren:true},{value:'Project\\Ops',includeChildren:false}]};
+    if(name==='neo_work_item_states')return [{name:'New',category:'Proposed'},{name:'Active',category:'InProgress'},{name:'Resolved',category:'Resolved'},{name:'Closed',category:'Completed'}];
+    if(name==='wit_query')return {workItems:ids.map(id=>({id}))};
+    if(name==='wit_work_item')return [...args.ids].reverse().map(id=>({id,fields:{'System.Title':`Issue ${id}`,'System.State':id%2 ? 'New' : 'Active','System.AssignedTo':id===500 ? 'Ana García <ana@example.test>' : undefined,'System.Tags':'ui; login','Microsoft.VSTS.Common.Priority':2}}));
+    throw new Error(`Unexpected tool ${name}`);
+  };
+  const result=await gateway.functionalIssues({organization:'org',project:'Project',team:'Team'},p=>progress.push(p));
+  const query=calls.find(c=>c.name==='wit_query').args;
+  assert.equal(query.top,1000);
+  assert.match(query.wiql,/\[System\.WorkItemType\] = 'Functional Issue'/);
+  assert.match(query.wiql,/\[System\.State\] IN \('New', 'Active'\)/,'only not started and active categories');
+  assert.match(query.wiql,/\(\[System\.AreaPath\] UNDER 'Project\\Team''s' OR \[System\.AreaPath\] = 'Project\\Ops'\)/,'team areas, with quotes escaped');
+  assert.deepEqual(calls.filter(c=>c.name==='wit_work_item').map(c=>[c.args.action,c.args.ids.length]),[['get_batch',200],['get_batch',1]]);
+  assert.deepEqual(result.issues.map(i=>i.id),ids,'the query order is kept');
+  assert.deepEqual({...result.issues[0],createdAt:undefined},{id:500,title:'Issue 500',state:'Active',category:'inprogress',assignedTo:'Ana García',areaPath:'',iterationPath:'',priority:2,createdAt:undefined,changedAt:null,tags:['ui','login']});
+  assert.equal(result.issues[1].category,'proposed');assert.equal(result.issues[1].assignedTo,'');
+  assert.deepEqual([result.organization,result.project,result.team,result.limited],['org','Project','Team',false]);
+  assert.deepEqual(progress.at(-1).counts,{issuesFound:201,issuesRead:201});
+  gateway.call=async name=>name==='work' ? {} : [{name:'Closed',category:'Completed'}];
+  await assert.rejects(()=>gateway.functionalIssues({project:'Project',team:'Team'}),/sin empezar ni activos/);
+  gateway.call=async name=>{if(name==='work')return {};throw new Error('TF: unknown type');};
+  await assert.rejects(()=>gateway.functionalIssues({project:'Project',team:'Team'}),/Functional Issue/);
+});
+test('work item states are read on demand with normalized custom categories',async()=>{
   const gateway=new AzureGateway();
   gateway.call=async(name,args)=>{assert.deepEqual([name,args],['neo_work_item_states',{project:'Project',type:'Task'}]);return [{name:'Active',category:'InProgress'},{name:'Entregado',stateCategory:' Completed '}];};
-  assert.equal(await gateway.completedState({project:'Project'},'Task'),'Entregado');
-  gateway.call=async()=>[{name:'Active',category:'InProgress'}];
-  assert.equal(await gateway.completedState({project:'Project'},'Task'),null);
+  assert.deepEqual(await gateway.workItemStates({project:'Project'},'Task'),[{name:'Active',category:'inprogress'},{name:'Entregado',category:'completed'}]);
+  gateway.call=async()=>({});
+  await assert.rejects(()=>gateway.workItemStates({project:'Project'},'Task'),/estados/);
 });
 test('import uses MCP for complete members, hierarchy, capacities and team scope',async()=>{
   const gateway=new AzureGateway(),calls=[],progress=[];gateway.open=async()=>{};

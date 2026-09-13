@@ -324,6 +324,27 @@ export function invalidateConfirmations(workspace) {
   }
 }
 
+// The person planning decides which state closes each type of task. Tasks
+// already marked with a previous choice move to the new one.
+export function setCompletedState(workspace, type, state) {
+  if (!workspace?.items.some(i => i.type === type && isExecutable(i))) throw new Error('Elige un tipo de tarea o bug de esta planificación.');
+  const name = typeof state === 'string' ? state.trim() : '';
+  if (!name || name.length > 128) throw new Error('Indica el estado que se considera completado.');
+  const previous = workspace.completedStates?.[type];
+  workspace.completedStates = { ...workspace.completedStates, [type]: name };
+  if (!previous || previous === name) return;
+  for (const [id, draft] of Object.entries(workspace.drafts)) {
+    const item = workspace.items.find(i => i.id === Number(id));
+    if (item?.type === type && draft.state === previous) stageChanges(workspace, item.id, { state: name });
+  }
+}
+export function completeTask(workspace, id) {
+  const item = workspace && effectiveItems(workspace).find(i => i.id === id);
+  if (!item || !isExecutable(item)) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
+  if (!workspace.completedStates?.[item.type]) throw new Error(`Indica primero qué estado de «${item.type}» se considera completado.`);
+  stageChanges(workspace, id, { state: workspace.completedStates[item.type] });
+}
+
 export class Planner {
   constructor(store, azure) { this.store = store; this.azure = azure; this.review = null; }
   workspace() { return this.store.data[this.store.data.mode]; }
@@ -346,23 +367,6 @@ export class Planner {
       }
     }
     await this.store.save(data); this.lastBatch=null; this.review=null;
-  }
-  // Closing needs the completed state of the type. A workspace imported without
-  // it looks it up once in Azure DevOps and keeps it for the rest of the tasks.
-  async completeTask(id) {
-    const workspace = this.workspace();
-    const item = workspace && effectiveItems(workspace).find(i => i.id === id);
-    if (!item || !isExecutable(item)) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
-    let completed = workspace.completedStates?.[item.type];
-    if (!completed && workspace.mode === 'azure') {
-      await this.azure.open(workspace.config);
-      completed = await this.azure.completedState(workspace.config, item.type);
-    }
-    if (!completed) throw new Error(`Azure DevOps no define un estado de categoría «Completed» para «${item.type}».`);
-    const data = structuredClone(this.store.data), next = data[data.mode];
-    next.completedStates = { ...next.completedStates, [item.type]: completed };
-    stageChanges(next, id, { state: completed });
-    await this.store.save(data); this.review = null;
   }
   async prepareReview() {
     const workspace = this.workspace();

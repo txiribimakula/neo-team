@@ -43,6 +43,18 @@ export function createDemo() {
   return workspace;
 }
 
+export function demoFunctionalIssues() {
+  const day = offset => new Date(Date.now() - offset * 86400000).toISOString();
+  const issues = [
+    [2101, 'El informe mensual no incluye los proyectos archivados', 'Active', 'inprogress', 'Ana García', 1, 1, ['Informes']],
+    [2107, 'El aviso de sesión caducada aparece dos veces', 'Active', 'inprogress', 'Marcos Ruiz', 2, 0, ['Sesión']],
+    [2104, 'La búsqueda ignora las tildes en los nombres', 'New', 'proposed', '', 2, 3, ['Búsqueda']],
+    [2110, 'Los filtros guardados se pierden al cambiar de equipo', 'New', 'proposed', 'Lucía Martín', 2, 6, []],
+    [2113, 'Texto cortado en el menú en pantallas pequeñas', 'New', 'proposed', '', 3, 9, ['Móvil']],
+  ].map(([id, title, state, category, assignedTo, priority, changed, tags]) => ({ id, title, state, category, assignedTo, areaPath: 'Neo Platform\\Producto', iterationPath: 'Neo Platform', priority, createdAt: day(changed + 20), changedAt: day(changed), tags }));
+  return { type: 'Functional Issue', fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', team: 'Equipo de producto', issues };
+}
+
 // A finished iteration with open work, reviewed before planning the next one.
 export function upgradeDemoPreviousIteration(workspace) {
   if (!workspace || workspace.mode !== 'demo' || workspace.demoPreviousVersion === 1) return false;

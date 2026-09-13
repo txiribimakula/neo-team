@@ -13,6 +13,13 @@ npm start
 
 Abre **http://127.0.0.1:4310**. Para desarrollar, `npm run dev` reinicia el servidor al editarlo. No hay compilación de frontend: los archivos de `dist/` son las fuentes estáticas de la interfaz.
 
+## Secciones
+
+La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre a esta pantalla. Desde ella se accede a:
+
+- **Planificación**: preparación de iteraciones, descrita en [Uso](#uso).
+- **Mantenimiento**: lista los elementos de tipo `Functional Issue` que no se han empezado o están activos, es decir, cuyo estado pertenece a las categorías `Proposed` o `InProgress` de su flujo. La consulta se limita a las áreas del equipo configuradas en Azure DevOps y se ordena por prioridad y por fecha de la última modificación. Se ejecuta al entrar por primera vez y con **Actualizar**; el resultado se guarda solo en memoria hasta cerrar la aplicación. Permite buscar y filtrar por estado, y cada título abre el elemento en Azure DevOps. Muestra un máximo de 1000 elementos y avisa si hay más. Es de solo lectura. En el ejemplo se usan datos simulados.
+
 ## Uso
 
 1. En **Conectar Azure DevOps**, introduce tu organización o su URL.
@@ -38,7 +45,7 @@ Abre **http://127.0.0.1:4310**. Para desarrollar, `npm run dev` reinicia el serv
 - Sólo guarda elementos abiertos: consulta las categorías de estado de cada tipo y excluye `Completed` y `Removed`, incluidos los estados personalizados y los padres cerrados. Conserva las tareas hijas abiertas y los elementos `Resolved` pendientes de validación. El progreso indica cuántos se han excluido; al actualizar los datos también desaparecen de la copia local los que se hayan cerrado desde la importación anterior.
 - Consulta capacidad, calendario laboral, ausencias personales y días libres del equipo. Una capacidad que no se ha podido consultar se muestra como desconocida, acompañada de un aviso.
 - Mantiene las estimaciones en puntos separadas de las horas. La carga utiliza **RemainingWork**; los puntos se muestran como información. No se convierten puntos a horas.
-- Sincroniza únicamente los campos editados: `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority`, `Microsoft.VSTS.Scheduling.RemainingWork` y `System.State`. El estado solo se cambia al marcar una tarea o bug como completado, con el primer estado de categoría `Completed` de su tipo. Se guarda al importar; si la copia local no lo tiene (por ejemplo, porque se importó con una versión anterior), se consulta a Azure DevOps al marcar la primera tarea de ese tipo.
+- Sincroniza únicamente los campos editados: `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority`, `Microsoft.VSTS.Scheduling.RemainingWork` y `System.State`. El estado solo se cambia al marcar una tarea o bug como completado, con el estado que elijas como completado para su tipo. La importación propone el primer estado de categoría `Completed`. Si no se conoce, al marcar la primera tarea de ese tipo se muestra una lista para elegirlo: los estados de los datos importados, nombres habituales y un nombre libre. Puedes consultar todos los estados del flujo en Azure DevOps bajo demanda; esa consulta muestra su progreso y se puede cancelar. La elección se recuerda al volver a importar y se cambia desde **Al completar**, en el paso 2; las tareas ya marcadas pasan al nuevo estado.
 - Las tarjetas se ordenan por prioridad e identificador. Mover una tarjeta cambia su asignación e iteración; no escribe el orden de Azure (`StackRank`). El reparto de participantes no crea cambios remotos en los padres. Solo las tareas y bugs elegidos pasan al borrador de la iteración.
 - Esta versión no crea ni elimina work items ni modifica fechas de iteración o relaciones. Los estados solo cambian al marcar tareas y bugs como completados. **Actualizar datos** requiere sincronizar o descartar el borrador previo.
 - La importación excluye las iteraciones pasadas antes de consultar sus tareas y capacidades, salvo la más reciente: de ella se importan las tareas abiertas, sin capacidad, para revisarlas en el paso 2. No se puede elegir para planificar. Mantiene la actual, las futuras y las que no tienen fechas suficientes para clasificarlas; el progreso indica cuántas anteriores se han excluido. Recorre las tareas sin un límite silencioso. Un fallo de importación conserva la copia anterior.

@@ -44,6 +44,22 @@ function workflowStates(states) {
   return states.filter(s => s && normalize(s.name)).map(s => ({ name: s.name, category: normalize(s.category || s.stateCategory).replace(/\s/g, '') }));
 }
 
+export const FUNCTIONAL_ISSUE = 'Functional Issue';
+const MAINTENANCE_LIMIT = 1000;
+const quoteWiql = value => `'${String(value).replace(/'/g, "''")}'`;
+function functionalIssue(raw, openStates) {
+  const f = raw.fields ?? {}, state = f['System.State'] ?? '', assigned = f['System.AssignedTo'];
+  return {
+    id: raw.id, title: f['System.Title'] || `Elemento ${raw.id}`, state,
+    category: openStates.find(s => s.name.trim().toLowerCase() === state.trim().toLowerCase())?.category ?? '',
+    // get_batch flattens identities to "Name <email>".
+    assignedTo: typeof assigned === 'object' ? assigned?.displayName ?? '' : String(assigned ?? '').replace(/\s*<[^<>]*>$/, ''),
+    areaPath: f['System.AreaPath'] ?? '', iterationPath: f['System.IterationPath'] ?? '',
+    priority: f['Microsoft.VSTS.Common.Priority'] ?? null, createdAt: f['System.CreatedDate'] ?? null, changedAt: f['System.ChangedDate'] ?? null,
+    tags: (f['System.Tags'] || '').split(';').map(s => s.trim()).filter(Boolean),
+  };
+}
+
 export class AzureGateway {
   async open(config) {
     const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
@@ -105,10 +121,40 @@ export class AzureGateway {
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
   }
-  async completedState(config, type) {
+  // Maintenance: Functional Issues of the team areas that are not started or
+  // active, according to the state categories of their workflow.
+  async functionalIssues(config, onProgress = () => {}) {
+    const type = FUNCTIONAL_ISSUE;
+    onProgress({ message: 'Leyendo las áreas del equipo…' });
+    const settings = await this.call('work', { action: 'get_team_settings', project: config.project, team: config.team });
+    onProgress({ message: `Consultando los estados de «${type}»…` });
+    let states;
+    try { states = await this.call('neo_work_item_states', { project: config.project, type }); } catch { states = null; }
+    if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}». Comprueba que el proceso del proyecto incluye ese tipo de elemento.`);
+    const open = workflowStates(states).filter(s => ['proposed', 'inprogress'].includes(s.category));
+    if (!open.length) throw new Error(`«${type}» no tiene estados sin empezar ni activos.`);
+    const areas = (settings?.areaPaths ?? []).map(area => `[System.AreaPath] ${area.includeChildren ? 'UNDER' : '='} ${quoteWiql(area.value)}`);
+    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.WorkItemType] = ${quoteWiql(type)} AND [System.State] IN (${open.map(s => quoteWiql(s.name)).join(', ')})${areas.length ? ` AND (${areas.join(' OR ')})` : ''} ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC`;
+    onProgress({ message: `Buscando «${type}» sin empezar o activos…` });
+    const result = await this.call('wit_query', { action: 'wiql', project: config.project, top: MAINTENANCE_LIMIT, wiql });
+    if (!Array.isArray(result?.workItems)) throw new Error('Azure DevOps no devolvió una lista válida de elementos.');
+    const ids = result.workItems.map(item => item.id), issues = [];
+    const fields = ['System.Id', 'System.Title', 'System.State', 'System.AssignedTo', 'System.AreaPath', 'System.IterationPath', 'Microsoft.VSTS.Common.Priority', 'System.CreatedDate', 'System.ChangedDate', 'System.Tags'];
+    for (let start = 0; start < ids.length; start += 200) {
+      onProgress({ message: `Leyendo los detalles de ${ids.length} elementos…`, counts: { issuesFound: ids.length, issuesRead: start } });
+      const batch = await this.call('wit_work_item', { action: 'get_batch', project: config.project, ids: ids.slice(start, start + 200), fields });
+      if (!Array.isArray(batch)) throw new Error('Azure DevOps no devolvió los detalles de los elementos.');
+      issues.push(...batch.map(raw => functionalIssue(raw, open)));
+    }
+    onProgress({ message: 'Consulta completada.', counts: { issuesFound: ids.length, issuesRead: ids.length } });
+    const order = new Map(ids.map((id, index) => [id, index]));
+    issues.sort((a, b) => order.get(a.id) - order.get(b.id));
+    return { type, fetchedAt: new Date().toISOString(), limited: ids.length >= MAINTENANCE_LIMIT, demo: false, organization: config.organization, project: config.project, team: config.team, issues };
+  }
+  async workItemStates(config, type) {
     const states = await this.call('neo_work_item_states', { project: config.project, type });
     if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}».`);
-    return workflowStates(states).find(s => s.category === 'completed')?.name ?? null;
+    return workflowStates(states);
   }
   async capacity(config, iterationId) {
     const context = { project: config.project, team: config.team };

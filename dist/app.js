@@ -1,4 +1,5 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
+import { maintenanceView, filterMaintenance } from './maintenance.js';
 import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, previousIteration } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -6,8 +7,8 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
-let securitySnapshot = null;
-let state, selectedIteration = '', tab = 'iteration', query = '', pending = false, review, toastTimer;
+let securitySnapshot = null, maintenanceSnapshot = null;
+let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
 const peoplePopover=$('#people-popover');
@@ -304,7 +305,7 @@ async function importWithProgress(target, existing = null, start = null) {
   target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small><small class="import-progress-time"></small><button type="button" class="button small" data-cancel-operation>Cancelar consulta</button>`;
   target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   const cancelButton = $('[data-cancel-operation]', target);
-  if (start) $('.import-progress-heading strong', target).textContent = 'Consultando permisos';
+  if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
   cancelButton.addEventListener('click', async () => {
     cancelButton.disabled = true;
@@ -319,7 +320,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit'].includes(existing.path) : false;
+    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/work-item-states'].includes(existing.path) : false;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const idle = progress.updatedAt ? Math.floor((Date.now() - progress.updatedAt) / 1000) : 0;
@@ -330,6 +331,7 @@ async function importWithProgress(target, existing = null, start = null) {
       c.namespacesRead !== undefined && `${c.namespacesRead} / ${c.namespaceTotal} ámbitos consultados`,
       c.resources !== undefined && `${c.resources} recursos encontrados`,
       c.grants !== undefined && `${c.grants} entradas de permisos encontradas`,
+      c.issuesFound !== undefined && `${c.issuesFound} functional issues encontrados · ${c.issuesRead} leídos`,
       c.settings !== undefined && 'Configuración obtenida',
       c.members !== undefined && `${c.members} integrantes`,
       c.iterations !== undefined && `${c.iterations} iteraciones`,
@@ -415,6 +417,7 @@ async function resumeOperation() {
     await importWithProgress($('#connection-progress'), current);
     await loadState();
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
+    if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
   } catch (error) {
@@ -433,7 +436,7 @@ async function saveConfig(importNow) {
   await request('/api/config', { config }); render();
   if (!importNow) { modal.close(); toast('Configuración guardada. Puedes importar los datos cuando quieras.'); return; }
   await importWithProgress($('#connection-progress'));
-  modal.close(); selectedIteration = ''; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
+  modal.close(); selectedIteration = ''; tab = 'iteration'; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
 }
 function selected() {
   const ws = state.workspace;
@@ -561,17 +564,40 @@ function previousView() {
     {name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
     {name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
   ].filter(group=>group.tasks.length);
-  const idle=ws.members.filter(member=>!owned(member).length);
-  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)}, márcalo como completado o mándalo al backlog.</p></div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
+  const idle=ws.members.filter(member=>!owned(member).length), types=[...new Set(tasks.map(t=>t.item.type))];
+  const completion=types.length ? `<p class="completed-states">Al completar: ${types.map(type=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(type)}" title="Cambiar el estado completado de ${escape(type)}">${escape(type)} → ${escape(ws.completedStates?.[type] || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
+  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)}, márcalo como completado o mándalo al backlog.</p>${completion}</div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
     ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
     ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
     <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes continuar y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
 }
+// Which state closes a type is decided by the person. The list starts with what
+// is known locally; the complete workflow can be read from Azure on demand.
+let completedStateChoice=null;
+const stateCategoryLabels={proposed:'Sin empezar',inprogress:'En curso',resolved:'Resuelto',completed:'Completado',removed:'Retirado'};
+function knownStates(type) {
+  const ws=state.workspace, found=new Map();
+  const add=(name,source)=>{const text=String(name ?? '').trim();if(text && !found.has(text.toLowerCase()))found.set(text.toLowerCase(),{name:text,source});};
+  add(ws.completedStates?.[type],'Elegido actualmente');
+  ws.items.filter(i=>i.type===type).forEach(i=>add(i.state,'En los datos importados'));
+  ['Closed','Done','Completed','Resolved','Removed'].forEach(name=>add(name,'Nombre habitual'));
+  return [...found.values()];
+}
+function chooseCompletedState(type, taskId=null, states=null) {
+  completedStateChoice={type,taskId};
+  const current=state.workspace.completedStates?.[type];
+  const options=states ? states.map(s=>({name:s.name,source:stateCategoryLabels[s.category] || 'Sin categoría'})) : knownStates(type);
+  const checked=current || options.find(o=>o.source==='Completado')?.name;
+  showModal(`Estado completado de «${type}»`, 'Elige el estado que se asigna al marcar como completada una tarea de este tipo. Se recordará.', `<form id="completed-state-form"><div class="participant-list">${options.map(o=>`<label class="participant-option"><input type="radio" name="state" value="${escape(o.name)}" ${o.name===checked ? 'checked' : ''} required><span><strong>${escape(o.name)}</strong><small>${escape(o.source)}</small></span></label>`).join('')}<label class="participant-option"><input type="radio" name="state" value="" data-other-state><span class="other-state"><strong>Otro estado</strong><input name="other" maxlength="128" placeholder="Nombre exacto en Azure DevOps" aria-label="Otro estado"></span></label></div>${states ? '<p class="form-intro">Estados del flujo de trabajo en Azure DevOps.</p>' : `<p class="form-intro">La lista reúne los estados de los datos importados y nombres habituales.${state.mode==='demo' ? '' : ' Azure DevOps comprobará el estado al sincronizar.'}</p><button type="button" class="button small" data-action="load-work-item-states">Consultar todos los estados en Azure DevOps</button><div id="connection-progress" hidden></div>`}</form>`, `<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="completed-state-form">${taskId ? 'Guardar y marcar completada' : 'Guardar'}</button>`);
+  modal.classList.add('connection-modal');
+}
 async function decidePrevious(id, decision) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
   if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
-  // Completing goes through the server, which can look up the completed state in Azure DevOps.
-  if (decision==='complete') await request('/api/complete-task',{id});
+  if (decision==='complete') {
+    if (!ws.completedStates?.[item.type]) { chooseCompletedState(item.type,id); return; }
+    await request('/api/complete-task',{id});
+  }
   else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
   review=null;render();
   document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
@@ -822,9 +848,13 @@ function render() {
   const ws=state.workspace;
   $('#connection-button').textContent=state.config ? 'Configuración' : 'Conectar Azure DevOps';
   $('#save-status').textContent=ws ? savedStatus() : '';
-  $('.workspace-label').textContent = tab === 'permissions' ? 'Permisos' : 'Planificación';
-  $('#app').setAttribute('aria-label', tab === 'permissions' ? 'Permisos' : 'Planificación');
+  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento' })[tab] || 'Planificación';
+  $('.workspace-label').textContent = section;
+  $('#app').setAttribute('aria-label', section);
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
+  if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project, state.config?.team])) maintenanceSnapshot = null;
+  if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
+  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div>`;return;
@@ -896,6 +926,27 @@ async function securityQuery(descriptor, reauthenticate = false) {
     throw error;
   }
 }
+// Home: the entry point to every area of the team management.
+function homeView() {
+  const ws=state.workspace, iteration=ws ? selected() : null, changes=ws ? Object.keys(ws.drafts).length+capacityDraftCount(ws) : 0;
+  const team=state.config?.team ? `${state.config.project} / ${state.config.team}` : ws ? `${ws.config.project} / ${ws.config.team}` : 'Neo Team';
+  const planning=!ws ? 'Sin datos importados' : `${iteration ? `Planificando ${escape(iteration.name)}` : 'Sin iteraciones'}${changes ? ` · ${changes} pendiente${changes===1 ? '' : 's'} de sincronizar` : ''}`;
+  const issues=maintenanceSnapshot?.issues;
+  return `<section class="home"><header class="home-heading"><p class="eyebrow">GESTIÓN DEL EQUIPO</p><h1>${escape(team)}</h1><p>Elige por dónde empezar.</p></header><div class="home-sections">
+    <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong><span>Iteraciones, capacidad y reparto de tareas del equipo.</span><small>${planning}</small></button>
+    <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong><span>Functional issues sin empezar o activos.</span><small>${issues ? `${issues.length} abierto${issues.length===1 ? '' : 's'} en la última consulta` : 'Se consultan al entrar'}</small></button>
+  </div></section>`;
+}
+async function loadMaintenance() {
+  const response = await fetch('/api/maintenance', { headers: { 'X-Neo-CSRF': state.csrf } });
+  if (!response.ok) throw new Error('No se pudo recuperar la consulta de mantenimiento.');
+  maintenanceSnapshot = (await response.json()).maintenance;
+}
+async function maintenanceQuery() {
+  showModal('Consultar functional issues', state.mode === 'demo' ? 'Datos de ejemplo.' : 'Elementos sin empezar o activos de las áreas del equipo en Azure DevOps.', '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: {}, title: 'Consultando functional issues' });
+  maintenanceSnapshot = result.maintenance; tab = 'maintenance'; modal.close(); render();
+}
 function exportSecurity() {
   const blob = new Blob([JSON.stringify(securitySnapshot, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob), link = document.createElement('a');
@@ -910,6 +961,13 @@ const actions = {
   'security-export': exportSecurity,
   'security-diagnostics': async () => { await navigator.clipboard.writeText(JSON.stringify(securitySnapshot.catalog.diagnostics, null, 2)); toast('Diagnóstico copiado. No contiene credenciales ni nombres de usuarios.'); },
   'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
+  home: () => { tab = 'home'; render(); window.scrollTo({ top: 0 }); },
+  'open-planning': () => { tab = 'iteration'; render(); },
+  'open-maintenance': async () => {
+    await loadMaintenance(); tab = 'maintenance'; render();
+    if (!maintenanceSnapshot && (state.config?.team || state.mode === 'demo')) await maintenanceQuery();
+  },
+  'maintenance-refresh': () => maintenanceQuery(),
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
   demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; tab='iteration'; render(); },
   azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; tab='iteration'; render(); },
@@ -923,6 +981,12 @@ const actions = {
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
+  'edit-completed-state': el=>chooseCompletedState(el.dataset.type),
+  'load-work-item-states': async()=>{
+    const {type,taskId}=completedStateChoice;
+    const result=await importWithProgress($('#connection-progress'),null,{path:'/api/work-item-states',input:{type},title:`Consultando los estados de «${type}»`});
+    chooseCompletedState(type,taskId,result.states);
+  },
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'choose-person': el=>choosePerson(el.dataset.member),
   'planning-view':el=>{planningMode=el.dataset.view;focusedMember=planningMode==='team' ? '' : pickerMember;query='';render();$(`[data-action="planning-view"][data-view="${planningMode}"]`)?.focus({preventScroll:true});},
@@ -983,6 +1047,16 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if (event.target.id === 'completed-state-form') {
+      const form=new FormData(event.target), {type,taskId}=completedStateChoice;
+      const chosen=String(form.get('state') || form.get('other') || '').trim();
+      if (!chosen) throw new Error('Indica el nombre del estado completado.');
+      await request('/api/completed-state',{type,state:chosen});
+      if (taskId) await request('/api/complete-task',{id:taskId});
+      modal.close();review=null;render();
+      toast(taskId ? `#${taskId} marcada como completada (${chosen}) en local.` : `«${type}» se completará con el estado ${chosen}.`);
+      return;
+    }
     if (event.target.id === 'capacity-editor-form') {
       const e=capacityEditor;
       await saveCapacity(e.owner,{...(e.owner==='team' ? {} : {activities:e.activities}),daysOff:e.daysOff});
@@ -1009,6 +1083,7 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
+  if (el.dataset.maintenanceFilter) { filterMaintenance(maintenanceSnapshot, el.dataset.maintenanceFilter, el.value); return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
@@ -1027,6 +1102,8 @@ document.addEventListener('change',async event=>{
 document.addEventListener('input',event=>{
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
+  if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
+  if (event.target.name === 'other' && event.target.closest('#completed-state-form')) $('[data-other-state]').checked = true;
   if(event.target.dataset.editActivity!==undefined){capacityEditor.activities[Number(event.target.dataset.editActivity)].capacityPerDay=Number(event.target.value);refreshCapacityEditor();}
   if(event.target.id==='people-search'){peopleQuery=event.target.value;refreshPeople();positionPeople();}
   if(event.target.id==='picker-search'){pickerQuery=event.target.value;refreshPicker();}

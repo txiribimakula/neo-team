@@ -6,8 +6,8 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges } from './planner.js';
-import { createDemo } from './demo.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges, setCompletedState, completeTask } from './planner.js';
+import { createDemo, demoFunctionalIssues } from './demo.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const port = Number(process.env.NEO_TEAM_PORT || 4310);
@@ -23,6 +23,10 @@ let stateReview = null;
 let security = null;
 const securityScope = () => JSON.stringify([store.data.config?.organization, store.data.config?.project]);
 const currentSecurity = () => security?.scope === securityScope() ? security : null;
+// The last maintenance query is kept in memory for the active mode and team.
+let maintenance = null;
+const maintenanceScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project, store.data.config?.team]);
+const currentMaintenance = () => maintenance?.scope === maintenanceScope() ? maintenance : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
@@ -74,6 +78,10 @@ const server = http.createServer(async (req, res) => {
       if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
       return json(res, { security: currentSecurity() });
     }
+    if (req.method === 'GET' && path === '/api/maintenance') {
+      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      return json(res, { maintenance: currentMaintenance() });
+    }
     if (req.method === 'GET' && path === '/api/export') {
       res.setHeader('Content-Disposition', 'attachment; filename="neo-team-planificacion.json"');
       return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
@@ -91,9 +99,36 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/complete-task': 'Consultando el estado completado', '/api/sync': 'Sincronizando cambios' };
-      operation = { id: path.startsWith('/api/security-') && typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando functional issues', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
+      operation = { id: (path.startsWith('/api/security-') || path === '/api/maintenance' || path === '/api/work-item-states') && typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/work-item-states'].includes(path) };
       try {
+        // On demand, cancellable: the person chooses the completed state from this list.
+        if (path === '/api/work-item-states') {
+          const workspace = planner.workspace();
+          if (!workspace?.items.some(i => i.type === input.type)) throw fail('Elige un tipo de elemento de esta planificación.');
+          if (workspace.mode === 'demo') return json(res, { states: [['New', 'proposed'], ['Active', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category })) });
+          operation = { ...operation, message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.', updatedAt: Date.now() };
+          await azure.open(configFrom(workspace.config));
+          if (operation.cancelRequested) throw fail('Consulta cancelada.');
+          operation = { ...operation, message: `Consultando los estados de «${input.type}»…`, updatedAt: Date.now() };
+          return json(res, { states: await azure.workItemStates(workspace.config, input.type) });
+        }
+        if (path === '/api/maintenance') {
+          const reportProgress = progress => {
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            operation = { ...operation, ...progress, updatedAt: Date.now() };
+          };
+          if (store.data.mode === 'demo') maintenance = { scope: maintenanceScope(), ...demoFunctionalIssues() };
+          else {
+            if (!store.data.config?.team) throw fail('Conecta un equipo de Azure DevOps para consultar el mantenimiento.');
+            const config = configFrom(store.data.config);
+            reportProgress({ message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.' });
+            await azure.open(config);
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, reportProgress)) };
+          }
+          return json(res, { maintenance: currentMaintenance() });
+        }
         if (['/api/security-groups', '/api/security-audit'].includes(path)) {
           if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar sus permisos.');
           const reportProgress = progress => {
@@ -176,6 +211,8 @@ const server = http.createServer(async (req, res) => {
             if (operation.cancelRequested) throw fail('Importación cancelada.');
             operation = { ...operation, cancellable: false, phase: 'saving', message: 'Guardando la copia local…', updatedAt: Date.now() };
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
+            // States chosen as completed by the person take precedence over Azure's categories.
+            workspace.completedStates = { ...workspace.completedStates, ...(store.data.azure?.completedStates || {}) };
             workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
             workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
             const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
@@ -213,8 +250,11 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data), workspace = data[data.mode];
           setParticipants(workspace, input.assignments);
           await store.save(data); planner.review = null;
-        } else if (path === '/api/complete-task') {
-          await planner.completeTask(input.id);
+        } else if (path === '/api/complete-task' || path === '/api/completed-state') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (path === '/api/complete-task') completeTask(workspace, input.id);
+          else setCompletedState(workspace, input.type, input.state);
+          await store.save(data); planner.review = null;
         } else if (path === '/api/stage') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('Importa datos primero.');
@@ -260,7 +300,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}) }, error.status || 400); }

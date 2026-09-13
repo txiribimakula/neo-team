@@ -190,13 +190,17 @@ test('reviewing the previous iteration carries tasks over or closes them with th
   assert.equal(f.workspace().drafts[1032],undefined,'undoing restores the imported state');
 });
 
-test('completing a task in a workspace imported without completed states looks the state up once in Azure',async t=>{
-  const f=await fixture(t),data=structuredClone(f.store.data);delete data.azure.completedStates;await f.store.save(data);
-  const lookups=[];f.azure.completedState=async(_config,type)=>{lookups.push(type);return 'Done';};
-  await f.planner.completeTask(1031);await f.planner.completeTask(1033);
-  assert.deepEqual(lookups,['Task'],'the state is kept for the next tasks of the same type');
-  assert.equal(f.workspace().drafts[1031].state,'Done');assert.deepEqual(f.workspace().completedStates,{Task:'Done'});
-  f.azure.completedState=async()=>null;
-  await assert.rejects(()=>f.planner.completeTask(1032),/Completed/);assert.equal(f.workspace().drafts[1032],undefined);
-  await assert.rejects(()=>f.planner.completeTask(1001),/tareas y bugs/);
+test('the person chooses the completed state of each type; tasks already marked follow a new choice',async()=>{
+  const {setCompletedState,completeTask}=await import('../server/planner.js');
+  const ws=createDemo();delete ws.completedStates;
+  assert.throws(()=>completeTask(ws,1031),/Indica primero/);
+  assert.throws(()=>setCompletedState(ws,'Epic','Closed'),/tipo/);
+  assert.throws(()=>setCompletedState(ws,'Task','  '),/estado/);
+  setCompletedState(ws,'Task',' Done ');completeTask(ws,1031);completeTask(ws,1033);
+  assert.equal(ws.drafts[1031].state,'Done');
+  stageChanges(ws,1033,{state:'Active'});
+  setCompletedState(ws,'Task','Closed');
+  assert.equal(ws.drafts[1031].state,'Closed');assert.equal(ws.drafts[1033],undefined,'an undone task is not closed again');
+  assert.throws(()=>completeTask(ws,1032),/«Bug»/);
+  assert.throws(()=>completeTask(ws,1001),/tareas y bugs/);
 });
