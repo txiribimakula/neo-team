@@ -44,7 +44,7 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
 7. En **Elegir tareas**, utiliza la vista del equipo o por persona, estima las horas pendientes y asigna las tareas. Cada tarea indica su proyecto. La persona debe pertenecer al equipo de ese proyecto.
 8. En **Revisar y sincronizar**, comprueba los cambios de tareas y capacidad antes de enviarlos. Se comparan con Azure para detectar conflictos. La revisión de la iteración anterior solo aparece en copias antiguas o en el ejemplo; las nuevas importaciones excluyen todas las iteraciones pasadas.
 
-**Añadir proyecto** conserva los proyectos importados. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
+**Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
 
 ### Planificación conjunta
 

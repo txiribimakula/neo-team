@@ -9,7 +9,7 @@ test('HTTP adds projects without replacing the first, refreshes all atomically a
  const directory=await mkdtemp(join(tmpdir(),'neo-projects-'));
  const patch=`import {AzureGateway} from ${JSON.stringify(new URL('../server/azure.js',import.meta.url).href)};
  let runs=0;
- AzureGateway.prototype.import=async function(config,report){
+ AzureGateway.prototype.import=async function(config,report,rules,options){if(options?.section) return {...options.snapshot,iterations:[]};
   runs++;report({phase:'items',message:'Leyendo '+config.project,counts:{imported:1}});
   if(runs===6) throw new Error('Segundo proyecto no disponible');
   return {mode:'azure',config,settings:{backlogIteration:{path:config.project},workingDays:[1,2,3,4,5]},iterations:[],members:[],capacities:{},items:[{id:config.project==='A'?1:2,rev:runs,title:config.project,type:'Epic',state:'Active',iterationPath:config.project}],drafts:{},conflicts:{},participants:{},warnings:[]};
@@ -29,4 +29,30 @@ test('HTTP adds projects without replacing the first, refreshes all atomically a
  state=await (await fetch(base+'/api/state')).json();assert.deepEqual(state.workspace,saved,'partial refresh never replaces the saved plan');
  await post('/api/stage',{edits:[{id:1,changes:{title:'Draft'}}]});
  const blocked=await post('/api/import');assert.equal(blocked.response.status,400);assert.match(blocked.data.error,/pendientes/);
+});
+test('adding a project compares it with the current Azure calendar of projects already imported',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'neo-calendar-')), datesFile=join(directory,'dates.json');
+ const {writeFile}=await import('node:fs/promises');
+ await writeFile(datesFile,JSON.stringify({A:['2026-09-14','2026-09-25'],B:['2026-09-15','2026-09-26']}));
+ const patch=`import {AzureGateway} from ${JSON.stringify(new URL('../server/azure.js',import.meta.url).href)};
+ import {readFileSync} from 'node:fs';
+ const iteration=project=>{const [start,end]=JSON.parse(readFileSync(${JSON.stringify(datesFile)},'utf8'))[project];return {id:'it-'+project,name:'Sprint '+project,path:project+'\\\\Sprint',attributes:{startDate:start+'T00:00:00Z',finishDate:end+'T00:00:00Z'}};};
+ AzureGateway.prototype.import=async function(config,report,rules,options){
+  if(options?.section==='iterations') return {...options.snapshot,iterations:[iteration(config.project)]};
+  return {mode:'azure',config,settings:{backlogIteration:{path:config.project},workingDays:[1,2,3,4,5]},iterations:[iteration(config.project)],members:[],capacities:{},items:[],drafts:{},conflicts:{},participants:{},warnings:[]};
+ };`;
+ const child=spawn(process.execPath,['--import',`data:text/javascript,${encodeURIComponent(patch)}`,'server/index.js'],{env:{...process.env,NEO_TEAM_PORT:'14398',NEO_TEAM_DATA_DIR:directory},stdio:['ignore','pipe','pipe']});
+ t.after(async()=>{if(child.exitCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});});
+ await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('No server')),10000);child.stdout.on('data',c=>{if(String(c).includes('Neo Team:')){clearTimeout(timeout);resolve();}});child.once('exit',()=>{clearTimeout(timeout);reject(new Error('Exited'));});});
+ const base='http://127.0.0.1:14398';let state=await (await fetch(base+'/api/state')).json();
+ const post=async(path,input={})=>{const response=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json','X-Neo-CSRF':state.csrf},body:JSON.stringify({...input,version:state.version})});const data=await response.json();if(response.ok)state=data.state ?? data;return {response,data};};
+ const config=project=>({organization:'org',project,team:'Team'});
+ await post('/api/config',{config:config('A')});await post('/api/import');
+ // A is aligned with B in Azure after its first import.
+ await writeFile(datesFile,JSON.stringify({A:['2026-09-15','2026-09-26'],B:['2026-09-15','2026-09-26']}));
+ await post('/api/config',{config:config('B')});
+ const added=await post('/api/import');
+ assert.equal(added.response.status,200,added.data.error);
+ assert.equal(state.workspace.sources.length,2);
+ assert.deepEqual(state.workspace.iterations.map(i=>i.attributes.startDate),['2026-09-15T00:00:00Z']);
 });

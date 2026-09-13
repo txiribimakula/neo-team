@@ -273,6 +273,16 @@ const server = http.createServer(async (req, res) => {
           try {
             const configs = input.refreshAll && store.data.azure ? sourcesOf(store.data.azure).map(s=>s.config) : [store.data.config];
             let workspace = store.data.azure;
+            // The saved calendar of projects already imported may be outdated. Compare
+            // the incoming project with Azure's current dates, not with the local copy.
+            if (workspace && (workspace.sources || configs.some(config => sourceId(workspace.config) !== sourceId(config)))) {
+              step('Actualizando las iteraciones de los proyectos ya importados…');
+              workspace = await refreshSection(workspace, 'iterations', azure, store.data.stateRules || [], progress => {
+                if (operation.cancelRequested) throw fail('Importación cancelada.');
+                operation = { ...operation, ...progress, step: null, updatedAt: Date.now() };
+                importProgress = operation;
+              });
+            }
             for (const [projectIndex,config] of configs.entries()) {
             const imported = await azure.import(config, progress => {
               if (operation.cancelRequested) throw fail('Importación cancelada.');
