@@ -1,3 +1,4 @@
+import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -5,6 +6,7 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
+let securitySnapshot = null;
 let state, selectedIteration = '', tab = 'capacity', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
@@ -100,7 +102,7 @@ async function loadState(renderNow = true) {
   if (renderNow) render();
 }
 function showModal(title, subtitle, body, actions = '') {
-  modal.classList.remove('wide-modal', 'connection-modal');
+  modal.classList.remove('wide-modal', 'connection-modal', 'capacity-editor-modal');
   $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2><p>${escape(subtitle)}</p></div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
   if (!modal.open) modal.showModal();
 }
@@ -289,9 +291,9 @@ function setupConnectionPickers() {
   }, { signal: connectionPickerEvents.signal });
   updateAvailability();
 }
-async function importWithProgress(target, existing = null) {
+async function importWithProgress(target, existing = null, start = null) {
   const importId = existing?.id || crypto.randomUUID();
-  const isImport = !existing || existing.path === '/api/import';
+  const isImport = !start && (!existing || existing.path === '/api/import');
   let finish, fail;
   const completion = existing ? new Promise((resolve, reject) => { finish = resolve; fail = reject; }) : null;
   const controller = new AbortController();
@@ -302,6 +304,7 @@ async function importWithProgress(target, existing = null) {
   target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small><small class="import-progress-time"></small><button type="button" class="button small" data-cancel-operation>Cancelar consulta</button>`;
   target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   const cancelButton = $('[data-cancel-operation]', target);
+  if (start) $('.import-progress-heading strong', target).textContent = 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
   cancelButton.addEventListener('click', async () => {
     cancelButton.disabled = true;
@@ -316,7 +319,7 @@ async function importWithProgress(target, existing = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams'].includes(existing.path) : false;
+    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit'].includes(existing.path) : false;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const idle = progress.updatedAt ? Math.floor((Date.now() - progress.updatedAt) / 1000) : 0;
@@ -324,6 +327,9 @@ async function importWithProgress(target, existing = null) {
     $('.import-progress-phase', target).textContent = progress.message;
     const c = progress.counts || {};
     const entries = [
+      c.namespacesRead !== undefined && `${c.namespacesRead} / ${c.namespaceTotal} ámbitos consultados`,
+      c.resources !== undefined && `${c.resources} recursos encontrados`,
+      c.grants !== undefined && `${c.grants} entradas de permisos encontradas`,
       c.settings !== undefined && 'Configuración obtenida',
       c.members !== undefined && `${c.members} integrantes`,
       c.iterations !== undefined && `${c.iterations} iteraciones`,
@@ -342,11 +348,11 @@ async function importWithProgress(target, existing = null) {
   if (existing) renderProgress(existing);
   const poll = async () => {
     try {
-      const response = await fetch(`/api/${existing ? 'operation' : 'import-progress'}?id=${encodeURIComponent(importId)}`, { headers: { 'X-Neo-CSRF': state.csrf }, signal: controller.signal });
+      const response = await fetch(`/api/${existing || start ? 'operation' : 'import-progress'}?id=${encodeURIComponent(importId)}`, { headers: { 'X-Neo-CSRF': state.csrf }, signal: controller.signal });
       if (!response.ok) throw new Error('Progress unavailable');
       const data = await response.json();
       if (stopped) return;
-      const progress = existing ? data.operation : data.progress;
+      const progress = existing || start ? data.operation : data.progress;
       if (progress) renderProgress(progress);
       if (existing) {
         if (!progress) fail(new Error('La operación ya no está disponible. Actualiza los datos para comprobar el resultado.'));
@@ -360,7 +366,7 @@ async function importWithProgress(target, existing = null) {
       if (!stopped) timer = setTimeout(poll, 700);
     }
   };
-  const operation = completion || request('/api/import', { importId });
+  const operation = completion || (start ? request(start.path, { ...start.input, operationId: importId }) : request('/api/import', { importId }));
   void poll();
   try {
     const data = await operation;
@@ -408,6 +414,7 @@ async function resumeOperation() {
   try {
     await importWithProgress($('#connection-progress'), current);
     await loadState();
+    if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
   } catch (error) {
@@ -523,13 +530,13 @@ function ensureSelection() {
 function choosePerson(member) {
   if(!state.workspace.members.some(m=>key(m)===member))return;
   const peopleScroll=$('.planning-people')?.scrollTop || 0;
-  pickerMember=member;focusedMember=member;pickerQuery='';tab='planning';render();
+  pickerMember=member;focusedMember=member;pickerQuery='';tab='planning';planningMode='person';render();
   if($('.planning-people'))$('.planning-people').scrollTop=peopleScroll;
 }
 function pickTasks(member) {
   modal.close();
   pickerMember=state.workspace.members.some(m=>key(m)===member) ? member : focusedMember || pickerMember;
-  tab='planning';ensureSelection();render();
+  tab='planning';planningMode='person';ensureSelection();render();
 }
 function personMeter(member) {
   const summary=selectionSummary(state.workspace,key(member),selectedIteration);
@@ -565,25 +572,76 @@ function capacityStatusLine(owner, drafts, conflicts) {
   if (conflicts[owner]) return '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Revisa los cambios para elegir qué versión conservar.</p>';
   return drafts[owner] ? `<p class="local-note">Pendiente de sincronizar · <button class="link-button" data-action="discard-capacity-entry" data-owner="${escape(owner)}">deshacer</button></p>` : '';
 }
+let capacityEditor = null;
+function capacityDates(iteration) {
+  const start=dayValue(iteration.attributes?.startDate), end=dayValue(iteration.attributes?.finishDate), days=[];
+  if (!start || !end || !Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end))) return days;
+  for(let day=start;day<=end && days.length<367;day=nextDay(day)) days.push(day);
+  return days;
+}
+const containsDay = (ranges, day) => ranges.some(r=>day>=r.start && day<=r.end);
+function isWorkingDay(day) {
+  const names=['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const weekday=new Date(day+'T00:00:00Z').getUTCDay();
+  return (state.workspace.settings.workingDays ?? [1,2,3,4,5]).some(d=>d===weekday || String(d).toLowerCase()===names[weekday]);
+}
+function capacityBreakdown(owner, entry) {
+  const days=capacityDates(selected()), team=capacityOf(selectedIteration,'team').daysOff;
+  const working=days.filter(isWorkingDay);
+  const available=working.filter(day=>!containsDay(entry.daysOff,day) && (owner==='team' || !containsDay(team,day)));
+  const daily=entry.activities.reduce((sum,a)=>sum+Number(a.capacityPerDay || 0),0);
+  return { days, working:working.length, available:available.length, off:working.length-available.length, daily, total:Math.round(available.length*daily*100)/100 };
+}
 function capacityView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration || !ws.members.length) return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para revisar la capacidad.</div>';
   const drafts=ws.capacityDrafts?.[iteration.id] ?? {}, conflicts=ws.capacityConflicts?.[iteration.id] ?? {}, hours=ws.capacityHours?.[iteration.id] ?? {};
-  const known=ws.members.filter(m=>hours[m.id]!==null && hours[m.id]!==undefined);
-  const dates=iteration.attributes?.startDate && iteration.attributes?.finishDate ? `Del ${date(iteration.attributes.startDate)} al ${date(iteration.attributes.finishDate)} · ` : '';
+  const known=ws.members.filter(m=>hours[m.id]!=null), total=known.reduce((sum,m)=>sum+hours[m.id],0);
+  const team=capacityBreakdown('team',capacityOf(iteration.id,'team'));
   return `<section class="capacity-step">
-    <header class="capacity-heading"><div><h2>Capacidad de «${escape(iteration.name)}»</h2><p class="text-muted">${dates}${(ws.settings.workingDays ?? []).length} días laborables por semana · ${number(known.reduce((sum,m)=>sum+hours[m.id],0))} h disponibles en el equipo</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer los cambios de capacidad</button>' : ''}</header>
-    <div class="notice">${ws.mode==='demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Los cambios se guardan en local y se envían a Azure DevOps en el paso «Revisar y sincronizar».'}</div>
-    <section class="capacity-card capacity-team"><h3>Días libres del equipo</h3><p class="text-muted">Se descuentan a todas las personas de esta iteración.</p>${rangeEditor('team',capacityOf(iteration.id,'team').daysOff,iteration)}${capacityStatusLine('team',drafts,conflicts)}</section>
+    <header class="capacity-hero"><div><p class="eyebrow">PRIMERO, EL TIEMPO REAL</p><h2>El tiempo con el que cuenta el equipo.</h2><p>${escape(iteration.name)} · ${date(iteration.attributes?.startDate)} — ${date(iteration.attributes?.finishDate)}</p><span class="capacity-save-note">${ws.mode==='demo' ? 'Modo de ejemplo' : 'Guardado local · revisarás los cambios antes de enviarlos a Azure'}</span></div><div class="capacity-total"><strong>${number(total)}<small> h</small></strong><span>de capacidad${known.length<ws.members.length ? ' conocida' : ' del equipo'}</span><small>${known.length} de ${ws.members.length} personas con capacidad definida</small></div></header>
+    <section class="capacity-shared"><div class="capacity-shared-icon" aria-hidden="true">☀</div><div><h3>Los días que descansáis juntos</h3><p>${team.off ? `${team.off} días laborables libres para todo el equipo` : 'Sin días libres comunes'} · ${team.available} días laborables disponibles</p>${capacityStatusLine('team',drafts,conflicts)}</div><button class="button" data-action="edit-capacity" data-owner="team">Editar calendario del equipo</button></section>
+    <div class="capacity-section-title"><div><h3>El tiempo de cada persona</h3><p>Horas al día y ausencias. La capacidad se calcula al momento.</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : ''}</div>
     <div class="capacity-people">${ws.members.map((member,index)=>{
-      const entry=capacityOf(iteration.id,member.id);
-      const activities=entry.activities.length ? entry.activities : [{name:'',capacityPerDay:null}];
-      const total=hours[member.id];
-      return `<section class="capacity-card ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${total===null || total===undefined ? 'Sin capacidad definida' : `${number(total)} h en la iteración`}</span></div></div>
-      <div class="capacity-hours">${activities.map((activity,position)=>`<label class="form-field">${activity.name ? escape(activity.name) : 'Horas por día'}<input type="number" min="0" max="24" step="0.25" data-capacity-hours data-member="${escape(member.id)}" data-activity="${position}" data-focus="hours:${escape(member.id)}:${position}" value="${activity.capacityPerDay ?? ''}" placeholder="0"></label>`).join('')}</div>
-      <div class="capacity-days"><span class="capacity-label">Días libres</span>${rangeEditor(member.id,entry.daysOff,iteration)}</div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
-    }).join('')}</div>
+      const entry=capacityOf(iteration.id,member.id), b=capacityBreakdown(member.id,entry), total=hours[member.id];
+      return `<section class="capacity-card capacity-profile ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${entry.activities.length>1 ? `${entry.activities.length} actividades` : 'Disponibilidad en la iteración'}</span></div></div><div class="capacity-profile-total">${total==null ? '—' : number(total)}<small> h</small></div><p class="capacity-equation">${total==null ? 'Define las horas para empezar' : `${number(b.daily)} h al día × ${b.available} días disponibles`}</p><div class="capacity-mini-days" aria-label="${b.available} días disponibles, ${b.off} días libres">${b.days.filter(isWorkingDay).slice(0,40).map(day=>`<span class="${containsDay(entry.daysOff,day) || containsDay(capacityOf(iteration.id,'team').daysOff,day) ? 'off' : ''}" title="${date(day)}"></span>`).join('')}</div><div class="capacity-profile-footer"><span>${b.off ? `${b.off} días libres` : 'Sin ausencias'}${b.days.length ? '' : ' · fechas sin definir'}</span><button class="button small" data-action="edit-capacity" data-owner="${escape(member.id)}">Ajustar capacidad</button></div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
+    }).join('')}</div><div class="capacity-next"><span>${known.length<ws.members.length ? `${ws.members.length-known.length} personas con capacidad pendiente de definir` : 'La disponibilidad está lista. Puedes empezar a repartir el trabajo.'}</span><button class="button primary" data-action="tab" data-tab="hierarchy">Repartir ramas →</button></div>
   </section>`;
+}
+function editCapacity(owner) {
+  const member=state.workspace.members.find(m=>m.id===owner);
+  if(owner!=='team' && !member)return;
+  capacityEditor={owner,...structuredClone(capacityOf(selectedIteration,owner))};
+  if(owner!=='team' && !capacityEditor.activities.length)capacityEditor.activities=[{name:'',capacityPerDay:0}];
+  showModal(owner==='team' ? 'Días libres del equipo' : `Capacidad de ${member.displayName}`, owner==='team' ? 'Marca los días en los que descansa todo el equipo.' : 'Ajusta las horas al día y marca las ausencias en el calendario.', `<form id="capacity-editor-form">
+    ${owner==='team' ? '' : `<div class="capacity-editor-hours">${capacityEditor.activities.map((a,i)=>`<label class="form-field">${escape(a.name || 'Horas disponibles al día')}<div class="capacity-hour-input"><input type="number" required min="0" max="24" step="0.25" value="${a.capacityPerDay}" data-edit-activity="${i}" aria-label="${escape(a.name || 'Horas disponibles al día')}"><span>h / día</span></div></label>`).join('')}${capacityEditor.activities.length===1 ? '<div class="capacity-presets">'+[4,6,8].map(n=>`<button class="button small" type="button" data-action="capacity-preset" data-hours="${n}">${n} h</button>`).join('')+'</div>' : ''}</div>`}
+    <div id="capacity-preview" aria-live="polite"></div><div class="capacity-calendar-heading"><strong>${owner==='team' ? 'Marca los días libres comunes' : 'Marca tus días libres'}</strong><button type="button" class="link-button" data-action="capacity-clear-days">Quitar ausencias</button></div><div class="capacity-calendar-legend"><span>● Disponible</span><span>○ Día libre</span><span>▧ Descanso del equipo</span></div><div id="capacity-calendar"></div><p class="local-note">Pulsa un día para marcarlo o volver a dejarlo disponible. Los descansos del equipo se descuentan una sola vez.</p></form>`, '<button class="button" data-action="close">Cancelar</button><button type="submit" form="capacity-editor-form" class="button primary">Guardar ajustes</button>');
+  modal.classList.add('connection-modal','capacity-editor-modal');
+  refreshCapacityEditor();
+}
+function refreshCapacityEditor() {
+  const e=capacityEditor;if(!e || !$('#capacity-editor-form'))return;
+  const b=capacityBreakdown(e.owner,e), before=state.workspace.capacityHours?.[selectedIteration]?.[e.owner];
+  const team=capacityOf(selectedIteration,'team').daysOff;
+  const total=e.owner==='team' ? state.workspace.members.reduce((sum,m)=>{const entry=capacityOf(selectedIteration,m.id);return sum+b.days.filter(day=>isWorkingDay(day)&&!containsDay(e.daysOff,day)&&!containsDay(entry.daysOff,day)).length*entry.activities.reduce((s,a)=>s+a.capacityPerDay,0);},0) : b.total;
+  const difference=before==null || e.owner==='team' ? '' : total-before;
+  $('#capacity-preview').innerHTML=`<div class="capacity-preview-total"><strong>${b.days.length ? number(total) : '—'}<small> h</small></strong><span>${e.owner==='team' ? 'de capacidad conocida en el equipo' : `${number(b.daily)} h × ${b.available} días disponibles`}</span></div><span class="capacity-preview-delta">${difference==='' ? `${b.off} días libres` : difference===0 ? 'Sin cambios en las horas totales' : `${difference>0 ? '+' : '−'}${number(Math.abs(difference))} h respecto a lo guardado`}</span>`;
+  const months=new Map();for(const day of b.days){const month=day.slice(0,7);if(!months.has(month))months.set(month,[]);months.get(month).push(day);}
+  $('#capacity-calendar').innerHTML=[...months].map(([month,days])=>{
+    const offset=(new Date(days[0]+'T00:00:00Z').getUTCDay()+6)%7;
+    return `<section class="capacity-month"><h3>${new Date(month+'-01T00:00:00Z').toLocaleDateString('es',{month:'long',year:'numeric',timeZone:'UTC'})}</h3><div class="capacity-day-grid">${['L','M','X','J','V','S','D'].map(day=>`<span class="weekday">${day}</span>`).join('')}${'<span></span>'.repeat(offset)}${days.map(day=>{const off=containsDay(e.daysOff,day),shared=e.owner!=='team' && containsDay(team,day),working=isWorkingDay(day);return `<button type="button" class="capacity-day ${off ? 'off' : ''} ${shared ? 'shared' : ''}" data-action="capacity-day" data-day="${day}" aria-label="${date(day)}: ${shared ? 'descanso del equipo' : !working ? 'no laborable' : off ? 'día libre' : 'disponible'}" aria-pressed="${off}" ${!working || shared ? 'disabled' : ''}>${Number(day.slice(8))}<small>${shared ? 'equipo' : !working ? '—' : off ? 'libre' : e.owner==='team' ? '✓' : `${number(b.daily)} h`}</small></button>`;}).join('')}</div></section>`;
+  }).join('') || '<p class="notice warning">La iteración no tiene fechas definidas. Puedes ajustar las horas diarias; añade fechas en Azure para gestionar el calendario.</p>';
+}
+function toggleCapacityDay(day) {
+  const ranges=capacityEditor.daysOff;
+  if(containsDay(ranges,day)) capacityEditor.daysOff=ranges.flatMap(r=>day<r.start || day>r.end ? [r] : [...(r.start<day ? [{start:r.start,end:new Date(Date.parse(day)-86400000).toISOString().slice(0,10)}] : []),...(day<r.end ? [{start:nextDay(day),end:r.end}] : [])]);
+  else {
+    const sorted=[...ranges,{start:day,end:day}].sort((a,b)=>a.start.localeCompare(b.start)), merged=[];
+    for(const r of sorted){const last=merged.at(-1);if(last && r.start<=nextDay(last.end))last.end=last.end>r.end ? last.end : r.end;else merged.push({...r});}
+    capacityEditor.daysOff=merged;
+  }
+  refreshCapacityEditor();
+  $(`[data-day="${day}"]`,modal)?.focus();
 }
 async function saveCapacity(owner, change, focus) {
   // The request disables every control, so the target is read before sending.
@@ -610,7 +668,13 @@ async function saveCapacityRange(el) {
   if (daysOff[position].end<daysOff[position].start) daysOff[position][el.dataset.edge==='start' ? 'end' : 'start']=el.value;
   await saveCapacity(owner,{ daysOff });
 }
+let planningMode = 'team';
 function plannerView() {
+  const iteration=selected();
+  if (!iteration) return '<div class="empty-result">Selecciona una iteración para elegir tareas.</div>';
+  return `<div class="planning-view-switch"><div><h2>Elegir tareas</h2><p>Organiza el plan del equipo o elige las tareas de una persona.</p></div><div class="planning-view-options" role="group" aria-label="Vista de planificación"><button type="button" data-action="planning-view" data-view="team" aria-pressed="${planningMode==='team'}">Vista del equipo</button><button type="button" data-action="planning-view" data-view="person" aria-pressed="${planningMode==='person'}">Por persona</button></div></div>${planningMode==='team' ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : personPlannerView()}`;
+}
+function personPlannerView() {
   ensureSelection();const ws=state.workspace,iteration=selected();
   if(!iteration || !ws.members.length)return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para planificar.</div>';
   return `<div class="continuous-planner"><div class="planning-people" aria-label="Personas del equipo">${orderedPlanningMembers(ws,selectedIteration).map(({member:m,index,canConfirm,confirmed})=>`<div class="planning-person-card ${key(m)===pickerMember ? 'active' : ''}"><button class="planning-person" data-action="choose-person" data-member="${escape(key(m))}" aria-pressed="${key(m)===pickerMember}"><span class="person-name"><span class="avatar c${index%4}">${escape(initials(m.displayName))}</span><strong>${escape(m.displayName)}</strong></span>${personMeter(m)}${key(m)===pickerMember ? '<span class="assigning-label">Asignando ahora</span>' : ''}</button>${canConfirm ? `<button class="person-confirm ${confirmed ? 'confirmed' : ''}" data-action="confirm-person" data-member="${escape(key(m))}" aria-label="${confirmed ? 'Reparto confirmado de' : 'Confirmar reparto de'} ${escape(m.displayName)}" ${confirmed ? 'disabled' : ''}>${confirmed ? '✓ Confirmado en local' : 'Confirmar'}</button>` : ''}</div>`).join('')}</div><section class="planning-work" aria-label="Tareas de ${escape(memberName(pickerMember))}"><div class="active-assignee"><span class="avatar">${escape(initials(memberName(pickerMember)))}</span><div><span>Asignando tareas a</span><h2>${escape(memberName(pickerMember))}</h2></div></div><div class="planning-work-heading"><input id="picker-search" placeholder="Buscar tarea o rama" aria-label="Buscar tareas de esta persona" value="${escape(pickerQuery)}"><label class="show-unavailable"><input id="show-unavailable" type="checkbox" ${onlyAvailable ? '' : 'checked'}>Con otro responsable</label></div><div class="picker-toolbar"><label class="bulk-selection"><input id="toggle-visible" type="checkbox">Marcar visibles</label><span class="local-note">Borrador local · asignaciones pendientes de sincronizar</span></div><div id="picker-tree">${treeView({picker:true,member:pickerMember,search:pickerQuery})}</div></section></div>`;
@@ -641,7 +705,7 @@ async function saveParticipation(id,member,selected) {
 }
 function updatePlanningView() {
   const iteration=selected();
-  $('#planning-view').innerHTML=tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView();
+  $('#planning-view').innerHTML=tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : iteration ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView();
   updateBulkCheckbox();
 }
 
@@ -669,24 +733,24 @@ function board(iteration, planned) {
   const outside = planned.filter(i=>(!focusedMember || eligible.has(i.id)) && i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
   return `<div class="board"><section class="backlog" data-drop="backlog"><div class="section-heading"><h2>Backlog disponible</h2><span class="count">${backlog.length}</span></div><p class="section-meta">Pendientes y tareas de otras iteraciones</p>${treeView({availableOnly:true})}</section><section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${planned.length} tareas</span></div><p class="section-meta">Reparte el trabajo según la capacidad del equipo</p><div class="members-grid">${ws.members.filter(m=>!focusedMember || key(m)===focusedMember).map((m,index)=>lane(m,planned,index,iteration)).join('')}<section class="member" data-drop=""><div class="member-header"><div class="section-heading"><h3>Sin asignar</h3><span class="count">${unassigned.length}</span></div><p class="section-meta" style="margin:0">Dentro de esta iteración</p></div><div class="member-items">${filtered(unassigned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Reserva trabajo para esta iteración</div>'}</div></section>${outside.length ? `<section class="member"><div class="member-header"><h3>Otras personas</h3><p class="section-meta" style="margin:0">Responsables que no figuran en este equipo</p></div><div class="member-items">${filtered(outside).map(i=>taskCard(i)).join('')}</div></section>` : ''}</div></section></div><p class="bottom-note">Arrastra tareas para planificar. Pulsa una tarjeta para editar con teclado o en móvil. Las horas y los puntos se mantienen separados.</p>`;
 }
-function table() {
-  const eligible = new Set(focusedMember ? eligibleTasks(state.workspace,focusedMember).map(i=>i.id) : []);
-  const items = filtered(state.workspace.effectiveItems.filter(i=>!focusedMember || eligible.has(i.id)));
-  return `<div class="table-wrap"><table><thead><tr><th>TAREA</th><th>RESPONSABLE</th><th>ITERACIÓN</th><th>ESTADO</th><th>ESFUERZO</th><th></th></tr></thead><tbody>${items.map(item=>`<tr><td><span class="text-muted">#${item.id} · ${escape(item.type)}</span>${item.modified ? ` <span class="pill changed">${pendingLabel(item)}</span>` : ''}<span class="table-title">${escape(item.title)}</span></td><td>${escape(memberName(item.assignedTo))}</td><td>${escape(iterationName(item.iterationPath))}</td><td>${escape(item.state)}</td><td>${item.remainingWork !== null ? `${number(item.remainingWork)} h` : item.points !== null ? `${number(item.points)} pts` : '—'}</td><td><button class="button small" data-action="edit" data-task="${item.id}" aria-label="Editar tarea ${item.id}">Editar</button></td></tr>`).join('')}</tbody></table>${!items.length ? '<div class="empty-result">No hay tareas con estos filtros.</div>' : ''}</div>`;
-}
+
 function render() {
   const ws=state.workspace;
   $('#connection-button').textContent=state.config ? 'Configuración' : 'Conectar Azure DevOps';
   $('#save-status').textContent=ws ? savedStatus() : '';
+  $('.workspace-label').textContent = tab === 'permissions' ? 'Permisos' : 'Planificación';
+  $('#app').setAttribute('aria-label', tab === 'permissions' ? 'Permisos' : 'Planificación');
+  if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
+  if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div>`;return;
   }
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
   const changes=Object.keys(ws.drafts).length+capacityDraftCount(ws);
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button><select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><details class="workspace-menu"><summary aria-label="Más opciones">···</summary><div>${ws.mode==='demo' ? '<button data-action="azure">Salir del ejemplo</button>' : `<button data-action="import" ${changes ? 'disabled' : ''}>Actualizar datos</button>`}<button data-action="tab" data-tab="board">Vista del equipo</button><button data-action="tab" data-tab="list">Todas las tareas</button><a href="/api/export" download>Exportar</a>${changes ? '<button data-action="discard-all">Descartar cambios</button>' : ''}</div></details></div>
+  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button><select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><div class="workspace-data-actions"><button class="button small" data-action="import" ${changes || ws.mode==='demo' ? 'disabled' : ''} title="${ws.mode==='demo' ? 'Conecta Azure DevOps para actualizar datos' : changes ? 'Revisa o descarta los cambios pendientes antes de actualizar' : 'Actualizar desde Azure DevOps'}">Actualizar datos</button><a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
   <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='capacity' ? 'active' : ''}" data-action="tab" data-tab="capacity" ${tab==='capacity' ? 'aria-current="step"' : ''}><span>1</span>Capacidad</button><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>2</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>3</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>4</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>
-  <div id="planning-view">${tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : tab==='list' ? table() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
+  <div id="planning-view">${tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   updateBulkCheckbox();
 }
@@ -717,7 +781,7 @@ function capacityReview() {
 }
 function renderReview() {
   const conflicts = review.plans.filter(p=>p.conflicts.length);
-  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas${review.capacityPlans?.length ? ` · ${review.capacityPlans.length} ajuste${review.capacityPlans.length===1 ? '' : 's'} de capacidad` : ''} · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length || review.capacityPlans?.some(p=>p.conflict) ? '<div class="notice warning" style="margin-bottom:20px">Algo ha cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}${capacityReview()}`, `<button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
+  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas${review.capacityPlans?.length ? ` · ${review.capacityPlans.length} ajuste${review.capacityPlans.length===1 ? '' : 's'} de capacidad` : ''} · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length || review.capacityPlans?.some(p=>p.conflict) ? '<div class="notice warning" style="margin-bottom:20px">Algo ha cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}${capacityReview()}`, `<button class="button danger" data-action="discard-all">Descartar cambios</button><button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
 }
 async function synchronize() {
   const data = await request('/api/sync', { token:review.token }); review = null; render();
@@ -730,7 +794,29 @@ async function importData() {
   showModal('Actualizar desde Azure DevOps', 'Leyendo el equipo y sus tareas.', '<div id="connection-progress"></div>');
   await importWithProgress($('#connection-progress')); modal.close(); render(); toast('Datos actualizados desde Azure DevOps.');
 }
+async function loadSecurity() {
+  const response = await fetch('/api/security', { headers: { 'X-Neo-CSRF': state.csrf } });
+  if (!response.ok) throw new Error('No se pudo recuperar el informe de permisos.');
+  securitySnapshot = (await response.json()).security;
+}
+async function securityQuery(descriptor) {
+  showModal(descriptor ? 'Analizar permisos' : 'Cargar grupos de permisos', 'Consulta de seguridad de Azure DevOps.', '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: descriptor ? '/api/security-audit' : '/api/security-groups', input: { descriptor } });
+  securitySnapshot = result.security;
+  resetPermissionFilters(); tab = 'permissions'; modal.close(); render();
+}
+function exportSecurity() {
+  const blob = new Blob([JSON.stringify(securitySnapshot, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = 'neo-team-permisos.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 const actions = {
+  permissions: async () => { await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
+  'security-back': () => { tab = 'capacity'; render(); },
+  'security-refresh': () => securityQuery(),
+  'security-group': el => securityQuery(el.dataset.descriptor),
+  'security-export': exportSecurity,
+  'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
   demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; render(); },
   azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; render(); },
@@ -741,6 +827,7 @@ const actions = {
   'remove-branch': el=>saveParticipation(Number(el.dataset.task),pickerMember,false),
   'pick-tasks': el=>pickTasks(el.dataset.member),
   'choose-person': el=>choosePerson(el.dataset.member),
+  'planning-view':el=>{planningMode=el.dataset.view;focusedMember=planningMode==='team' ? '' : pickerMember;query='';render();$(`[data-action="planning-view"][data-view="${planningMode}"]`)?.focus({preventScroll:true});},
   'confirm-person': async el=>{await request('/api/confirm-person',{member:el.dataset.member,iterationId:selectedIteration});renderSaved();},
   'go-sharing': ()=>{tab='hierarchy';focusedMember='';query='';backlogFilter='all';render();},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
@@ -750,6 +837,10 @@ const actions = {
   'discard-all':()=>showModal('Descartar cambios locales', 'Esta acción afecta al borrador de la planificación actual.', '<p>Se recuperarán los valores de la última importación o sincronización. Azure DevOps no se modificará.</p>','<button class="button" data-action="close">Cancelar</button><button class="button danger" data-action="confirm-discard">Descartar borrador</button>'),
   'confirm-discard':async()=>{await request('/api/discard');modal.close();render();toast('Borrador descartado.');},
   'discard-one':async el=>{await request('/api/discard',{id:Number(el.dataset.task)});modal.close();render();toast('Cambios de la tarea deshechos.');},
+  'edit-capacity':el=>editCapacity(el.dataset.owner),
+  'capacity-day':el=>toggleCapacityDay(el.dataset.day),
+  'capacity-clear-days':()=>{capacityEditor.daysOff=[];refreshCapacityEditor();},
+  'capacity-preset':el=>{capacityEditor.activities[0].capacityPerDay=Number(el.dataset.hours);$('[data-edit-activity]',modal).value=el.dataset.hours;refreshCapacityEditor();},
   'add-range':async el=>{
     const owner=el.dataset.owner,ranges=capacityOf(selectedIteration,owner).daysOff,day=freeDay(ranges,selected());
     await saveCapacity(owner,{daysOff:[...ranges,{start:day,end:day}]},`[data-focus="range:${owner}:${ranges.length}:start"]`);
@@ -789,11 +880,18 @@ document.addEventListener('keydown', event => {
   const card = event.target.closest('.task-card');
   if (card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
   const tabButton = event.target.closest('[role="tab"]');
-  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['capacity','hierarchy','planning','board','list']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:4))%5]; render(); $(`[data-tab="${tab}"]`).focus(); }
+  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['capacity','hierarchy','planning']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:2))%3]; render(); $(`[data-tab="${tab}"]`).focus(); }
 });
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if (event.target.id === 'capacity-editor-form') {
+      const e=capacityEditor;
+      await saveCapacity(e.owner,{...(e.owner==='team' ? {} : {activities:e.activities}),daysOff:e.daysOff});
+      modal.close();capacityEditor=null;
+      $(`[data-action="edit-capacity"][data-owner="${CSS.escape(e.owner)}"]`)?.focus({preventScroll:true});
+      toast('Capacidad guardada en local.');return;
+    }
     if (event.target.id === 'state-rules-form') {
       const choices = [...event.target.querySelectorAll('select[data-state]')].filter(el => el.value).map(el => ({ state: el.dataset.state, action: el.value }));
       await request('/api/state-rules', { choices });
@@ -812,6 +910,8 @@ document.addEventListener('submit', async event => {
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
+  if (el.id === 'security-group-scope') { filterGroups(); return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
@@ -829,6 +929,9 @@ document.addEventListener('change',async event=>{
   }catch(error){renderSaved();errorInModal(error);}
 });
 document.addEventListener('input',event=>{
+  if (event.target.id === 'security-group-search') filterGroups();
+  if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
+  if(event.target.dataset.editActivity!==undefined){capacityEditor.activities[Number(event.target.dataset.editActivity)].capacityPerDay=Number(event.target.value);refreshCapacityEditor();}
   if(event.target.id==='people-search'){peopleQuery=event.target.value;refreshPeople();positionPeople();}
   if(event.target.id==='picker-search'){pickerQuery=event.target.value;refreshPicker();}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}

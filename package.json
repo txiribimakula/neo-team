@@ -3,13 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Planificación local de iteraciones con Azure DevOps MCP",
-  "engines": { "node": ">=22" },
+  "description": "Planificaci\u00f3n local de iteraciones con Azure DevOps MCP",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
     "test": "node --test tests/*.test.js",
-    "check": "node --check server/index.js && node --check server/azure.js && node --check server/planner.js && node --check dist/app.js"
+    "check": "node --check server/index.js && node --check server/azure.js && node --check server/planner.js && node --check dist/app.js && node --check server/security.js && node --check server/security-reader.js && node --check server/mcp-server.js && node --check dist/permissions.js"
   },
   "dependencies": {
     "@azure-devops/mcp": "2.10.0",

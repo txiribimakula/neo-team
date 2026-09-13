@@ -2,6 +2,7 @@
 // are made by the HTTP application: all data access goes through this MCP server.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { securityReader } from './security-reader.js';
 import { WebApi, getBearerHandler } from 'azure-devops-node-api';
 import { z } from 'zod';
 import { createAuthenticator } from '@azure-devops/mcp/dist/auth.js';
@@ -40,6 +41,14 @@ server.tool = (...args) => {
 configureCoreTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 configureWorkTools(server, tokenProvider, connectionProvider);
 configureWorkItemTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
+
+const readSecurity = securityReader(organization, tokenProvider);
+server.tool('neo_security_read', 'Read project groups, memberships, ACLs and resource roles. Does not change permissions.', {
+  action: z.enum(['catalog', 'identity', 'acl', 'resources', 'roles', 'feedPermissions', 'feedViews']),
+  project: z.string().min(1).max(200).optional(), descriptor: z.string().max(2000).optional(),
+  namespaceId: z.string().uuid().optional(), descriptors: z.array(z.string().max(2000)).max(20).optional(),
+  kind: z.string().max(40).optional(), resourceId: z.string().max(200).optional(),
+}, async args => ({ content: [{ type: 'text', text: JSON.stringify(await readSecurity(args)) }] }));
 
 server.tool('neo_work_item_states', 'Read workflow state categories for a work item type, including custom states.', {
   project: z.string().min(1), type: z.string().min(1),

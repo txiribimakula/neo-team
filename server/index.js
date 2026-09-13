@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
+import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges } from './planner.js';
 import { createDemo } from './demo.js';
@@ -19,6 +20,9 @@ let busy = false;
 let importProgress = null;
 let operation = null;
 let stateReview = null;
+let security = null;
+const securityScope = () => JSON.stringify([store.data.config?.organization, store.data.config?.project]);
+const currentSecurity = () => security?.scope === securityScope() ? security : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
@@ -66,6 +70,10 @@ const server = http.createServer(async (req, res) => {
       if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
       return json(res, { progress: importProgress?.id === url.searchParams.get('id') ? importProgress : null });
     }
+    if (req.method === 'GET' && path === '/api/security') {
+      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      return json(res, { security: currentSecurity() });
+    }
     if (req.method === 'GET' && path === '/api/export') {
       res.setHeader('Content-Disposition', 'attachment; filename="neo-team-planificacion.json"');
       return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
@@ -83,9 +91,32 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/sync': 'Sincronizando cambios' };
-      operation = { id: randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams'].includes(path) };
+      const labels = { '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/sync': 'Sincronizando cambios' };
+      operation = { id: path.startsWith('/api/security-') && typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit'].includes(path) };
       try {
+        if (['/api/security-groups', '/api/security-audit'].includes(path)) {
+          if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar sus permisos.');
+          const reportProgress = progress => {
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            operation = { ...operation, ...progress, updatedAt: Date.now() };
+          };
+          reportProgress({ message: 'Conectando a Azure DevOps. Completa el acceso de Microsoft si se solicita.' });
+          await azure.open(configFrom(store.data.config, false));
+          reportProgress({ message: 'Consultando la seguridad del proyecto…' });
+          const call = args => azure.call('neo_security_read', args);
+          if (path === '/api/security-groups') {
+            const catalog = await call({ action: 'catalog', project: store.data.config.project });
+            reportProgress({ message: `${catalog.groups.length} grupos encontrados.` });
+            security = { scope: securityScope(), catalog, report: null };
+          } else {
+            const snapshot = currentSecurity();
+            if (!snapshot) throw fail('Actualiza primero la lista de grupos.');
+            const report = await auditGroup(call, snapshot.catalog, input.descriptor, reportProgress);
+            reportProgress({ message: 'Informe de permisos preparado.' });
+            security = { ...snapshot, report };
+          }
+          return json(res, { security: currentSecurity() });
+        }
         if (path === '/api/projects') {
           operation.message = 'Conectando y consultando los proyectos de Azure DevOps… La sesión puede reutilizarse sin pedir acceso de nuevo.';
           await azure.open(configFrom(input.config, false));
@@ -222,7 +253,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'hierarchy.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}) }, error.status || 400); }
