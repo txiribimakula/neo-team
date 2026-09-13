@@ -60,15 +60,9 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
       const { data: scope } = await get(graph, `_apis/graph/descriptors/${enc(info.id)}`, { 'api-version': '7.1-preview.1' });
       const scoped = await list(graph, '_apis/graph/groups', { scopeDescriptor: scope.value, 'api-version': '7.1-preview.1' });
       const groups = scoped.map(g => ({ descriptor: g.descriptor, name: g.displayName, principalName: g.principalName, description: g.description, scope: 'project' }));
-      const coverage = [];
-      try {
-        const all = await list(graph, '_apis/graph/groups', { 'api-version': '7.1-preview.1' });
-        const ids = new Set(groups.map(g => g.descriptor));
-        for (const g of all) if (!ids.has(g.descriptor)) groups.push({ descriptor: g.descriptor, name: g.displayName, principalName: g.principalName, description: g.description, scope: 'other' });
-        coverage.push({ name: 'Otros grupos visibles de la organización', status: 'ok' });
-      } catch (e) { if (e.code === 'AZURE_AUTHENTICATION_REQUIRED') throw e; coverage.push({ name: 'Otros grupos de la organización', status: 'error', message: e.message }); }
-      return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, namespaces: await list(dev, '_apis/securitynamespaces'), coverage, fetchedAt: new Date().toISOString() };
+      return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, coverage: [], fetchedAt: new Date().toISOString() };
     }
+    if (action === 'namespaces') return list(dev, '_apis/securitynamespaces');
     if (action === 'identity') return (await list(graph, '_apis/identities', { ...(descriptor ? { subjectDescriptors: descriptor } : { descriptors: descriptors.join(',') }), queryMembership: 'Direct' })).map(cleanIdentity);
     if (action === 'acl') return list(dev, `_apis/accesscontrollists/${enc(namespaceId)}`, { descriptors: descriptors.join(','), includeExtendedInfo: true, recurse: true });
     if (action === 'resources') {

@@ -29,7 +29,7 @@ export async function auditGroup(call, catalog, descriptor, progress = () => {})
   const group = catalog.groups.find(g => g.descriptor === descriptor);
   if (!group) throw new Error('El grupo no está en el catálogo del proyecto. Actualiza los grupos.');
   const report = { group, project: catalog.project, startedAt: new Date().toISOString(), identities: [], members: [], rows: [], roles: [], feedViews: [], resources: [], coverage: [...catalog.coverage], raw: [] };
-  const counts = { namespacesRead: 0, namespaceTotal: catalog.namespaces.length, grants: 0, resources: 0, warnings: 0 };
+  const counts = { namespacesRead: 0, namespaceTotal: catalog.namespaces?.length || 0, grants: 0, resources: 0, warnings: 0 };
   const emit = message => progress({ phase: 'security', message, counts: { ...counts } });
   async function attempt(name, fn) {
     emit(`Consultando ${name}…`);
@@ -60,7 +60,9 @@ export async function auditGroup(call, catalog, descriptor, progress = () => {})
     const resources = await attempt(resourceLabels[kind], () => call({ action: 'resources', project: catalog.project.id, kind }));
     report.resources.push(...resources || []); counts.resources = report.resources.length;
   }
-  for (const namespace of catalog.namespaces) {
+  const namespaces = catalog.namespaces ?? await attempt('catálogo de ámbitos de seguridad', () => call({ action: 'namespaces' })) ?? [];
+  counts.namespaceTotal = namespaces.length;
+  for (const namespace of namespaces) {
     const name = namespace.displayName || namespace.name;
     // Small descriptor batches keep URLs within proxy limits; raw responses retain each source.
     for (let index = 0; index < report.identities.length; index += 10) {

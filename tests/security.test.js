@@ -70,7 +70,7 @@ test('cancellation escapes the audit instead of being recorded as another covera
 });
 test('security UI escapes group, resource, token and coverage text', async () => {
   const report = await auditGroup(mockCall, catalog, 'graph-root');
-  report.group.name = '<img src=x onerror=alert(1)>';
+  report.group = { ...report.group, name: '<img src=x onerror=alert(1)>' };
   report.coverage.push({ name: '<script>', status: 'error', message: '<iframe>' });
   resetPermissionFilters();
   const html = permissionsView({ catalog, report }, { project: 'Project' });
@@ -141,4 +141,38 @@ test('security rejection is contrasted with a project read using exactly the sam
   assert.equal(requests.length, 3);
   assert.equal(requests[1].token, requests[2].token);
   assert.equal(requests[2].path, '/organization/_apis/projects/Project');
+});
+
+test('initial catalog only reads the project, its Graph descriptor and scoped groups', async () => {
+  const paths = [];
+  const reader = securityReader('organization', async () => 'token', async url => {
+    paths.push(url.pathname);
+    if (url.pathname.includes('/projects/')) return new Response(JSON.stringify({ id: projectId, name: 'Project' }));
+    if (url.pathname.includes('/descriptors/')) return new Response(JSON.stringify({ value: 'project-scope' }));
+    if (url.pathname.endsWith('/graph/groups') && url.searchParams.get('scopeDescriptor') === 'project-scope') return new Response(JSON.stringify({ value: [{ descriptor: 'group', displayName: 'Readers' }] }));
+    assert.fail('Initial catalog requested organization/security data: ' + url.pathname);
+  });
+  const result = await reader({ action: 'catalog', project: 'Project' });
+  assert.equal(paths.length, 3);
+  assert.equal(result.groups[0].name, 'Readers');
+  assert.equal(result.namespaces, undefined);
+});
+test('namespaces are discovered only when auditing a selected group, with denied reads reported as coverage', async () => {
+  const { namespaces, ...minimalCatalog } = catalog;
+  let discoveries = 0;
+  const report = await auditGroup(async args => {
+    if (args.action === 'namespaces') { discoveries++; throw new Error('Azure HTTP 403'); }
+    return mockCall(args);
+  }, minimalCatalog, 'graph-root');
+  assert.equal(discoveries, 1);
+  assert.equal(report.group.name, 'Readers');
+  assert.ok(report.coverage.some(c => c.name === 'catálogo de ámbitos de seguridad' && c.status === 'error'));
+  assert.equal(report.roles.length, 1, 'resource roles remain available even if namespaces cannot be read');
+});
+test('project group list has no organization loader and excludes older organization entries', () => {
+  const html = permissionsView({ catalog: { ...catalog, groups: [...catalog.groups, { descriptor:'org-group',name:'Organization-only',scope:'other' }] } }, { project:'Project' });
+  assert.ok(!html.includes('Organization-only'));
+  assert.ok(!html.includes('security-other-groups'));
+  assert.ok(!html.includes('security-group-scope'));
+  assert.ok(html.includes('Readers'));
 });

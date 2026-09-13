@@ -919,7 +919,6 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
-  if (el.id === 'security-group-scope') { filterGroups(); return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}

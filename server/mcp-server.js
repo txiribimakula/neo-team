@@ -41,7 +41,7 @@ server.tool('neo_security_login', 'Explicitly open Microsoft account selection i
 });
 const readSecurity = securityReader(organization, tokenProvider);
 server.tool('neo_security_read', 'Read project groups, memberships, ACLs and resource roles. Does not change permissions.', {
-  action: z.enum(['catalog', 'identity', 'acl', 'resources', 'roles', 'feedPermissions', 'feedViews']),
+  action: z.enum(['catalog', 'identity', 'acl', 'resources', 'roles', 'feedPermissions', 'feedViews', 'namespaces']),
   project: z.string().min(1).max(200).optional(), descriptor: z.string().max(2000).optional(),
   namespaceId: z.string().uuid().optional(), descriptors: z.array(z.string().max(2000)).max(20).optional(),
   kind: z.string().max(40).optional(), resourceId: z.string().max(200).optional(),
