@@ -7,7 +7,7 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
-let securitySnapshot = null, maintenanceSnapshot = null;
+let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null;
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
@@ -195,9 +195,11 @@ function setupConnectionPickers() {
       field.setAttribute('aria-busy', 'true');
       spinner.hidden = false;
       toggle.hidden = true;
-      message(`Cargando ${plural}… Completa el acceso de Microsoft si se abre el navegador.`);
+      message(`Cargando ${plural}…`);
+      const operationId = crypto.randomUUID();
+      const stopFollowing = followOperation(operationId, progress => { if (loading) message(`Cargando ${plural}… ${activitySummary(progress)}`); });
       try {
-        const data = await request(`/api/${kind}`, { config });
+        const data = await request(`/api/${kind}`, { config, operationId });
         items = [...new Set(data[kind].map(item => item.name))].sort((a, b) => a.localeCompare(b, 'es'));
         message(items.length ? `${items.length} ${plural} disponibles. Escribe para filtrar y selecciona uno.` : `No hay ${plural} disponibles. Comprueba el acceso o introduce el nombre manualmente.`);
         input.focus();
@@ -207,6 +209,7 @@ function setupConnectionPickers() {
         message(`No se pudieron cargar los ${plural}: ${error.message} Abre el desplegable para reintentar.`, true);
         input.focus();
       } finally {
+        stopFollowing();
         loading = false;
         field.setAttribute('aria-busy', 'false');
         spinner.hidden = true;
@@ -302,7 +305,7 @@ async function importWithProgress(target, existing = null, start = null) {
   $('#modal-error').hidden = true;
   target.hidden = false;
   target.className = 'import-progress';
-  target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small><small class="import-progress-time"></small><button type="button" class="button small" data-cancel-operation>Cancelar consulta</button>`;
+  target.innerHTML = `<div class="import-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>Importando equipo</strong></div><p class="import-progress-phase" role="status" aria-live="polite">Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.</p><p class="operation-now"></p><ul class="import-progress-counts" aria-label="Datos obtenidos"></ul><small class="import-progress-note">Los elementos detectados pueden aumentar al encontrar tareas hijas.</small><small class="import-progress-connection" role="status"></small><small class="import-progress-time"></small><details class="operation-activity" hidden><summary>Qué está pasando</summary><ol></ol></details><button type="button" class="button small" data-cancel-operation>Cancelar consulta</button>`;
   target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
@@ -320,11 +323,12 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/work-item-states'].includes(existing.path) : false;
+    cancelButton.hidden = existing ? !['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
-    const idle = progress.updatedAt ? Math.floor((Date.now() - progress.updatedAt) / 1000) : 0;
-    $('.import-progress-time', target).textContent = progress.startedAt ? `${Math.floor(elapsed / 60)} min ${elapsed % 60} s en curso${idle >= 30 ? ` · ${idle} s sin nuevos datos. Azure puede estar esperando la autenticación o una respuesta.` : ''}` : '';
+    const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
+    $('.import-progress-time', target).textContent = progress.startedAt ? `${Math.floor(elapsed / 60)} min ${elapsed % 60} s en curso${idle >= 15 ? ` · ${idle} s sin actividad nueva` : ''}` : '';
+    renderActivity(target, progress);
     $('.import-progress-phase', target).textContent = progress.message;
     const c = progress.counts || {};
     const entries = [
@@ -388,6 +392,40 @@ async function importWithProgress(target, existing = null, start = null) {
     $('.import-progress-time', target).textContent = $('.import-progress-time', target).textContent.replace('en curso', 'transcurridos');
     $('.import-progress-connection', target).textContent = '';
   }
+}
+// What an operation is doing right now: the call it waits for, sign-in steps and
+// the requests sent, so a slow query can be told apart from a stuck one.
+const clock = at => new Date(at).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function activitySummary(progress) {
+  const pending = progress?.pendingCall, entries = progress?.activity ?? [], last = entries.at(-1);
+  if (pending) {
+    const auth = [...entries].reverse().find(entry => entry.at >= pending.startedAt && entry.kind === 'auth');
+    return `${auth ? auth.message : `Esperando respuesta de Azure DevOps: ${pending.label}`} · ${Math.floor((Date.now() - pending.startedAt) / 1000)} s`;
+  }
+  return last ? `${last.message} · hace ${Math.floor((Date.now() - last.at) / 1000)} s` : '';
+}
+function renderActivity(target, progress) {
+  const summary = activitySummary(progress), list = $('.operation-activity ol', target), entries = progress.activity ?? [];
+  $('.operation-now', target).textContent = summary ? `Ahora: ${summary}` : '';
+  $('.operation-activity', target).hidden = !entries.length;
+  $('.operation-activity summary', target).textContent = `Qué está pasando · ${entries.length} paso${entries.length === 1 ? '' : 's'}`;
+  const atEnd = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+  list.innerHTML = entries.map(entry => `<li class="activity-${escape(entry.kind)}"><time>${clock(entry.at)}</time><span>${escape(entry.message)}</span></li>`).join('');
+  if (atEnd) list.scrollTop = list.scrollHeight;
+}
+// Lightweight progress for requests without a progress panel.
+function followOperation(id, onProgress) {
+  let stopped = false, timer;
+  const poll = async () => {
+    try {
+      const response = await fetch(`/api/operation?id=${encodeURIComponent(id)}`, { headers: { 'X-Neo-CSRF': state.csrf } });
+      const data = response.ok ? await response.json() : null;
+      if (!stopped && data?.operation) onProgress(data.operation);
+    } catch { /* The request itself reports failures. */ }
+    if (!stopped) timer = setTimeout(poll, 800);
+  };
+  timer = setTimeout(poll, 400);
+  return () => { stopped = true; clearTimeout(timer); };
 }
 let recoveringOperation = false;
 function showStateReview(review) {
@@ -852,9 +890,9 @@ function render() {
   $('.workspace-label').textContent = section;
   $('#app').setAttribute('aria-label', section);
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
-  if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project, state.config?.team])) maintenanceSnapshot = null;
+  if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
-  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state); return; }
+  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state, maintenanceSetup); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div>`;return;
@@ -880,8 +918,9 @@ async function stage(id, changes) {
   await request('/api/stage', { edits:[{ id, changes }] }); review = null; render();
 }
 async function reviewChanges() {
-  showModal('Revisar cambios', 'Comprobando la última versión de cada tarea y de la capacidad.', '<p class="busy-note"><span class="spinner"></span> Consultando las tareas… Completa el acceso de Microsoft si se solicita.</p>');
-  const result = await request('/api/review'); review = result.review; render(); renderReview();
+  showModal('Revisar cambios', 'Comprobando la última versión de cada tarea y de la capacidad.', '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/review', input: {}, title: 'Revisando cambios' });
+  review = result.review; render(); renderReview();
 }
 function capacityText(entry, owner) {
   const hours=owner==='team' ? '' : entry.activities?.length ? entry.activities.map(a=>`${number(a.capacityPerDay)} h/día${a.name ? ` · ${a.name}` : ''}`).join(' + ') : '0 h/día';
@@ -898,7 +937,10 @@ function renderReview() {
   showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas${review.capacityPlans?.length ? ` · ${review.capacityPlans.length} ajuste${review.capacityPlans.length===1 ? '' : 's'} de capacidad` : ''} · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length || review.capacityPlans?.some(p=>p.conflict) ? '<div class="notice warning" style="margin-bottom:20px">Algo ha cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : '#'+p.id+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.conflicts.length ? `<p class="local-note">La versión remota ha cambiado desde tu importación.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}${capacityReview()}`, `<button class="button danger" data-action="discard-all">Descartar cambios</button><button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
 }
 async function synchronize() {
-  const data = await request('/api/sync', { token:review.token }); review = null; render();
+  const title = state.mode === 'demo' ? 'Simulando sincronización' : 'Sincronizando cambios';
+  showModal(title, 'Enviando los cambios revisados.', '<div id="connection-progress"></div>');
+  const data = await importWithProgress($('#connection-progress'), null, { path: '/api/sync', input: { token: review.token }, title });
+  review = null; render();
   const result = data.result, capacity = result.capacity ?? { successes:[], failures:[] };
   const failed = result.failures.length + capacity.failures.length;
   const confirmed = [`${result.successes.length} tarea${result.successes.length===1 ? '' : 's'}`, ...(capacity.successes.length ? [`${capacity.successes.length} ajuste${capacity.successes.length===1 ? '' : 's'} de capacidad`] : [])];
@@ -934,7 +976,7 @@ function homeView() {
   const issues=maintenanceSnapshot?.issues;
   return `<section class="home"><header class="home-heading"><p class="eyebrow">GESTIÓN DEL EQUIPO</p><h1>${escape(team)}</h1><p>Elige por dónde empezar.</p></header><div class="home-sections">
     <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong><span>Iteraciones, capacidad y reparto de tareas del equipo.</span><small>${planning}</small></button>
-    <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong><span>Functional issues sin empezar o activos.</span><small>${issues ? `${issues.length} abierto${issues.length===1 ? '' : 's'} en la última consulta` : 'Se consultan al entrar'}</small></button>
+    <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong><span>${escape(state.maintenanceSettings?.type || 'Functional Issue')} no cerrados del proyecto.</span><small>${issues ? `${issues.length} no cerrado${issues.length===1 ? '' : 's'} en la última consulta` : state.maintenanceSettings ? 'Se consultan al entrar' : 'Primero eliges qué estados son cerrados'}</small></button>
   </div></section>`;
 }
 async function loadMaintenance() {
@@ -943,8 +985,9 @@ async function loadMaintenance() {
   maintenanceSnapshot = (await response.json()).maintenance;
 }
 async function maintenanceQuery() {
-  showModal('Consultar functional issues', state.mode === 'demo' ? 'Datos de ejemplo.' : 'Elementos sin empezar o activos de las áreas del equipo en Azure DevOps.', '<div id="connection-progress"></div>');
-  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: {}, title: 'Consultando functional issues' });
+  const settings = state.maintenanceSettings;
+  showModal(`Consultar ${settings.type}`, `${state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project} · estados distintos de ${settings.closedStates.join(', ') || 'ninguno'}.`, '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: {}, title: `Consultando ${settings.type} no cerrados` });
   maintenanceSnapshot = result.maintenance; tab = 'maintenance'; modal.close(); render();
 }
 function exportSecurity() {
@@ -964,10 +1007,19 @@ const actions = {
   home: () => { tab = 'home'; render(); window.scrollTo({ top: 0 }); },
   'open-planning': () => { tab = 'iteration'; render(); },
   'open-maintenance': async () => {
-    await loadMaintenance(); tab = 'maintenance'; render();
-    if (!maintenanceSnapshot && (state.config?.team || state.mode === 'demo')) await maintenanceQuery();
+    await loadMaintenance(); maintenanceSetup = null; tab = 'maintenance'; render();
+    if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
   },
   'maintenance-refresh': () => maintenanceQuery(),
+  'maintenance-edit-settings': () => { maintenanceSetup = { type: state.maintenanceSettings.type, states: state.maintenanceSettings.states }; render(); },
+  'maintenance-cancel-settings': () => { maintenanceSetup = null; render(); },
+  'maintenance-load-states': async () => {
+    const type = $('#maintenance-type').value.trim();
+    if (!type) throw new Error('Indica el tipo de elemento.');
+    showModal('Cargar estados', `Estados posibles de «${type}» en el proyecto.`, '<div id="connection-progress"></div>');
+    const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance-states', input: { type }, title: `Consultando los estados de «${type}»` });
+    maintenanceSetup = { type: result.type, states: result.states }; modal.close(); render();
+  },
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
   demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; tab='iteration'; render(); },
   azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; tab='iteration'; render(); },
@@ -1047,6 +1099,13 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if (event.target.id === 'maintenance-settings-form') {
+      const closedStates = [...event.target.querySelectorAll('input[name="closed"]:checked')].map(el => el.value);
+      await request('/api/maintenance-settings', { type: event.target.dataset.type, states: maintenanceSetup?.states ?? [], closedStates });
+      maintenanceSetup = null; maintenanceSnapshot = null; render();
+      await maintenanceQuery();
+      return;
+    }
     if (event.target.id === 'completed-state-form') {
       const form=new FormData(event.target), {type,taskId}=completedStateChoice;
       const chosen=String(form.get('state') || form.get('other') || '').trim();

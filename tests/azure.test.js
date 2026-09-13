@@ -18,33 +18,22 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   await gateway.update({project:'Project'},42,8,{state:'Closed'});
   assert.deepEqual(call.args.updates,[{op:'test',path:'/rev',value:8},{op:'add',path:'/fields/System.State',value:'Closed'}]);
 });
-test('maintenance lists open Functional Issues of the team areas with one WIQL query and batched details',async()=>{
+test('maintenance reads the open items of the project in a single MCP call, without team areas',async()=>{
   const gateway=new AzureGateway(),calls=[],progress=[];
-  const ids=Array.from({length:201},(_,index)=>500-index);
+  const settings={type:'Functional Issue',states:[{name:'New',category:'proposed'},{name:'Active',category:'inprogress'},{name:'Closed',category:'completed'}],closedStates:['Closed']};
   gateway.call=async(name,args)=>{
     calls.push({name,args});
-    if(name==='work')return {areaPaths:[{value:"Project\\Team's",includeChildren:true},{value:'Project\\Ops',includeChildren:false}]};
-    if(name==='neo_work_item_states')return [{name:'New',category:'Proposed'},{name:'Active',category:'InProgress'},{name:'Resolved',category:'Resolved'},{name:'Closed',category:'Completed'}];
-    if(name==='wit_query')return {workItems:ids.map(id=>({id}))};
-    if(name==='wit_work_item')return [...args.ids].reverse().map(id=>({id,fields:{'System.Title':`Issue ${id}`,'System.State':id%2 ? 'New' : 'Active','System.AssignedTo':id===500 ? 'Ana García <ana@example.test>' : undefined,'System.Tags':'ui; login','Microsoft.VSTS.Common.Priority':2}}));
-    throw new Error(`Unexpected tool ${name}`);
+    return {ids:[9,4],limited:true,workItems:[{id:4,fields:{'System.Title':'Second','System.State':'New'}},{id:9,fields:{'System.Title':'First','System.State':'Active','System.AssignedTo':{displayName:'Ana García'}}}]};
   };
-  const result=await gateway.functionalIssues({organization:'org',project:'Project',team:'Team'},p=>progress.push(p));
-  const query=calls.find(c=>c.name==='wit_query').args;
-  assert.equal(query.top,1000);
-  assert.match(query.wiql,/\[System\.WorkItemType\] = 'Functional Issue'/);
-  assert.match(query.wiql,/\[System\.State\] IN \('New', 'Active'\)/,'only not started and active categories');
-  assert.match(query.wiql,/\(\[System\.AreaPath\] UNDER 'Project\\Team''s' OR \[System\.AreaPath\] = 'Project\\Ops'\)/,'team areas, with quotes escaped');
-  assert.deepEqual(calls.filter(c=>c.name==='wit_work_item').map(c=>[c.args.action,c.args.ids.length]),[['get_batch',200],['get_batch',1]]);
-  assert.deepEqual(result.issues.map(i=>i.id),ids,'the query order is kept');
-  assert.deepEqual({...result.issues[0],createdAt:undefined},{id:500,title:'Issue 500',state:'Active',category:'inprogress',assignedTo:'Ana García',areaPath:'',iterationPath:'',priority:2,createdAt:undefined,changedAt:null,tags:['ui','login']});
-  assert.equal(result.issues[1].category,'proposed');assert.equal(result.issues[1].assignedTo,'');
-  assert.deepEqual([result.organization,result.project,result.team,result.limited],['org','Project','Team',false]);
-  assert.deepEqual(progress.at(-1).counts,{issuesFound:201,issuesRead:201});
-  gateway.call=async name=>name==='work' ? {} : [{name:'Closed',category:'Completed'}];
-  await assert.rejects(()=>gateway.functionalIssues({project:'Project',team:'Team'}),/sin empezar ni activos/);
-  gateway.call=async name=>{if(name==='work')return {};throw new Error('TF: unknown type');};
-  await assert.rejects(()=>gateway.functionalIssues({project:'Project',team:'Team'}),/Functional Issue/);
+  const result=await gateway.functionalIssues({organization:'org',project:'Project'},settings,p=>progress.push(p));
+  assert.deepEqual(calls.map(c=>c.name),['neo_query_work_items']);
+  assert.match(calls[0].args.wiql,/NOT IN \('Closed'\)/);assert.doesNotMatch(calls[0].args.wiql,/AreaPath/);
+  assert.equal(calls[0].args.top,1000);assert.ok(calls[0].args.fields.includes('System.State'));
+  assert.deepEqual(result.issues.map(i=>[i.id,i.category,i.assignedTo]),[[9,'inprogress','Ana García'],[4,'proposed','']],'the query order is kept');
+  assert.deepEqual([result.limited,result.closedStates,result.project],[true,['Closed'],'Project']);
+  assert.deepEqual(progress.at(-1).counts,{issuesFound:2,issuesRead:2});
+  gateway.call=async()=>({});
+  await assert.rejects(()=>gateway.functionalIssues({project:'Project'},settings),/lista válida/);
 });
 test('work item states are read on demand with normalized custom categories',async()=>{
   const gateway=new AzureGateway();
@@ -85,9 +74,19 @@ test('real bundled MCP initializes and advertises the required schemas without a
   const gateway=new AzureGateway();t.after(()=>gateway.close());
   await gateway.open({organization:'example',authentication:'interactive'});
   const {tools}=await gateway.client.listTools();
-  for(const name of ['neo_team_members','neo_team_days_off','neo_work_item_states','neo_security_read','neo_security_login','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
+  for(const name of ['neo_team_members','neo_team_days_off','neo_work_item_states','neo_security_read','neo_security_login','neo_query_work_items','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
   const write=tools.find(tool=>tool.name==='wit_work_item_write');
   const schema=JSON.stringify(write.inputSchema);assert.match(schema,/test/);assert.match(schema,/number/);assert.match(schema,/updates/);
+});
+test('each MCP call reports what it waits for, how long it took and why it failed',async()=>{
+  const gateway=new AzureGateway(),events=[];gateway.onActivity=event=>events.push(event);
+  gateway.client={callTool:async({name})=>name==='neo_denied' ? {isError:true,content:[{type:'text',text:'Denied'}]} : {content:[{type:'text',text:'{"ok":true}'}]}};
+  assert.deepEqual(await gateway.call('wit_work_item',{action:'get',id:7}),{ok:true});
+  assert.equal(events[0].kind,'call');assert.match(events[0].message,/Esperando respuesta: elementos de trabajo \(wit_work_item · get · #7\)/);
+  assert.match(events[0].pending.label,/#7/);
+  assert.equal(events[1].pending,null);assert.match(events[1].message,/respondió en \d+,\d s/);
+  await assert.rejects(()=>gateway.call('neo_denied',{}),/Denied/);
+  assert.equal(events.at(-1).kind,'error');assert.match(events.at(-1).message,/falló tras .*Denied/);assert.equal(gateway.pendingCall,null);
 });
 test('closing the gateway also closes a client that is still connecting',async()=>{
   const gateway=new AzureGateway();

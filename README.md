@@ -13,12 +13,25 @@ npm start
 
 Abre **http://127.0.0.1:4310**. Para desarrollar, `npm run dev` reinicia el servidor al editarlo. No hay compilación de frontend: los archivos de `dist/` son las fuentes estáticas de la interfaz.
 
+## Progreso de las consultas
+
+Todas las operaciones que consultan o escriben en Azure DevOps muestran qué ocurre por detrás: importar, buscar proyectos y equipos, revisar, sincronizar, permisos, mantenimiento y estados. El panel indica:
+
+- **Ahora**: la llamada que espera respuesta y cuánto tiempo lleva, o el paso de inicio de sesión en curso (reutilizar la sesión, ventana de cuentas del sistema, navegador abierto). Mientras espera al inicio de sesión se avisa cada 10 segundos.
+- **Qué está pasando**: registro con hora de cada paso. Incluye el arranque del proceso MCP, cada llamada con su duración o su error y cada petición HTTP a Azure DevOps (método y ruta).
+
+Si no aparece actividad nueva durante un rato y no hay un inicio de sesión pendiente, la consulta sigue esperando la respuesta de Azure DevOps; se puede cancelar cuando la operación lo permite. Los mensajes de autenticación son textos fijos: no se muestran tokens, URLs de inicio de sesión ni los registros internos de Microsoft.
+
 ## Secciones
 
 La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre a esta pantalla. Desde ella se accede a:
 
 - **Planificación**: preparación de iteraciones, descrita en [Uso](#uso).
-- **Mantenimiento**: lista los elementos de tipo `Functional Issue` que no se han empezado o están activos, es decir, cuyo estado pertenece a las categorías `Proposed` o `InProgress` de su flujo. La consulta se limita a las áreas del equipo configuradas en Azure DevOps y se ordena por prioridad y por fecha de la última modificación. Se ejecuta al entrar por primera vez y con **Actualizar**; el resultado se guarda solo en memoria hasta cerrar la aplicación. Permite buscar y filtrar por estado, y cada título abre el elemento en Azure DevOps. Muestra un máximo de 1000 elementos y avisa si hay más. Es de solo lectura. En el ejemplo se usan datos simulados.
+- **Mantenimiento**: lista todos los elementos de tipo `Functional Issue` del proyecto que no están cerrados.
+  - **Configuración inicial:** se indica el tipo (editable) y se cargan sus estados posibles en el proyecto. Después se marcan los que cuentan como cerrados; vienen propuestos los de categoría `Completed` y `Removed`. La elección se guarda por proyecto y se cambia con **Cambiar**.
+  - **Consulta:** es una sola llamada: una WIQL sobre el proyecto (`tipo = … AND State NOT IN (cerrados)`), cuyos campos se leen en lotes paralelos dentro del proceso MCP. No filtra por áreas ni equipos y ordena por prioridad y por última modificación.
+  - **Uso:** se consulta al entrar y con **Actualizar**; el resultado solo se guarda en memoria. Permite buscar y filtrar por estado, y cada título abre el elemento en Azure DevOps.
+  - **Límites:** muestra hasta 1000 elementos y avisa si hay más. Es de solo lectura. En el ejemplo se usan datos simulados.
 
 ## Uso
 

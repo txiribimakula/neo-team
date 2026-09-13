@@ -2,6 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCachedTokenProvider } from '../server/token-cache.js';
 
+test('token acquisition reports waiting for authentication, but stays silent for cached tokens', async () => {
+  const events = [];
+  let clock = 1000;
+  const provider = createCachedTokenProvider(async () => async () => { clock += 2500; return 'opaque'; }, () => clock, event => events.push(event));
+  await provider(); await provider();
+  assert.deepEqual(events, [{ type: 'authenticating' }, { type: 'authenticated', ms: 2500 }]);
+  const failing = createCachedTokenProvider(async () => async () => { throw new Error('cancelled'); }, () => clock, event => events.push(event));
+  await assert.rejects(() => failing(), /cancelled/);
+  assert.deepEqual(events.slice(-2), [{ type: 'authenticating' }, { type: 'failed', ms: 0 }]);
+});
+
 test('rejected tokens discard both the cached token and the authenticator', async () => {
   let instances = 0, acquisitions = 0;
   const provider = createCachedTokenProvider(async () => {

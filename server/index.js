@@ -7,7 +7,8 @@ import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges, setCompletedState, completeTask } from './planner.js';
-import { createDemo, demoFunctionalIssues } from './demo.js';
+import { createDemo, demoFunctionalIssues, DEMO_STATES } from './demo.js';
+import { maintenanceSettingsFrom } from './maintenance.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const port = Number(process.env.NEO_TEAM_PORT || 4310);
@@ -15,6 +16,12 @@ const types = { html: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8'
 const store = new LocalStore(resolve(process.env.NEO_TEAM_DATA_DIR || fileURLToPath(new URL('../.neo-team/', import.meta.url))));
 await store.load();
 const azure = new AzureGateway(), planner = new Planner(store, azure);
+// Every Azure DevOps step joins the running operation, so the interface can
+// show whether a query is progressing, waiting for sign-in or for a response.
+azure.onActivity = entry => {
+  if (!busy || !operation) return;
+  operation = { ...operation, pendingCall: entry.pending, activityAt: entry.at, activity: [...(operation.activity ?? []), { at: entry.at, kind: entry.kind, message: entry.message }].slice(-80) };
+};
 const csrf = randomBytes(32).toString('hex');
 let busy = false;
 let importProgress = null;
@@ -23,9 +30,12 @@ let stateReview = null;
 let security = null;
 const securityScope = () => JSON.stringify([store.data.config?.organization, store.data.config?.project]);
 const currentSecurity = () => security?.scope === securityScope() ? security : null;
-// The last maintenance query is kept in memory for the active mode and team.
+// The closed states chosen for maintenance are saved per project; the last
+// query result is kept in memory for the active mode and project.
 let maintenance = null;
-const maintenanceScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project, store.data.config?.team]);
+const maintenanceScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project]);
+const maintenanceKey = () => store.data.mode === 'demo' ? 'demo' : [store.data.config?.organization, store.data.config?.project].map(value => String(value ?? '').toLowerCase()).join('\n');
+const currentMaintenanceSettings = () => store.data.maintenanceSettings?.[maintenanceKey()] ?? null;
 const currentMaintenance = () => maintenance?.scope === maintenanceScope() ? maintenance : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
@@ -45,7 +55,7 @@ const pendingChanges = workspace => Object.keys(workspace?.drafts || {}).length 
 const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
 function publicState() {
   const workspace = planner.workspace();
-  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, busy, operation: busy ? operation : null, stateReview,
+  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), busy, operation: busy ? operation : null, stateReview,
     workspace: workspace ? planningWorkspace(workspace) : null };
 }
 async function body(req) {
@@ -99,14 +109,14 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando functional issues', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
-      operation = { id: (path.startsWith('/api/security-') || path === '/api/maintenance' || path === '/api/work-item-states') && typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // On demand, cancellable: the person chooses the completed state from this list.
         if (path === '/api/work-item-states') {
           const workspace = planner.workspace();
           if (!workspace?.items.some(i => i.type === input.type)) throw fail('Elige un tipo de elemento de esta planificación.');
-          if (workspace.mode === 'demo') return json(res, { states: [['New', 'proposed'], ['Active', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category })) });
+          if (workspace.mode === 'demo') return json(res, { states: DEMO_STATES });
           operation = { ...operation, message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.', updatedAt: Date.now() };
           await azure.open(configFrom(workspace.config));
           if (operation.cancelRequested) throw fail('Consulta cancelada.');
@@ -118,16 +128,35 @@ const server = http.createServer(async (req, res) => {
             if (operation.cancelRequested) throw fail('Consulta cancelada.');
             operation = { ...operation, ...progress, updatedAt: Date.now() };
           };
-          if (store.data.mode === 'demo') maintenance = { scope: maintenanceScope(), ...demoFunctionalIssues() };
+          const settings = currentMaintenanceSettings();
+          if (!settings) throw fail('Elige primero qué estados se consideran cerrados.');
+          if (store.data.mode === 'demo') maintenance = { scope: maintenanceScope(), ...demoFunctionalIssues(settings) };
           else {
-            if (!store.data.config?.team) throw fail('Conecta un equipo de Azure DevOps para consultar el mantenimiento.');
-            const config = configFrom(store.data.config);
-            reportProgress({ message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.' });
+            if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar el mantenimiento.');
+            const config = configFrom(store.data.config, false);
+            reportProgress({ message: 'Conectando con Azure DevOps…' });
             await azure.open(config);
             if (operation.cancelRequested) throw fail('Consulta cancelada.');
-            maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, reportProgress)) };
+            maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, settings, reportProgress)) };
           }
           return json(res, { maintenance: currentMaintenance() });
+        }
+        // The possible states of a type, so the person can choose which are closed.
+        if (path === '/api/maintenance-states') {
+          const type = typeof input.type === 'string' ? input.type.trim() : '';
+          if (!type || type.length > 128) throw fail('Indica el tipo de elemento.');
+          if (store.data.mode === 'demo') return json(res, { type, states: DEMO_STATES });
+          if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps.');
+          const config = configFrom(store.data.config, false);
+          operation = { ...operation, message: 'Conectando con Azure DevOps…', updatedAt: Date.now() };
+          await azure.open(config);
+          if (operation.cancelRequested) throw fail('Consulta cancelada.');
+          operation = { ...operation, message: `Consultando los estados de «${type}» en ${config.project}…`, updatedAt: Date.now() };
+          let states;
+          try { states = await azure.workItemStates(config, type); }
+          catch (error) { throw fail(`No se pudieron consultar los estados de «${type}» en ${config.project}. Comprueba el nombre del tipo. ${error.message}`); }
+          if (!states.length) throw fail(`«${type}» no tiene estados en ${config.project}. Comprueba el nombre del tipo.`);
+          return json(res, { type, states });
         }
         if (['/api/security-groups', '/api/security-audit'].includes(path)) {
           if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar sus permisos.');
@@ -184,6 +213,10 @@ const server = http.createServer(async (req, res) => {
           }
           await store.save(data);
           stateReview = null;
+        } else if (path === '/api/maintenance-settings') {
+          const data = structuredClone(store.data);
+          data.maintenanceSettings = { ...data.maintenanceSettings, [maintenanceKey()]: maintenanceSettingsFrom(input) };
+          await store.save(data); maintenance = null;
         } else if (path === '/api/config') {
           const config = configFrom(input.config);
           const data = structuredClone(store.data);
@@ -294,7 +327,7 @@ const server = http.createServer(async (req, res) => {
         throw error;
       } finally {
         busy = false;
-        operation = { ...operation, status: operation.status === 'running' ? (operation.cancelRequested ? 'cancelled' : 'complete') : operation.status, cancellable: false, updatedAt: Date.now() };
+        operation = { ...operation, status: operation.status === 'running' ? (operation.cancelRequested ? 'cancelled' : 'complete') : operation.status, cancellable: false, pendingCall: null, updatedAt: Date.now() };
         if (path === '/api/import') importProgress = operation;
       }
     }

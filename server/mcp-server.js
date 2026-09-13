@@ -1,5 +1,8 @@
 import { createBrowserAuthenticator } from './browser-auth.js';
 import { createCachedTokenProvider } from './token-cache.js';
+import { activityLine, seconds } from './activity.js';
+import open from 'open';
+import { logger } from '@azure-devops/mcp/dist/logger.js';
 // Local extension of Microsoft's pinned MCP tool implementations. No Azure calls
 // are made by the HTTP application: all data access goes through this MCP server.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -17,13 +20,47 @@ import { wrapExternalToolResponse } from '@azure-devops/mcp/dist/shared/content-
 const [organization, authentication = 'interactive', tenant] = process.argv.slice(2);
 if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization ?? '')) throw new Error('Organización inválida');
 if (!['interactive', 'azcli'].includes(authentication)) throw new Error('Autenticación inválida');
-let useBrowser = false;
+// The local app shows these steps while a query waits. Messages are fixed texts:
+// never the raw authentication logs, which include sign-in URLs.
+const emit = (kind, message) => process.stderr.write(activityLine(kind, message));
+const authSteps = [
+  ['Attempting silent token acquisition', 'Intentando reutilizar la sesión de Microsoft guardada…'],
+  ['Silent token acquisition failed', 'No se pudo reutilizar la sesión guardada.'],
+  ['No cached account available', 'No hay una sesión de Microsoft en este proceso: hace falta iniciar sesión.'],
+  ['Starting interactive token acquisition without broker', 'Abriendo el inicio de sesión de Microsoft en el navegador…'],
+  ['Starting interactive token acquisition', 'Esperando el inicio de sesión con la ventana de cuentas del sistema. Puede aparecer detrás de otras ventanas.'],
+  ['Opening browser for authentication', 'Se ha abierto el navegador para iniciar sesión con Microsoft. Complétalo para continuar.'],
+  ['Interactive token acquisition failed', 'El inicio de sesión con la ventana del sistema no se completó; se intentará con el navegador.'],
+];
+const debug = logger.debug.bind(logger);
+logger.debug = (message, ...rest) => {
+  const step = typeof message === 'string' && authSteps.find(([text]) => message.includes(text));
+  if (step) emit('auth', step[1]);
+  return debug(message, ...rest);
+};
+let useBrowser = false, waiting;
 const tokenProvider = createCachedTokenProvider(async options => {
   if (options.interactive === true) useBrowser = true;
+  if (!tenant) emit('auth', 'Buscando el directorio de Microsoft de la organización…');
   const organizationTenant = tenant || await getOrgTenant(organization);
-  return useBrowser ? createBrowserAuthenticator(organizationTenant) : createAuthenticator(authentication, organizationTenant);
+  if (useBrowser) return createBrowserAuthenticator(organizationTenant, undefined, async url => { emit('auth', 'Se ha abierto el navegador para elegir la cuenta de Microsoft. Complétalo para continuar.'); await open(url); });
+  if (authentication === 'azcli') emit('auth', 'Usando la sesión de Azure CLI…');
+  return createAuthenticator(authentication, organizationTenant);
+}, Date.now, event => {
+  clearInterval(waiting);
+  if (event.type === 'authenticating') {
+    const started = Date.now();
+    emit('auth', 'Obteniendo un token de acceso de Azure DevOps…');
+    waiting = setInterval(() => emit('auth', `Sigue esperando el inicio de sesión de Microsoft (${Math.round((Date.now() - started) / 1000)} s). Comprueba si hay una ventana de Microsoft abierta.`), 10000);
+    waiting.unref();
+  } else emit('auth', event.type === 'authenticated' ? `Token de acceso obtenido en ${seconds(event.ms)}.` : `No se pudo obtener el token de acceso tras ${seconds(event.ms)}.`);
 });
-const connectionProvider = async () => new WebApi(`https://dev.azure.com/${organization}`, getBearerHandler(await tokenProvider()));
+const connectionProvider = async () => {
+  const handler = getBearerHandler(await tokenProvider());
+  const prepare = handler.prepareRequest.bind(handler);
+  handler.prepareRequest = options => { emit('http', `Petición a Azure DevOps: ${options.method || 'GET'} ${String(options.path || '').split('?')[0]}`); return prepare(options); };
+  return new WebApi(`https://dev.azure.com/${organization}`, handler);
+};
 const server = new McpServer({ name: 'Neo Team · Azure DevOps MCP', version: '0.1.0' });
 // Keep the official untrusted-content boundary on every registered tool.
 const originalTool = server.tool.bind(server);
@@ -92,6 +129,20 @@ server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an ite
 }, async ({ project, team, iterationId, daysOff }) => {
   const api = await (await connectionProvider()).getWorkApi();
   return { content: [{ type: 'text', text: JSON.stringify(await api.updateTeamDaysOff({ daysOff: asDates(daysOff) }, { project, team }, iterationId)) }] };
+});
+// A query and the fields of its results in one tool call: batches of 200 are
+// read in parallel inside the MCP instead of one round trip per batch.
+server.tool('neo_query_work_items', 'Run a WIQL query and return the requested fields of the matching work items.', {
+  project: z.string().min(1), wiql: z.string().min(1).max(32768), fields: z.array(z.string().min(1).max(200)).min(1).max(50), top: z.number().int().min(1).max(5000),
+}, async ({ project, wiql, fields, top }) => {
+  const api = await (await connectionProvider()).getWorkItemTrackingApi();
+  const result = await api.queryByWiql({ query: wiql }, { project }, false, top + 1);
+  const ids = (result.workItems ?? []).map(item => item.id), selected = ids.slice(0, top);
+  emit('info', `La consulta encontró ${ids.length > top ? `más de ${top}` : ids.length} elementos. Leyendo sus campos…`);
+  const chunks = [];
+  for (let start = 0; start < selected.length; start += 200) chunks.push(selected.slice(start, start + 200));
+  const batches = await Promise.all(chunks.map(chunk => api.getWorkItemsBatch({ ids: chunk, fields }, project)));
+  return { content: [{ type: 'text', text: JSON.stringify({ ids: selected, limited: ids.length > top, workItems: batches.flat() }) }] };
 });
 // Atomic creation includes the parent link and a recovery tag in the same request.
 server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {

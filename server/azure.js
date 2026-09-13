@@ -3,6 +3,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath } from 'node:url';
 import { normalizeItem } from './planner.js';
 import { isExecutable } from '../dist/hierarchy.js';
+import { activityReader, describeCall, seconds } from './activity.js';
+import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceIssue, maintenanceWiql } from './maintenance.js';
 
 export function parseToolResult(result) {
   const blocks = (result.content ?? []).filter(b => b.type === 'text').map(b => {
@@ -44,22 +46,6 @@ function workflowStates(states) {
   return states.filter(s => s && normalize(s.name)).map(s => ({ name: s.name, category: normalize(s.category || s.stateCategory).replace(/\s/g, '') }));
 }
 
-export const FUNCTIONAL_ISSUE = 'Functional Issue';
-const MAINTENANCE_LIMIT = 1000;
-const quoteWiql = value => `'${String(value).replace(/'/g, "''")}'`;
-function functionalIssue(raw, openStates) {
-  const f = raw.fields ?? {}, state = f['System.State'] ?? '', assigned = f['System.AssignedTo'];
-  return {
-    id: raw.id, title: f['System.Title'] || `Elemento ${raw.id}`, state,
-    category: openStates.find(s => s.name.trim().toLowerCase() === state.trim().toLowerCase())?.category ?? '',
-    // get_batch flattens identities to "Name <email>".
-    assignedTo: typeof assigned === 'object' ? assigned?.displayName ?? '' : String(assigned ?? '').replace(/\s*<[^<>]*>$/, ''),
-    areaPath: f['System.AreaPath'] ?? '', iterationPath: f['System.IterationPath'] ?? '',
-    priority: f['Microsoft.VSTS.Common.Priority'] ?? null, createdAt: f['System.CreatedDate'] ?? null, changedAt: f['System.ChangedDate'] ?? null,
-    tags: (f['System.Tags'] || '').split(';').map(s => s.trim()).filter(Boolean),
-  };
-}
-
 export class AzureGateway {
   async open(config) {
     const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
@@ -72,17 +58,19 @@ export class AzureGateway {
       args: [fileURLToPath(new URL('./mcp-server.js', import.meta.url)), config.organization, config.authentication, config.tenant || ''],
       stderr: 'pipe',
     });
-    // Drain logs without retaining or exposing authentication details.
-    transport.stderr?.on('data', () => {});
+    // Drain logs; only the MCP's own activity lines are read, never raw auth logs.
+    transport.stderr?.on('data', activityReader(entry => this.report(entry.kind, entry.message)));
+    this.report('mcp', 'Iniciando el proceso MCP local de Azure DevOps…');
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
       this.openingClient = null;
       this.client = client; this.key = key;
+      this.report('mcp', `Proceso MCP listo · ${tools.length} herramientas disponibles.`);
       client.onclose = () => { if (this.client === client) { this.client = null; this.key = null; } };
     } catch (error) { if (this.openingClient === client) this.openingClient = null; await client.close().catch(() => {}); throw error; }
   }
@@ -91,10 +79,23 @@ export class AzureGateway {
     this.client = null; this.openingClient = null; this.key = null;
     await Promise.all(clients.map(client => client.close().catch(() => {})));
   }
+  // Activity listeners see each step, with the call still waiting (if any).
+  report(kind, message) { this.onActivity?.({ at: Date.now(), kind, message, pending: this.pendingCall ?? null }); }
   async call(name, args) {
     if (!this.client) throw new Error('Conecta Azure DevOps para continuar.');
-    const result = await this.client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
-    return parseToolResult(result);
+    const label = describeCall(name, args), startedAt = Date.now();
+    this.pendingCall = { label, startedAt };
+    this.report('call', `Esperando respuesta: ${label}`);
+    try {
+      const result = parseToolResult(await this.client.callTool({ name, arguments: args }, undefined, { timeout: 180000 }));
+      this.pendingCall = null;
+      this.report('call', `${label} respondió en ${seconds(Date.now() - startedAt)}.`);
+      return result;
+    } catch (error) {
+      this.pendingCall = null;
+      this.report('error', `${label} falló tras ${seconds(Date.now() - startedAt)}: ${String(error?.message ?? error).slice(0, 200)}`);
+      throw error;
+    }
   }
   async projects() {
     const result = [];
@@ -121,35 +122,16 @@ export class AzureGateway {
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
   }
-  // Maintenance: Functional Issues of the team areas that are not started or
-  // active, according to the state categories of their workflow.
-  async functionalIssues(config, onProgress = () => {}) {
-    const type = FUNCTIONAL_ISSUE;
-    onProgress({ message: 'Leyendo las áreas del equipo…' });
-    const settings = await this.call('work', { action: 'get_team_settings', project: config.project, team: config.team });
-    onProgress({ message: `Consultando los estados de «${type}»…` });
-    let states;
-    try { states = await this.call('neo_work_item_states', { project: config.project, type }); } catch { states = null; }
-    if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}». Comprueba que el proceso del proyecto incluye ese tipo de elemento.`);
-    const open = workflowStates(states).filter(s => ['proposed', 'inprogress'].includes(s.category));
-    if (!open.length) throw new Error(`«${type}» no tiene estados sin empezar ni activos.`);
-    const areas = (settings?.areaPaths ?? []).map(area => `[System.AreaPath] ${area.includeChildren ? 'UNDER' : '='} ${quoteWiql(area.value)}`);
-    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.WorkItemType] = ${quoteWiql(type)} AND [System.State] IN (${open.map(s => quoteWiql(s.name)).join(', ')})${areas.length ? ` AND (${areas.join(' OR ')})` : ''} ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC`;
-    onProgress({ message: `Buscando «${type}» sin empezar o activos…` });
-    const result = await this.call('wit_query', { action: 'wiql', project: config.project, top: MAINTENANCE_LIMIT, wiql });
+  // Maintenance: every item of the chosen type whose state is not one of the
+  // closed states, in a single MCP call (WIQL plus parallel batched fields).
+  async functionalIssues(config, settings, onProgress = () => {}) {
+    onProgress({ message: `Consultando los «${settings.type}» no cerrados del proyecto ${config.project}…` });
+    const result = await this.call('neo_query_work_items', { project: config.project, wiql: maintenanceWiql(settings), fields: MAINTENANCE_FIELDS, top: MAINTENANCE_LIMIT });
     if (!Array.isArray(result?.workItems)) throw new Error('Azure DevOps no devolvió una lista válida de elementos.');
-    const ids = result.workItems.map(item => item.id), issues = [];
-    const fields = ['System.Id', 'System.Title', 'System.State', 'System.AssignedTo', 'System.AreaPath', 'System.IterationPath', 'Microsoft.VSTS.Common.Priority', 'System.CreatedDate', 'System.ChangedDate', 'System.Tags'];
-    for (let start = 0; start < ids.length; start += 200) {
-      onProgress({ message: `Leyendo los detalles de ${ids.length} elementos…`, counts: { issuesFound: ids.length, issuesRead: start } });
-      const batch = await this.call('wit_work_item', { action: 'get_batch', project: config.project, ids: ids.slice(start, start + 200), fields });
-      if (!Array.isArray(batch)) throw new Error('Azure DevOps no devolvió los detalles de los elementos.');
-      issues.push(...batch.map(raw => functionalIssue(raw, open)));
-    }
-    onProgress({ message: 'Consulta completada.', counts: { issuesFound: ids.length, issuesRead: ids.length } });
-    const order = new Map(ids.map((id, index) => [id, index]));
-    issues.sort((a, b) => order.get(a.id) - order.get(b.id));
-    return { type, fetchedAt: new Date().toISOString(), limited: ids.length >= MAINTENANCE_LIMIT, demo: false, organization: config.organization, project: config.project, team: config.team, issues };
+    const order = new Map((result.ids ?? []).map((id, index) => [id, index]));
+    const issues = result.workItems.map(raw => maintenanceIssue(raw, settings.states)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    onProgress({ message: `${issues.length} elementos obtenidos.`, counts: { issuesFound: issues.length, issuesRead: issues.length } });
+    return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: !!result.limited, demo: false, organization: config.organization, project: config.project, issues };
   }
   async workItemStates(config, type) {
     const states = await this.call('neo_work_item_states', { project: config.project, type });

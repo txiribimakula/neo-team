@@ -43,16 +43,20 @@ export function createDemo() {
   return workspace;
 }
 
-export function demoFunctionalIssues() {
+export const DEMO_STATES = [['New', 'proposed'], ['Active', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category }));
+export function demoFunctionalIssues(settings) {
   const day = offset => new Date(Date.now() - offset * 86400000).toISOString();
   const issues = [
-    [2101, 'El informe mensual no incluye los proyectos archivados', 'Active', 'inprogress', 'Ana García', 1, 1, ['Informes']],
-    [2107, 'El aviso de sesión caducada aparece dos veces', 'Active', 'inprogress', 'Marcos Ruiz', 2, 0, ['Sesión']],
-    [2104, 'La búsqueda ignora las tildes en los nombres', 'New', 'proposed', '', 2, 3, ['Búsqueda']],
-    [2110, 'Los filtros guardados se pierden al cambiar de equipo', 'New', 'proposed', 'Lucía Martín', 2, 6, []],
-    [2113, 'Texto cortado en el menú en pantallas pequeñas', 'New', 'proposed', '', 3, 9, ['Móvil']],
-  ].map(([id, title, state, category, assignedTo, priority, changed, tags]) => ({ id, title, state, category, assignedTo, areaPath: 'Neo Platform\\Producto', iterationPath: 'Neo Platform', priority, createdAt: day(changed + 20), changedAt: day(changed), tags }));
-  return { type: 'Functional Issue', fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', team: 'Equipo de producto', issues };
+    [2101, 'El informe mensual no incluye los proyectos archivados', 'Active', 'Ana García', 1, 1, ['Informes']],
+    [2107, 'El aviso de sesión caducada aparece dos veces', 'Active', 'Marcos Ruiz', 2, 0, ['Sesión']],
+    [2104, 'La búsqueda ignora las tildes en los nombres', 'New', '', 2, 3, ['Búsqueda']],
+    [2110, 'Los filtros guardados se pierden al cambiar de equipo', 'New', 'Lucía Martín', 2, 6, []],
+    [2112, 'La exportación a CSV duplica la cabecera', 'Resolved', 'David López', 2, 2, ['Exportación']],
+    [2113, 'Texto cortado en el menú en pantallas pequeñas', 'New', '', 3, 9, ['Móvil']],
+    [2098, 'El logo no se ve en modo oscuro', 'Closed', 'Ana García', 3, 15, []],
+  ].filter(([, , state]) => !settings.closedStates.includes(state))
+    .map(([id, title, state, assignedTo, priority, changed, tags]) => ({ id, title, state, category: settings.states.find(s => s.name === state)?.category ?? '', assignedTo, areaPath: 'Neo Platform\\Producto', iterationPath: 'Neo Platform', priority, createdAt: day(changed + 20), changedAt: day(changed), tags }));
+  return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', issues };
 }
 
 // A finished iteration with open work, reviewed before planning the next one.
