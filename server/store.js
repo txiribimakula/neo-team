@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { upgradeDemoHierarchy } from './demo.js';
+import { upgradeDemoHierarchy, upgradeDemoPreviousIteration } from './demo.js';
 import { invalidateConfirmations } from './planner.js';
 
 export class LocalStore {
@@ -12,7 +12,8 @@ export class LocalStore {
       this.data = JSON.parse(await readFile(this.file, 'utf8'));
       if (this.data.schema !== 1 || !Number.isInteger(this.data.version) || !['azure', 'demo'].includes(this.data.mode)) throw new Error('Formato de planificación no compatible');
       const next = structuredClone(this.data);
-      if (upgradeDemoHierarchy(next.demo)) await this.save(next);
+      const upgraded = [upgradeDemoHierarchy(next.demo), upgradeDemoPreviousIteration(next.demo)];
+      if (upgraded.some(Boolean)) await this.save(next);
     } catch (error) {
       if (error.code !== 'ENOENT') throw new Error(`No se pudo leer ${this.file}. Se conserva el archivo original. ${error.message}`);
       this.data = { schema: 1, version: 0, mode: 'azure', config: null, azure: null, demo: null };

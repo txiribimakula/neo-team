@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
 import { normalizeItem } from './planner.js';
+import { isExecutable } from '../dist/hierarchy.js';
 
 export function parseToolResult(result) {
   const blocks = (result.content ?? []).filter(b => b.type === 'text').map(b => {
@@ -129,7 +130,11 @@ export class AzureGateway {
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const today = new Date().toISOString().slice(0, 10);
-    const iterations = rawIterations.filter(iteration => !isPastIteration(iteration, today)).map(iteration => normalizeIteration(iteration, config.project, 'una iteración del equipo'));
+    // Past iterations are skipped except the latest one, whose open work is
+    // reviewed before planning the next iteration. Azure lists them in order.
+    const previous = rawIterations.filter(iteration => isPastIteration(iteration, today)).at(-1);
+    const iterations = rawIterations.filter(iteration => iteration === previous || !isPastIteration(iteration, today))
+      .map(iteration => ({ ...normalizeIteration(iteration, config.project, 'una iteración del equipo'), ...(iteration === previous ? { past: true } : {}) }));
     report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
     const members = await this.call('neo_team_members', context);
     if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
@@ -152,16 +157,28 @@ export class AzureGateway {
     for (const iteration of iterations) {
       report('capacity', `Leyendo tareas de «${iteration.name}»…`);
       addRelations(await this.call('wit_work_item', { action: 'list_for_iteration', ...context, iterationId: iteration.id }));
-      report('capacity', `Obteniendo capacidad y días libres de «${iteration.name}»…`, { discovered: ids.size });
-      try {
-        capacities[iteration.id] = await this.capacity(config, iteration.id);
-      } catch { warnings.push(`No se pudo consultar la capacidad completa de «${iteration.name}». Se mostrará como desconocida.`); }
+      // The previous iteration is only reviewed, so its capacity is not needed.
+      if (!iteration.past) {
+        report('capacity', `Obteniendo capacidad y días libres de «${iteration.name}»…`, { discovered: ids.size });
+        try {
+          capacities[iteration.id] = await this.capacity(config, iteration.id);
+        } catch { warnings.push(`No se pudo consultar la capacidad completa de «${iteration.name}». Se mostrará como desconocida.`); }
+      }
       report('capacity', `Iteración «${iteration.name}» consultada.`, { iterationsRead: counts.iterationsRead + 1, capacities: Object.keys(capacities).length, warnings: warnings.length });
     }
     // Follow hierarchy links through MCP so unscheduled child tasks are included.
     const items = [], fetched = new Map();
     const stateCategories = new Map(), excluded = new Set();
     const stateKey = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+    const loadStates = async (project, type) => {
+      const typeKey = JSON.stringify([project, type]);
+      if (!stateCategories.has(typeKey)) {
+        const states = await this.call('neo_work_item_states', { project, type });
+        if (!Array.isArray(states)) throw new Error(`Estados de «${type}» no válidos.`);
+        stateCategories.set(typeKey, states.filter(s => s && stateKey(s.name)).map(s => ({ name: s.name, category: stateKey(s.category || s.stateCategory).replace(/\s/g, '') })));
+      }
+      return stateCategories.get(typeKey);
+    };
     const isOpen = async raw => {
       const type = raw.fields?.['System.WorkItemType'], state = raw.fields?.['System.State'];
       const project = raw.fields?.['System.TeamProject'] || config.project;
@@ -174,11 +191,8 @@ export class AzureGateway {
         stateReview: { organization: config.organization, project, type, state, item: { id: raw.id, fields: raw.fields }, states },
       });
       if (!stateCategories.has(typeKey)) {
-        let states;
-        try { states = await this.call('neo_work_item_states', { project, type }); }
+        try { await loadStates(project, type); }
         catch { throw needsDecision(`No se pudieron consultar los estados de «${type}». Indica cómo tratar «${state}».`); }
-        if (!Array.isArray(states)) throw needsDecision(`No se pudieron consultar los estados de «${type}». Indica cómo tratar «${state}».`);
-        stateCategories.set(typeKey, states.filter(s => s && stateKey(s.name)).map(s => ({ name: s.name, category: stateKey(s.category || s.stateCategory).replace(/\s/g, '') })));
       }
       const stateName = stateKey(state);
       // Explicit workflow categories take precedence over conventional names.
@@ -225,8 +239,15 @@ export class AzureGateway {
       } catch (error) { if (error.stateReview) throw error; warnings.push(`No se pudo leer el padre #${parent}. Sus tareas seguirán visibles sin ese nivel de la jerarquía.`); }
       report('parents', 'Completando la jerarquía…', { parents: parentCount, imported: items.length, warnings: warnings.length, excluded: excluded.size });
     }
+    // Tasks and bugs can be closed with the first completed state of their
+    // workflow. Without one, they can only be carried over to the next iteration.
+    const completedStates = {};
+    for (const type of new Set(items.filter(isExecutable).map(item => item.type))) {
+      const completed = (await loadStates(config.project, type).catch(() => [])).find(s => s.category === 'completed');
+      if (completed) completedStates[type] = completed.name;
+    }
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
-    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities, items, warnings, drafts: {}, conflicts: {}, participants: {} };
+    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities, items, completedStates, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   async findCreation(config, creationKey) {
     if(!/^[a-f0-9-]{36}$/.test(creationKey)) throw new Error('Identificador de creación no válido.');
@@ -243,7 +264,7 @@ export class AzureGateway {
     return validateOnly ? raw : normalizeItem(raw);
   }
   async update(config, id, revision, fields) {
-    const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork' };
+    const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', state: 'System.State' };
     return normalizeItem(await this.call('wit_work_item_write', {
       action: 'update', project: config.project, id,
       updates: [{ op: 'test', path: '/rev', value: revision }, ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],

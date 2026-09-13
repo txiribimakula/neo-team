@@ -1,5 +1,5 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
-import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers } from './hierarchy.js';
+import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, previousIteration } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -7,7 +7,7 @@ const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
 let securitySnapshot = null;
-let state, selectedIteration = '', tab = 'capacity', query = '', pending = false, review, toastTimer;
+let state, selectedIteration = '', tab = 'iteration', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
 const peoplePopover=$('#people-popover');
@@ -50,7 +50,7 @@ function savedStatus() {
 function createItem(parentId) {
   const ws=state.workspace,parent=ws.effectiveItems.find(i=>i.id===parentId);
   const type=parent ? ({Epic:'Feature',Feature:'User Story','User Story':'Task','Product Backlog Item':'Task',Requirement:'Task'})[parent.type] || 'Task' : 'Epic';
-  showModal('Crear elemento','Se guardará en local hasta revisar y sincronizar.',`<form id="create-form"><label class="form-field">Tipo<select name="type" id="create-type">${['Epic','Feature','User Story','Task','Bug'].map(t=>`<option ${t===type ? 'selected' : ''}>${t}</option>`).join('')}</select></label><label class="form-field">Título<input name="title" required maxlength="255" autofocus></label><label class="form-field">Padre<select name="parent" id="create-parent"></select></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${tab==='planning' && key(m)===pickerMember ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}</select></label><label class="form-field">Iteración<select name="iterationPath">${[{path:ws.settings.backlogIteration.path,name:'Backlog'},...ws.iterations].map(i=>`<option value="${escape(i.path)}" ${tab==='planning' && i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><label class="form-field" id="create-hours">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" placeholder="Sin estimar"></label></form>`,'<button class="button" data-action="close">Cancelar</button><button class="button primary" form="create-form" type="submit">Crear en local</button>');
+  showModal('Crear elemento','Se guardará en local hasta revisar y sincronizar.',`<form id="create-form"><label class="form-field">Tipo<select name="type" id="create-type">${['Epic','Feature','User Story','Task','Bug'].map(t=>`<option ${t===type ? 'selected' : ''}>${t}</option>`).join('')}</select></label><label class="form-field">Título<input name="title" required maxlength="255" autofocus></label><label class="form-field">Padre<select name="parent" id="create-parent"></select></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${tab==='planning' && key(m)===pickerMember ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}</select></label><label class="form-field">Iteración<select name="iterationPath">${[{path:ws.settings.backlogIteration.path,name:'Backlog'},...planningIterations()].map(i=>`<option value="${escape(i.path)}" ${tab==='planning' && i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><label class="form-field" id="create-hours">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" placeholder="Sin estimar"></label></form>`,'<button class="button" data-action="close">Cancelar</button><button class="button primary" form="create-form" type="submit">Crear en local</button>');
   updateCreationParents(parentId);
 }
 function updateCreationParents(parentId) {
@@ -438,9 +438,12 @@ async function saveConfig(importNow) {
 function selected() {
   const ws = state.workspace;
   if (!ws) return null;
-  if (!ws.iterations.some(i => i.id === selectedIteration)) selectedIteration = (ws.iterations.find(i => i.attributes?.timeFrame === 1 || i.attributes?.timeFrame === 'current') || ws.iterations[0])?.id || '';
-  return ws.iterations.find(i => i.id === selectedIteration);
+  const options = planningIterations();
+  if (!options.some(i => i.id === selectedIteration)) selectedIteration = (options.find(i => i.attributes?.timeFrame === 1 || i.attributes?.timeFrame === 'current') || options[0])?.id || '';
+  return options.find(i => i.id === selectedIteration);
 }
+// The previous iteration is imported only to be reviewed, never planned.
+function planningIterations() { return state.workspace?.iterations.filter(i => !i.past) ?? []; }
 function filtered(items) {
   const search = query.trim().toLowerCase();
   return items.filter(i => !search || `${i.id} ${i.title} ${i.tags.join(' ')} ${i.assigneeName} ${i.assignedTo} ${i.state}`.toLowerCase().includes(search)).sort((a,b) => (a.priority ?? 5) - (b.priority ?? 5) || a.id - b.id);
@@ -491,6 +494,86 @@ function treeView({ availableOnly = false, picker = false, member = focusedMembe
 }
 function hierarchyView() {
   return `<section class="hierarchy-surface"><div class="hierarchy-toolbar"><input class="search" id="search" aria-label="Buscar en el backlog" placeholder="Buscar rama o tarea" value="${escape(query)}"><select id="backlog-filter" aria-label="Filtrar backlog"><option value="all" ${backlogFilter==='all' ? 'selected' : ''}>Todo el backlog</option><option value="unshared" ${backlogFilter==='unshared' ? 'selected' : ''}>Sin personas</option></select><button class="button small" data-action="expand-tree">Expandir</button><button class="button small" data-action="collapse-tree">Plegar</button></div><div id="hierarchy-content">${treeView()}</div></section>`;
+}
+function stepView() {
+  const iteration=selected();
+  if (tab==='iteration') return iterationView();
+  if (tab==='previous') return previousView();
+  if (tab==='capacity') return capacityView();
+  if (tab==='planning') return plannerView();
+  if (tab==='hierarchy' || !iteration) return hierarchyView();
+  return board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
+}
+function stepTabs(changes) {
+  const open=previousTasks().tasks.filter(t=>t.status==='open').length;
+  const steps=[['iteration','Iteración'],['previous','Revisar anterior',open],['capacity','Capacidad'],['hierarchy','Repartir ramas'],['planning','Elegir tareas']];
+  return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}<button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>${steps.length+1}</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>`;
+}
+// Step 1: the iteration being planned. Every later step works on it.
+function timeFrameLabel(iteration) {
+  const frame=String(iteration.attributes?.timeFrame ?? '').toLowerCase();
+  return ['1','current'].includes(frame) ? 'Actual' : ['2','future'].includes(frame) ? 'Próxima' : 'Iteración';
+}
+function iterationView() {
+  const ws=state.workspace, current=selected();
+  if (!current) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
+  return `<section class="iteration-step"><header class="step-heading"><h2>¿Qué iteración vas a planificar?</h2><p>Después revisarás el trabajo que quedó abierto en la iteración anterior.</p></header><div class="iteration-options">${planningIterations().map(i=>{
+    const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, previous=previousIteration(ws.iterations,i.id);
+    return `<button class="iteration-option ${i.id===current.id ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${i.id===current.id}"><span class="iteration-when">${timeFrameLabel(i)}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} ya planificada${planned===1 ? '' : 's'} · ${previous ? `revisarás ${escape(previous.name)}` : 'sin iteración anterior'}</small></button>`;
+  }).join('')}</div></section>`;
+}
+// Step 2: each open task of the previous iteration moves to the one being
+// planned or is closed. Both decisions are local drafts until the review.
+const previousOrder={open:0,moved:1,elsewhere:2,completed:3};
+function previousTasks(iteration=selected()) {
+  const ws=state.workspace, previous=iteration ? previousIteration(ws.iterations,iteration.id) : null;
+  if (!previous) return {previous,tasks:[]};
+  const base=new Map(ws.items.map(i=>[i.id,i]));
+  const tasks=ws.effectiveItems.filter(i=>isExecutable(i) && (i.iterationPath===previous.path || base.get(i.id)?.iterationPath===previous.path)).map(item=>{
+    const done=ws.completedStates?.[item.type];
+    const status=done && item.state===done ? 'completed' : item.iterationPath===iteration.path ? 'moved' : item.iterationPath!==previous.path ? 'elsewhere' : 'open';
+    return {item,base:base.get(item.id),status};
+  });
+  return {previous,tasks:tasks.sort((a,b)=>previousOrder[a.status]-previousOrder[b.status] || (a.item.priority ?? 5)-(b.item.priority ?? 5) || a.item.id-b.item.id)};
+}
+function previousTaskRow({item,base,status},iteration) {
+  const ws=state.workspace, effort=item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar';
+  const decided=item.iterationPath!==base.iterationPath || item.state!==base.state;
+  const outcome={completed:'✓ Completada',moved:`→ Pasa a ${escape(iteration.name)}`,elsewhere:`Movida a ${escape(iterationName(item.iterationPath))}`}[status];
+  const actions=status==='open'
+    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" ${ws.completedStates?.[item.type] ? '' : 'disabled title="Azure DevOps no indicó el estado completado de este tipo"'}>✓ Marcar completada</button>`
+    : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button small subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
+  return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>#${item.id}</span><span class="pill">${escape(base.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
+}
+function previousPerson(group,iteration) {
+  const open=group.tasks.filter(t=>t.status==='open'), hours=open.reduce((sum,t)=>sum+(t.item.remainingWork ?? 0),0), decided=group.tasks.length-open.length;
+  return `<section class="previous-person"><header class="person">${group.avatar ? `<span class="avatar ${group.avatar}">${escape(initials(group.name))}</span>` : ''}<div class="person-detail"><h3>${escape(group.name)}</h3><p>${open.length} sin decidir · ${number(hours)} h pendientes${decided ? ` · ${decided} decidida${decided===1 ? '' : 's'}` : ''}</p></div></header><ul class="previous-tasks">${group.tasks.map(task=>previousTaskRow(task,iteration)).join('')}</ul></section>`;
+}
+function previousView() {
+  const ws=state.workspace, iteration=selected();
+  if (!iteration) return '<div class="empty-result">Elige primero la iteración que vas a planificar.</div>';
+  const {previous,tasks}=previousTasks(iteration);
+  const next='<button class="button primary" data-action="tab" data-tab="capacity">Continuar con la capacidad →</button>';
+  if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza los datos para traer la última iteración terminada.' : ''}</p>${next}</div>`;
+  const open=tasks.filter(t=>t.status==='open'), owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
+  const groups=[
+    ...ws.members.map((member,index)=>({name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
+    {name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
+    {name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
+  ].filter(group=>group.tasks.length);
+  const idle=ws.members.filter(member=>!owned(member).length);
+  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)} o márcalo como completado.</p></div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
+    ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
+    ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
+    <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes continuar y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
+}
+async function decidePrevious(id, decision) {
+  const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
+  if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
+  const changes=decision==='carry' ? {iterationPath:iteration.path} : decision==='complete' ? {state:ws.completedStates?.[item.type]} : {iterationPath:base.iterationPath,state:base.state};
+  await request('/api/stage',{edits:[{id,changes}]});review=null;render();
+  document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
+  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
 function editParticipants(id,anchor) {
   if(peopleItem===id && peoplePopover.matches(':popover-open')) {peoplePopover.hidePopover();return;}
@@ -704,8 +787,7 @@ async function saveParticipation(id,member,selected) {
   await request('/api/participation',{id,member,selected,iterationId:selectedIteration || undefined});renderSaved();
 }
 function updatePlanningView() {
-  const iteration=selected();
-  $('#planning-view').innerHTML=tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : iteration ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView();
+  $('#planning-view').innerHTML=stepView();
   updateBulkCheckbox();
 }
 
@@ -748,9 +830,9 @@ function render() {
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
   const changes=Object.keys(ws.drafts).length+capacityDraftCount(ws);
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button><select id="iteration-select" class="iteration-select" aria-label="Iteración">${ws.iterations.map(i=>`<option value="${escape(i.id)}" ${i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select><div class="workspace-data-actions"><button class="button small" data-action="import" ${changes || ws.mode==='demo' ? 'disabled' : ''} title="${ws.mode==='demo' ? 'Conecta Azure DevOps para actualizar datos' : changes ? 'Revisa o descarta los cambios pendientes antes de actualizar' : 'Actualizar desde Azure DevOps'}">Actualizar datos</button><a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
-  <nav class="step-tabs" aria-label="Pasos de planificación"><button class="step-tab ${tab==='capacity' ? 'active' : ''}" data-action="tab" data-tab="capacity" ${tab==='capacity' ? 'aria-current="step"' : ''}><span>1</span>Capacidad</button><button class="step-tab ${tab==='hierarchy' ? 'active' : ''}" data-action="tab" data-tab="hierarchy" ${tab==='hierarchy' ? 'aria-current="step"' : ''}><span>2</span>Repartir ramas</button><button class="step-tab ${tab==='planning' ? 'active' : ''}" data-action="tab" data-tab="planning" ${tab==='planning' ? 'aria-current="step"' : ''}><span>3</span>Elegir tareas</button><button class="step-tab" data-action="review" ${changes ? '' : 'disabled'}><span>4</span>${changes ? `${changes} pendiente${changes===1 ? '' : 's'} · Revisar y sincronizar` : 'Revisar'}</button></nav>
-  <div id="planning-view">${tab==='capacity' ? capacityView() : tab==='planning' ? plannerView() : tab==='hierarchy' ? hierarchyView() : iteration ? board(iteration,ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : hierarchyView()}</div>
+  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${escape(ws.config.project)} / ${escape(ws.config.team)}</span>${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions"><button class="button small" data-action="import" ${changes || ws.mode==='demo' ? 'disabled' : ''} title="${ws.mode==='demo' ? 'Conecta Azure DevOps para actualizar datos' : changes ? 'Revisa o descarta los cambios pendientes antes de actualizar' : 'Actualizar desde Azure DevOps'}">Actualizar datos</button><a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
+  ${stepTabs(changes)}
+  <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   updateBulkCheckbox();
 }
@@ -758,8 +840,8 @@ function editTask(id) {
   const ws = state.workspace, item = ws.effectiveItems.find(i=>i.id === id);
   if (!item) throw new Error('La tarea ya no está disponible.');
   if (item.contextOnly) {toast('Este elemento es solo contexto de otro equipo.');return;}
-  const paths = [{ path:ws.settings.backlogIteration.path, name:'Backlog' },...ws.iterations];
-  if (!paths.some(i=>i.path === item.iterationPath)) paths.push({ path:item.iterationPath, name:item.iterationPath });
+  const paths = [{ path:ws.settings.backlogIteration.path, name:'Backlog' },...planningIterations()];
+  if (!paths.some(i=>i.path === item.iterationPath)) paths.push({ path:item.iterationPath, name:iterationName(item.iterationPath) });
   showModal(`#${id} · ${item.type}`, item.title, `<form id="task-form" data-task="${id}"><label class="form-field">Título<input name="title" required maxlength="255" value="${escape(item.title)}"></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
 }
 async function stage(id, changes) {
@@ -824,16 +906,21 @@ const actions = {
   'security-refresh': () => securityQuery(),
   'security-group': el => securityQuery(el.dataset.descriptor),
   'security-export': exportSecurity,
+  'security-diagnostics': async () => { await navigator.clipboard.writeText(JSON.stringify(securitySnapshot.catalog.diagnostics, null, 2)); toast('Diagnóstico copiado. No contiene credenciales ni nombres de usuarios.'); },
   'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
-  demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; render(); },
-  azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; render(); },
+  demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; tab='iteration'; render(); },
+  azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; tab='iteration'; render(); },
   import: importData,
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   participants: el=>editParticipants(Number(el.dataset.task),el),
   'remove-branch': el=>saveParticipation(Number(el.dataset.task),pickerMember,false),
   'pick-tasks': el=>pickTasks(el.dataset.member),
+  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;tab='previous';render();window.scrollTo({top:0});},
+  'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
+  'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
+  'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'choose-person': el=>choosePerson(el.dataset.member),
   'planning-view':el=>{planningMode=el.dataset.view;focusedMember=planningMode==='team' ? '' : pickerMember;query='';render();$(`[data-action="planning-view"][data-view="${planningMode}"]`)?.focus({preventScroll:true});},
   'confirm-person': async el=>{await request('/api/confirm-person',{member:el.dataset.member,iterationId:selectedIteration});renderSaved();},
@@ -888,7 +975,7 @@ document.addEventListener('keydown', event => {
   const card = event.target.closest('.task-card');
   if (card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
   const tabButton = event.target.closest('[role="tab"]');
-  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['capacity','hierarchy','planning']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:2))%3]; render(); $(`[data-tab="${tab}"]`).focus(); }
+  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['iteration','previous','capacity','hierarchy','planning']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length]; render(); $(`[data-tab="${tab}"]`).focus(); }
 });
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
@@ -932,7 +1019,6 @@ document.addEventListener('change',async event=>{
     }
     if(el.id==='show-unavailable'){onlyAvailable=!el.checked;refreshPicker();}
     if(el.id==='backlog-filter'){backlogFilter=el.value;focusedMember='';render();}
-    if(el.id==='iteration-select'){selectedIteration=el.value;render();}
   }catch(error){renderSaved();errorInModal(error);}
 });
 document.addEventListener('input',event=>{

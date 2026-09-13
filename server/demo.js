@@ -39,7 +39,37 @@ export function createDemo() {
   const workspace = { mode: 'demo', importedAt: new Date().toISOString(), config: { organization: 'ejemplo', project: 'Neo Platform', team: 'Equipo de producto' },
     settings: { backlogIteration: { path: 'Neo Platform' }, workingDays: [1,2,3,4,5] }, iterations, members, capacities, items, drafts: {}, conflicts: {}, warnings: [] };
   upgradeDemoHierarchy(workspace);
+  upgradeDemoPreviousIteration(workspace);
   return workspace;
+}
+
+// A finished iteration with open work, reviewed before planning the next one.
+export function upgradeDemoPreviousIteration(workspace) {
+  if (!workspace || workspace.mode !== 'demo' || workspace.demoPreviousVersion === 1) return false;
+  const first = workspace.iterations.map(i => Date.parse(i.attributes?.startDate)).filter(Number.isFinite).sort((a, b) => a - b)[0] ?? Date.now();
+  const date = offset => new Date(first + offset * 86400000).toISOString();
+  const path = 'Neo Platform\\Iteración 23';
+  if (!workspace.iterations.some(i => i.id === 'sprint-23')) workspace.iterations.push({ id: 'sprint-23', name: 'Iteración 23', path, past: true, attributes: { startDate: date(-14), finishDate: date(-3), timeFrame: 0 } });
+  const members = new Map(workspace.members.map(m => [m.uniqueName, m]));
+  const specs = [
+    [1030, 'Migrar el registro de auditoría al nuevo almacén', 'Task', 'ana@example.test', 'Active', 6, 1004],
+    [1031, 'Revisar el contraste de los botones secundarios', 'Task', 'marcos@example.test', 'Active', 3, 1001],
+    [1032, 'Error al guardar filtros vacíos', 'Bug', 'marcos@example.test', 'New', 2, 1002],
+    [1033, 'Automatizar la copia de seguridad semanal', 'Task', 'david@example.test', 'Active', 5, 1004],
+    [1034, 'Probar el bloqueo tras intentos fallidos', 'Task', 'lucia@example.test', 'Active', 4, 1003],
+    [1035, 'Revisar los textos de bienvenida', 'Task', '', 'New', 2, 1001],
+  ];
+  for (const [id, title, type, owner, state, hours, parent] of specs) {
+    if (workspace.items.some(i => i.id === id)) continue;
+    workspace.items.push(normalizeItem({ id, rev: 1, fields: {
+      'System.Title': title, 'System.WorkItemType': type, 'System.State': state, 'System.TeamProject': 'Neo Platform', 'System.AreaPath': 'Neo Platform\\Producto',
+      'System.IterationPath': path, 'System.AssignedTo': members.get(owner) || '', 'System.Parent': parent,
+      'Microsoft.VSTS.Common.Priority': 2, 'Microsoft.VSTS.Scheduling.RemainingWork': hours,
+    } }));
+  }
+  workspace.completedStates ??= { Task: 'Closed', Bug: 'Closed' };
+  workspace.demoPreviousVersion = 1;
+  return true;
 }
 
 export function upgradeDemoHierarchy(workspace) {

@@ -15,6 +15,8 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   assert.equal(call.name,'wit_work_item_write');
   assert.deepEqual(call.args.updates[0],{op:'test',path:'/rev',value:7});
   assert.deepEqual(call.args.updates.at(-1),{op:'add',path:'/fields/Microsoft.VSTS.Scheduling.RemainingWork',value:0});
+  await gateway.update({project:'Project'},42,8,{state:'Closed'});
+  assert.deepEqual(call.args.updates,[{op:'test',path:'/rev',value:8},{op:'add',path:'/fields/System.State',value:'Closed'}]);
 });
 test('import uses MCP for complete members, hierarchy, capacities and team scope',async()=>{
   const gateway=new AzureGateway(),calls=[],progress=[];gateway.open=async()=>{};
@@ -132,6 +134,7 @@ test('import excludes completed and removed custom states while keeping open chi
   assert.equal(progress.at(-1).counts.excluded,5,'closed parents already traversed are counted only once');
   assert.equal(progress.at(-1).counts.imported,6);
   assert.equal(calls.filter(c=>c.name==='neo_work_item_states').length,2,'state categories are cached per work item type');
+  assert.deepEqual(result.completedStates,{Task:'Closed'},'tasks and bugs record the first completed state of their workflow');
   specs[8].state='Done';
   const refreshed=await gateway.import(config);
   assert.ok(!refreshed.items.some(i=>i.id===8),'the next import removes newly completed work');
@@ -142,7 +145,7 @@ test('import excludes completed and removed custom states while keeping open chi
   await assert.rejects(()=>gateway.import(config),/consultar los estados/);
 });
 
-test('import skips past iterations before requesting their tasks, capacity or holidays',async()=>{
+test('import skips past iterations except the latest, whose tasks are read without capacity or holidays',async()=>{
   const today=new Date().toISOString().slice(0,10);
   const yesterday=new Date(Date.parse(today)-86400000).toISOString();
   const tomorrow=new Date(Date.parse(today)+86400000).toISOString();
@@ -158,14 +161,16 @@ test('import skips past iterations before requesting their tasks, capacity or ho
   const gateway=backlogGateway({iterations}),base=gateway.call,calls=[],progress=[];
   gateway.call=async(name,args)=>{calls.push({name,args});return base(name,args);};
   const result=await gateway.import({organization:'org',project:'Project',team:'Team'},p=>progress.push(p));
-  const expected=definitions.map(([id])=>id).filter(id=>!id.startsWith('past-'));
-  assert.deepEqual(result.iterations.map(i=>i.id),expected);
-  assert.deepEqual(Object.keys(result.capacities),expected);
-  assert.ok(!calls.some(c=>c.args.iterationId?.startsWith('past-')));
-  for(const id of expected)assert.equal(calls.filter(c=>c.args.iterationId===id).length,3);
-  assert.equal(progress.at(-1).counts.iterationsExcluded,3);
-  assert.equal(progress.at(-1).counts.iterations,7);
-  assert.equal(progress.at(-1).counts.iterationsRead,7);
+  const planning=definitions.map(([id])=>id).filter(id=>!id.startsWith('past-'));
+  assert.deepEqual(result.iterations.map(i=>i.id),['past-date',...planning]);
+  assert.deepEqual(result.iterations.filter(i=>i.past).map(i=>i.id),['past-date'],'only the latest past iteration is kept, to review it');
+  assert.deepEqual(Object.keys(result.capacities),planning);
+  assert.ok(!calls.some(c=>['past-text','past-number'].includes(c.args.iterationId)));
+  assert.deepEqual(calls.filter(c=>c.args.iterationId==='past-date').map(c=>c.args.action),['list_for_iteration']);
+  for(const id of planning)assert.equal(calls.filter(c=>c.args.iterationId===id).length,3);
+  assert.equal(progress.at(-1).counts.iterationsExcluded,2);
+  assert.equal(progress.at(-1).counts.iterations,8);
+  assert.equal(progress.at(-1).counts.iterationsRead,8);
 });
 
 test('state matching handles casing, whitespace and missing categories on standard closed states',async()=>{

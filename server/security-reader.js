@@ -75,14 +75,39 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
       // project ID directly, without Graph descriptors or an organization scan.
       const scoped = await list(identityHost, '_apis/identities', { scopeId: info.id, queryMembership: 'None', 'api-version': '7.1-preview.1' });
       const groups = [], coverage = [], seen = new Set();
-      let unclassified = 0;
-      for (const identity of scoped) {
+      const diagnostics = { received: scoped.length, resolved: 0, users: 0, otherScopes: 0, unclassified: 0, groups: 0, samples: [] };
+      // Scope queries can return trimmed identities. Resolve their IDs before
+      // deciding whether they represent users or groups.
+      const sparse = scoped.filter(i => !i || typeof i !== 'object' || identityIsGroup(i) === null || (identityIsGroup(i) && !i.descriptor));
+      const replacements = new Map();
+      const identityKey = i => typeof i === 'string' ? i : i?.id || i?.descriptor;
+      for (let offset = 0; offset < sparse.length; offset += 20) {
+        const batch = sparse.slice(offset, offset + 20);
+        const ids = batch.map(i => typeof i === 'string' ? i : i?.id).filter(id => typeof id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id));
+        const descriptors = batch.filter(i => typeof i === 'object' && i && !ids.includes(i.id)).map(i => i.descriptor).filter(d => typeof d === 'string' && d);
+        for (const query of [ids.length ? { identityIds: ids.join(',') } : null, descriptors.length ? { descriptors: descriptors.join(',') } : null].filter(Boolean)) {
+          try {
+            const full = await list(identityHost, '_apis/identities', { ...query, queryMembership: 'None' });
+            for (const identity of full) {
+              if (!identity || typeof identity !== 'object') continue;
+              if (identity.id) replacements.set(identity.id, identity);
+              if (identity.descriptor) replacements.set(identity.descriptor, identity);
+            }
+          } catch (error) { coverage.push({ name: 'Detalle de identidades', status: 'error', message: error.message }); }
+        }
+      }
+      for (const original of scoped) {
+        const replacement = replacements.get(identityKey(original));
+        if (replacement) diagnostics.resolved++;
+        const identity = replacement ? { ...(typeof original === 'object' && original || {}), ...replacement, properties: { ...original?.properties, ...replacement.properties } } : original;
+        if (!identity || typeof identity !== 'object') { diagnostics.unclassified++; if (diagnostics.samples.length < 5) diagnostics.samples.push({ valueType: identity === null ? 'null' : typeof identity }); continue; }
         const property = name => identityProperty(identity, name);
-        const identityScope = property('ScopeId');
-        if (identityScope && String(identityScope).toLowerCase() !== info.id.toLowerCase()) continue;
+        const identityScope = property('LocalScopeId') || property('ScopeId');
+        if (diagnostics.samples.length < 5) diagnostics.samples.push({ fields: Object.keys(identity), isContainer: identity.isContainer, schemaClassName: property('SchemaClassName'), scopeId: property('ScopeId'), localScopeId: property('LocalScopeId') });
+        if (identityScope && String(identityScope).toLowerCase() !== info.id.toLowerCase()) { diagnostics.otherScopes++; continue; }
         const isGroup = identityIsGroup(identity);
-        if (isGroup === null) { unclassified++; continue; }
-        if (!isGroup) continue;
+        if (isGroup === null) { diagnostics.unclassified++; continue; }
+        if (!isGroup) { diagnostics.users++; continue; }
         if (typeof identity.descriptor !== 'string' || !identity.descriptor) throw new Error('Azure devolvió un grupo sin identificador. La lista no se puede considerar completa.');
         if (seen.has(identity.descriptor)) continue;
         seen.add(identity.descriptor);
@@ -94,8 +119,11 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
           description: property('Description') || '', scope: 'project',
         });
       }
+      diagnostics.groups = groups.length;
+      const unclassified = diagnostics.unclassified;
+      if (!groups.length) coverage.push({ name: 'Lista de grupos vacía', status: 'partial', message: `Azure devolvió ${diagnostics.received} identidades: ${diagnostics.users} usuarios, ${diagnostics.otherScopes} de otro ámbito y ${diagnostics.unclassified} sin clasificar. No se ha podido confirmar la lista de grupos del proyecto.` });
       if (unclassified) coverage.push({ name: 'Identidades sin tipo', status: 'partial', count: unclassified, message: `${unclassified} identidades no indicaron si son grupos o usuarios y no se han incluido. Los grupos identificados siguen disponibles.` });
-      return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, coverage, fetchedAt: new Date().toISOString() };
+      return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, coverage, diagnostics, fetchedAt: new Date().toISOString() };
     }
     if (action === 'namespaces') return list(dev, '_apis/securitynamespaces');
     if (action === 'identity') return (await list(identityHost, '_apis/identities', { ...(descriptor ? { subjectDescriptors: descriptor } : { descriptors: descriptors.join(',') }), queryMembership: 'Direct' })).map(cleanIdentity);

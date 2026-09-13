@@ -34,7 +34,7 @@ test('identity comparison works with raw refs and official batch display strings
 test('staging normalizes reversions and rejects foreign assignments and fields',()=>{
   const ws=createDemo();stageChanges(ws,1042,{remainingWork:0});assert.equal(ws.drafts[1042].remainingWork,0);
   stageChanges(ws,1042,{remainingWork:12});assert.equal(ws.drafts[1042],undefined);
-  for (const patch of [{assignedTo:'intruder@example.test'},{iterationPath:'Other\\Sprint'},{remainingWork:-1},{remainingWork:Infinity},{priority:5},{state:'Closed'}]) assert.throws(()=>stageChanges(ws,1042,patch));
+  for (const patch of [{assignedTo:'intruder@example.test'},{iterationPath:'Other\\Sprint'},{remainingWork:-1},{remainingWork:Infinity},{priority:5},{state:'Active'},{state:null}]) assert.throws(()=>stageChanges(ws,1042,patch));
   assert.throws(()=>stageChanges(ws,9999,{priority:1}));
   assert.throws(()=>stageChanges(ws,1047,{remainingWork:1}));
 });
@@ -170,4 +170,22 @@ test('invalid hierarchy and creation fields are rejected; local creation can be 
   assert.throws(()=>createLocalItem(f.workspace(),{type:'Feature',title:'Wrong parent',parent:1001}),/nivel/);
   const id=createLocalItem(f.workspace(),{type:'Bug',title:'New bug',parent:1001});discardLocal(f.workspace(),id);
   assert.ok(!f.workspace().items.some(i=>i.id===id));assert.equal(f.workspace().drafts[id],undefined);
+});
+
+test('reviewing the previous iteration carries tasks over or closes them with the completed state of their type',async t=>{
+  const {eligibleTasks}=await import('../dist/hierarchy.js');const {planningWorkspace}=await import('../server/planner.js');
+  const f=await fixture(t),next=f.workspace().iterations[0].path,previous=f.workspace().iterations.find(i=>i.past);
+  assert.equal(f.workspace().items.find(i=>i.id===1030).iterationPath,previous.path);
+  await f.stage(1030,{iterationPath:next});await f.stage(1031,{state:'Closed'});
+  assert.throws(()=>stageChanges(structuredClone(f.workspace()),1001,{state:'Closed'}),/completadas/,'only tasks and bugs can be closed');
+  const unknown=structuredClone(f.workspace());delete unknown.completedStates;
+  assert.throws(()=>stageChanges(unknown,1032,{state:'Closed'}),/completadas/,'a type without a known completed state cannot be closed');
+  const review=await f.planner.prepareReview();const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.failures,[]);
+  assert.deepEqual(f.calls.map(c=>[c.id,c.changes]),[[1030,{iterationPath:next}],[1031,{state:'Closed'}]]);
+  assert.equal(f.workspace().items.find(i=>i.id===1031).state,'Closed');
+  assert.ok(!eligibleTasks(planningWorkspace(f.workspace()),'marcos@example.test').some(i=>i.id===1031),'a closed task is no longer offered for planning');
+  assert.ok(eligibleTasks(planningWorkspace(f.workspace()),'ana@example.test').some(i=>i.id===1030),'a carried-over task stays with its owner');
+  await f.stage(1032,{state:'Closed'});await f.stage(1032,{state:'New'});
+  assert.equal(f.workspace().drafts[1032],undefined,'undoing restores the imported state');
 });

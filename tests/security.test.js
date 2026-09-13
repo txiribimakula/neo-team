@@ -224,3 +224,38 @@ test('identity detail uses the same schema fallback for group membership labels'
   assert.equal(result[0].isContainer,true);
   assert.equal(result[1].isContainer,false);
 });
+test('catalog resolves ID-only entries before deciding whether they are groups', async () => {
+  const id = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+  const requests = [];
+  const reader = securityReader('organization', async () => 'secret-token', async url => {
+    requests.push(url);
+    const value = url.pathname.includes('/projects/') ? {id:projectId,name:'Project'} : url.searchParams.has('scopeId') ? {value:[{id}]} : {value:[{id,descriptor:'legacy-group',isContainer:true,providerDisplayName:'Private group name',properties:{ScopeId:{$value:projectId}}}]};
+    return new Response(JSON.stringify(value));
+  });
+  const result=await reader({action:'catalog',project:'Project'});
+  assert.equal(result.groups.length,1);
+  assert.equal(result.groups[0].name,'Private group name');
+  assert.equal(requests[2].searchParams.get('identityIds'),id);
+  assert.equal(result.diagnostics.resolved,1);
+  assert.equal(result.diagnostics.unclassified,0);
+  assert.ok(!JSON.stringify(result.diagnostics).includes('Private group name'));
+  assert.ok(!JSON.stringify(result.diagnostics).includes('secret-token'));
+});
+test('project LocalScopeId is used when the identity also supplies a different ScopeId', async () => {
+  const reader=securityReader('organization',async()=> 'token',async url=>new Response(JSON.stringify(url.pathname.includes('/projects/') ? {id:projectId,name:'Project'} : {value:[
+    {descriptor:'local',isContainer:true,properties:{ScopeId:{$value:'collection'},LocalScopeId:{$value:projectId}}},
+    {descriptor:'foreign',isContainer:true,properties:{ScopeId:{$value:projectId},LocalScopeId:{$value:'other-project'}}},
+  ]})));
+  const result=await reader({action:'catalog',project:'Project'});
+  assert.deepEqual(result.groups.map(g=>g.legacyDescriptor),['local']);
+  assert.equal(result.diagnostics.otherScopes,1);
+});
+test('empty catalog records received and discarded counts instead of implying no groups exist', async () => {
+  const reader=securityReader('organization',async()=> 'token',async url=>new Response(JSON.stringify(url.pathname.includes('/projects/') ? {id:projectId,name:'Project'} : {value:[]})));
+  const result=await reader({action:'catalog',project:'Project'});
+  assert.equal(result.diagnostics.received,0);
+  assert.ok(result.coverage.some(c=>c.name==='Lista de grupos vacía' && c.status==='partial'));
+  const html=permissionsView({catalog:result},{project:'Project'});
+  assert.ok(html.includes('Copiar diagnóstico'));
+  assert.ok(html.includes('No se han podido identificar grupos'));
+});

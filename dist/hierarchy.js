@@ -1,6 +1,17 @@
 // Shared pure model: the browser and local API apply the same selection rules.
 export const memberKey = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
 export const isExecutable = item => !item.contextOnly && ['task', 'bug', 'tarea'].includes(item.type.toLowerCase());
+export const isCompleted = (item, workspace) => !!workspace.completedStates?.[item.type] && item.state === workspace.completedStates[item.type];
+// The iteration that starts right before the given one. Dates decide when they
+// exist; undated iterations keep the order in which Azure DevOps listed them.
+export function previousIteration(iterations, iterationId) {
+  const index = iterations.findIndex(i => i.id === iterationId);
+  if (index < 0) return null;
+  const startOf = iteration => String(iteration.attributes?.startDate ?? '').slice(0,10);
+  const start = startOf(iterations[index]), before = iterations[index-1];
+  const earlier = start ? iterations.filter(i => startOf(i) && startOf(i) < start).sort((a,b) => startOf(b).localeCompare(startOf(a))) : [];
+  return earlier[0] ?? (before && !(start && startOf(before)) ? before : null);
+}
 export const typeRank = item => ({epic:0,feature:1,'user story':2,'product backlog item':2,requirement:2,task:3,tarea:3,bug:3}[item.type.toLowerCase()] ?? 4);
 export function hierarchy(items) {
   const nodes = new Map(items.map(item => [item.id, {...item, children:[]} ]));
@@ -65,7 +76,7 @@ export function orderedPlanningMembers(workspace, iterationId) {
 export function eligibleTasks(workspace, member) {
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
   const tree=hierarchy(items);
-  return items.filter(item=>isExecutable(item) && participantSources(item,workspace,tree).has(member));
+  return items.filter(item=>isExecutable(item) && !isCompleted(item,workspace) && participantSources(item,workspace,tree).has(member));
 }
 export function filterHierarchy(roots, predicate) {
   return roots.flatMap(node=>{

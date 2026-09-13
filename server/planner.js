@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { eligibleTasks, isExecutable, hierarchy, ancestors, participantSources, personPlanningStatus } from '../dist/hierarchy.js';
 
-export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', remainingWork: 'Horas pendientes' };
+export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', remainingWork: 'Horas pendientes', state: 'Estado' };
 export function identityKey(identity) {
   if (!identity) return '';
   if (typeof identity === 'object') return (identity.uniqueName || identity.id || identity.displayName || '').toLowerCase();
@@ -125,6 +125,8 @@ export function stageChanges(workspace, id, changes) {
     if (field === 'iterationPath' && ![workspace.settings.backlogIteration.path, ...workspace.iterations.map(i => i.path), item.iterationPath].includes(value)) throw new Error('Elige una iteración del equipo.');
     if (field === 'priority' && (!item.canPrioritize || !Number.isInteger(value) || value < 1 || value > 4)) throw new Error('La prioridad debe estar entre 1 y 4.');
     if (field === 'remainingWork' && (!item.canEstimateHours || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido.');
+    // The only state change is closing a task or bug with its type's completed state.
+    if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !workspace.completedStates?.[item.type] || value !== workspace.completedStates[item.type])))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
     if (same(item[field], value)) delete draft[field]; else draft[field] = value;
   }
   if (item.localOnly) draft.title=changes.title ?? draft.title ?? item.title;
