@@ -94,3 +94,26 @@ test('selection preview uses saved drafts and distinguishes zero from unknown ca
   planTasks(ws,ana,[1053],'sprint-24');
   result=selectionSummary(ws,marcos,'sprint-24',[1053]);assert.deepEqual(result.invalidIds,[1053]);assert.equal(result.selectedHours,0);
 });
+
+test('the previous iteration is the latest that starts earlier, whatever the listed order',async()=>{
+  const {previousIteration}=await import('../dist/hierarchy.js');
+  const ws=createDemo();
+  assert.equal(previousIteration(ws.iterations,'sprint-24').id,'sprint-23');
+  assert.equal(previousIteration(ws.iterations,'sprint-25').id,'sprint-24');
+  assert.equal(previousIteration(ws.iterations,'sprint-23'),null);
+  assert.equal(previousIteration(ws.iterations,'missing'),null);
+  assert.equal(previousIteration([{id:'a'},{id:'b'}],'b').id,'a','undated iterations keep the Azure order');
+});
+
+test('demo migration adds the previous iteration once without discarding local work',async()=>{
+  const {upgradeDemoPreviousIteration}=await import('../server/demo.js');
+  const ws=createDemo();
+  ws.iterations=ws.iterations.filter(i=>!i.past);ws.items=ws.items.filter(i=>i.id<1030 || i.id>1035);
+  delete ws.demoPreviousVersion;delete ws.completedStates;ws.drafts={1042:{remainingWork:99}};
+  assert.equal(upgradeDemoPreviousIteration(ws),true);
+  const previous=ws.iterations.find(i=>i.past);
+  assert.ok(previous.attributes.finishDate<ws.iterations[0].attributes.startDate);
+  assert.equal(ws.items.filter(i=>i.iterationPath===previous.path).length,6);
+  assert.deepEqual(ws.drafts,{1042:{remainingWork:99}});assert.equal(ws.completedStates.Task,'Closed');
+  assert.equal(upgradeDemoPreviousIteration(ws),false);
+});
