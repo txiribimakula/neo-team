@@ -37,7 +37,7 @@ export async function auditGroup(call, catalog, descriptor, progress = () => {})
     catch (error) { if (error.code === 'AZURE_AUTHENTICATION_REQUIRED' || /\bAzure HTTP 401\b/.test(error.message)) throw error; counts.warnings++; report.coverage.push({ name, status: 'error', message: error.message }); return null; }
   }
   emit(`Resolviendo el grupo ${group.name} y sus herencias…`);
-  const root = (await call({ action: 'identity', descriptor }))[0];
+  const root = (await call({ action: 'identity', ...(group.legacyDescriptor ? { descriptors: [group.legacyDescriptor] } : { descriptor }) }))[0];
   if (!root?.descriptor) throw new Error('No se pudo resolver la identidad de este grupo.');
   const queue = [{ ...root, direct: true }], seen = new Set();
   while (queue.length) {

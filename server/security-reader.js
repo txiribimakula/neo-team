@@ -52,18 +52,37 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
       } while (next);
       return values;
     }
-    const dev = 'dev.azure.com', graph = 'vssps.dev.azure.com';
+    const dev = 'dev.azure.com', identityHost = 'vssps.dev.azure.com';
     const cleanIdentity = i => ({ id: i.id, descriptor: i.descriptor, subjectDescriptor: i.subjectDescriptor, name: i.providerDisplayName || i.customDisplayName || i.descriptor, isContainer: i.isContainer, members: i.members || [], memberOf: i.memberOf || [] });
     const p = enc(project);
     if (action === 'catalog') {
       const { data: info } = await get(dev, `_apis/projects/${p}`);
-      const { data: scope } = await get(graph, `_apis/graph/descriptors/${enc(info.id)}`, { 'api-version': '7.1-preview.1' });
-      const scoped = await list(graph, '_apis/graph/groups', { scopeDescriptor: scope.value, 'api-version': '7.1-preview.1' });
-      const groups = scoped.map(g => ({ descriptor: g.descriptor, name: g.displayName, principalName: g.principalName, description: g.description, scope: 'project' }));
+      if (typeof info.id !== 'string' || !info.id) throw new Error('Azure no devolvió el ID del proyecto.');
+      // Microsoft IdentityClient.read_identities_by_scope (7.1): use the core
+      // project ID directly, without Graph descriptors or an organization scan.
+      const scoped = await list(identityHost, '_apis/identities', { scopeId: info.id, queryMembership: 'None', 'api-version': '7.1-preview.1' });
+      const groups = [], seen = new Set();
+      for (const identity of scoped) {
+        if (typeof identity.isContainer !== 'boolean') throw new Error('Azure devolvió una identidad sin indicar si es un grupo. La lista no se puede considerar completa.');
+        if (!identity.isContainer) continue;
+        const property = name => identity.properties?.[name]?.$value;
+        const identityScope = property('ScopeId');
+        if (identityScope && String(identityScope).toLowerCase() !== info.id.toLowerCase()) continue;
+        if (typeof identity.descriptor !== 'string' || !identity.descriptor) throw new Error('Azure devolvió un grupo sin identificador. La lista no se puede considerar completa.');
+        if (seen.has(identity.descriptor)) continue;
+        seen.add(identity.descriptor);
+        groups.push({
+          descriptor: identity.subjectDescriptor || identity.descriptor,
+          legacyDescriptor: identity.descriptor,
+          name: identity.providerDisplayName || identity.customDisplayName || property('Account') || identity.descriptor,
+          principalName: property('Account') || identity.providerDisplayName,
+          description: property('Description') || '', scope: 'project',
+        });
+      }
       return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, coverage: [], fetchedAt: new Date().toISOString() };
     }
     if (action === 'namespaces') return list(dev, '_apis/securitynamespaces');
-    if (action === 'identity') return (await list(graph, '_apis/identities', { ...(descriptor ? { subjectDescriptors: descriptor } : { descriptors: descriptors.join(',') }), queryMembership: 'Direct' })).map(cleanIdentity);
+    if (action === 'identity') return (await list(identityHost, '_apis/identities', { ...(descriptor ? { subjectDescriptors: descriptor } : { descriptors: descriptors.join(',') }), queryMembership: 'Direct' })).map(cleanIdentity);
     if (action === 'acl') return list(dev, `_apis/accesscontrollists/${enc(namespaceId)}`, { descriptors: descriptors.join(','), includeExtendedInfo: true, recurse: true });
     if (action === 'resources') {
       const routes = {

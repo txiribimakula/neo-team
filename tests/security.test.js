@@ -42,22 +42,21 @@ test('token attribution requires project or globally unique resource ID, never n
   assert.equal(tokenScope(`repoV2/${projectId}/123`, projectId, []).kind, 'project');
   assert.equal(tokenScope(`${projectId}x`, projectId, []).kind, 'unresolved');
 });
-test('reader paginates Graph groups and does not expose resource secrets', async () => {
+test('reader paginates scoped identities and does not expose resource secrets', async () => {
   const urls = [];
   const reader = securityReader('organization', async () => 'test-token', async (url, options) => {
     assert.equal(options.method, 'GET'); assert.equal(options.redirect, 'error'); urls.push(url);
     let data;
     if (url.pathname.includes('/projects/')) data = { id: projectId, name: 'Project' };
-    else if (url.pathname.includes('/descriptors/')) data = { value: 'scope' };
-    else if (url.pathname.includes('/groups')) {
-      if (!url.searchParams.has('continuationToken')) return new Response(JSON.stringify({ value: [{ descriptor: 'one', displayName: 'One' }] }), { headers: { 'x-ms-continuationtoken': 'next' } });
-      data = { value: [{ descriptor: 'two', displayName: 'Two' }] };
+    else if (url.pathname.endsWith('/identities')) {
+      if (!url.searchParams.has('continuationToken')) return new Response(JSON.stringify({ value: [{ descriptor: 'one', providerDisplayName: 'One', isContainer: true }] }), { headers: { 'x-ms-continuationtoken': 'next' } });
+      data = { value: [{ descriptor: 'two', providerDisplayName: 'Two', isContainer: true }] };
     } else if (url.pathname.includes('/endpoints')) data = { value: [{ id: 'endpoint', name: 'Connection', authorization: { secret: 'never-return' }, data: { secret: 'never-return' } }] };
     else data = { value: [namespace] };
     return new Response(JSON.stringify(data));
   });
   const result = await reader({ action: 'catalog', project: 'Project' });
-  assert.equal(result.groups.length, 2); assert.ok(urls.some(u => u.searchParams.get('scopeDescriptor') === 'scope'));
+  assert.equal(result.groups.length, 2); assert.ok(urls.some(u => u.searchParams.get('scopeId') === projectId));
   const resources = await reader({ action: 'resources', project: projectId, kind: 'endpoints' });
   assert.deepEqual(resources, [{ id: 'endpoint', name: 'Connection', kind: 'endpoints' }]);
 });
@@ -143,17 +142,16 @@ test('security rejection is contrasted with a project read using exactly the sam
   assert.equal(requests[2].path, '/organization/_apis/projects/Project');
 });
 
-test('initial catalog only reads the project, its Graph descriptor and scoped groups', async () => {
+test('initial catalog reads project and scoped identities without any Graph or organization query', async () => {
   const paths = [];
   const reader = securityReader('organization', async () => 'token', async url => {
     paths.push(url.pathname);
     if (url.pathname.includes('/projects/')) return new Response(JSON.stringify({ id: projectId, name: 'Project' }));
-    if (url.pathname.includes('/descriptors/')) return new Response(JSON.stringify({ value: 'project-scope' }));
-    if (url.pathname.endsWith('/graph/groups') && url.searchParams.get('scopeDescriptor') === 'project-scope') return new Response(JSON.stringify({ value: [{ descriptor: 'group', displayName: 'Readers' }] }));
+    if (url.pathname.endsWith('/identities') && url.searchParams.get('scopeId') === projectId && url.searchParams.get('queryMembership') === 'None') return new Response(JSON.stringify({ value: [{ descriptor: 'group', providerDisplayName: 'Readers', isContainer: true }] }));
     assert.fail('Initial catalog requested organization/security data: ' + url.pathname);
   });
   const result = await reader({ action: 'catalog', project: 'Project' });
-  assert.equal(paths.length, 3);
+  assert.equal(paths.length, 2);
   assert.equal(result.groups[0].name, 'Readers');
   assert.equal(result.namespaces, undefined);
 });
@@ -175,4 +173,29 @@ test('project group list has no organization loader and excludes older organizat
   assert.ok(!html.includes('security-other-groups'));
   assert.ok(!html.includes('security-group-scope'));
   assert.ok(html.includes('Readers'));
+});
+test('scoped catalog keeps custom groups and excludes users, other scopes and duplicates', async () => {
+  const reader = securityReader('organization', async () => 'token', async url => new Response(JSON.stringify(url.pathname.includes('/projects/') ? { id: projectId, name:'Project' } : { value: [
+    { descriptor:'custom', subjectDescriptor:'graph-custom', isContainer:true, providerDisplayName:'Custom QA', properties:{ ScopeId:{$value:projectId}, Description:{$value:'Test team'}, Account:{$value:'[Project]\\Custom QA'} } },
+    { descriptor:'custom', isContainer:true },
+    { descriptor:'user', isContainer:false },
+    { descriptor:'foreign', isContainer:true, properties:{ScopeId:{$value:'other-project'}} },
+  ] })));
+  const result = await reader({ action:'catalog', project:'Project' });
+  assert.equal(result.groups.length, 1);
+  assert.equal(result.groups[0].legacyDescriptor, 'custom');
+  assert.equal(result.groups[0].descriptor, 'graph-custom');
+  assert.equal(result.groups[0].name, 'Custom QA');
+  assert.equal(result.groups[0].description, 'Test team');
+});
+test('group detail resolves legacy descriptors directly, without requiring a Graph descriptor', async () => {
+  const selectedCatalog = { ...catalog, groups:[{descriptor:root.descriptor,legacyDescriptor:root.descriptor,name:root.name,scope:'project'}] };
+  const calls = [];
+  await auditGroup(async args => {
+    calls.push(args);
+    if (args.action === 'identity' && args.descriptors?.[0] === root.descriptor) return [root];
+    return mockCall(args);
+  }, selectedCatalog, root.descriptor);
+  assert.deepEqual(calls[0], {action:'identity',descriptors:[root.descriptor]});
+  assert.ok(!calls.some(c => c.descriptor));
 });
