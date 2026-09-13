@@ -102,6 +102,13 @@ test('completed state names remain scoped to their project',async()=>{
  setCompletedState(ws,'Task','Finished',ws.sources[1].id);
  assert.equal(ws.drafts[1].state,'Closed');assert.equal(ws.drafts[2].state,'Finished');
 });
+test('zero global capacity clears project allocations and ignores assigned work',()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10)),iteration=ws.iterations[0];
+ stageCapacity(ws,iteration.id,{key:'ana',activities:[{name:'Development',capacityPerDay:0}]});
+ const plans=projectCapacityPlans(ws);
+ assert.deepEqual(plans.map(plan=>[plan.hours,plan.ratio,plan.allocated]),[[0,0,0],[0,0,0]]);
+ assert.ok(plans.every(plan=>plan.entry.activities[0].capacityPerDay===0 && !plan.missingEstimate && !plan.unavailable));
+});
 test('an item moved between projects stays only where Azure has it now, and real duplicates are named',()=>{
  const moved=mergeProjects(project('A',1),project('B',1));
  assert.deepEqual(moved.items.map(i=>[i.id,i.project,i.title]),[[1,'B','Task B']]);

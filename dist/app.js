@@ -1,6 +1,6 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance } from './maintenance.js';
-import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, previousIteration } from './hierarchy.js';
+import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, hasPlanningCapacity, previousIteration, completedState, isCompleted } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -52,6 +52,7 @@ function createItem(parentId) {
   const ws=state.workspace,parent=ws.effectiveItems.find(i=>i.id===parentId);
   const type=parent ? ({Epic:'Feature',Feature:'User Story','User Story':'Task','Product Backlog Item':'Task',Requirement:'Task'})[parent.type] || 'Task' : 'Epic';
   showModal('Crear elemento','Se guardará en local hasta revisar y sincronizar.',`<form id="create-form">${ws.sources && !parent ? `<label class="form-field">Proyecto<select name="sourceId" required>${ws.sources.map(s=>`<option value="${escape(s.id)}">${escape(s.config.project)}</option>`).join('')}</select></label>` : ''}<label class="form-field">Tipo<select name="type" id="create-type">${['Epic','Feature','User Story','Task','Bug'].map(t=>`<option ${t===type ? 'selected' : ''}>${t}</option>`).join('')}</select></label><label class="form-field">Título<input name="title" required maxlength="255" autofocus></label><label class="form-field">Padre<select name="parent" id="create-parent"></select></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${tab==='planning' && key(m)===pickerMember ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}</select></label><label class="form-field">Iteración<select name="iterationPath">${[{path:ws.settings.backlogIteration.path,name:'Backlog'},...planningIterations()].map(i=>`<option value="${escape(i.path)}" ${tab==='planning' && i.id===selectedIteration ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><label class="form-field" id="create-hours">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" placeholder="Sin estimar"></label></form>`,'<button class="button" data-action="close">Cancelar</button><button class="button primary" form="create-form" type="submit">Crear en local</button>');
+  restrictAssignees($('#create-form [name="assignedTo"]'));
   updateCreationParents(parentId);
 }
 function updateCreationParents(parentId) {
@@ -495,12 +496,24 @@ const memberName = value => state.workspace?.members.find(m => key(m) === value)
 const iterationName = value => state.workspace?.iterations.find(i => i.path === value)?.name || (value === state.workspace?.settings.backlogIteration.path ? 'Backlog' : value);
 const pretty = (field,value) => field === 'assignedTo' ? memberName(value) : field === 'iterationPath' ? iterationName(value) : value === null || value === undefined ? 'Sin definir' : field === 'remainingWork' ? `${number(value)} h` : String(value);
 function planningTree() { return hierarchy(state.workspace.effectiveItems); }
+function planningMembers(iterationId=selectedIteration) {
+  const ws=state.workspace;
+  return ws?.members.filter(member=>hasPlanningCapacity(ws,key(member),iterationId)) ?? [];
+}
+function restrictAssignees(select,current='') {
+  const allowed=new Set(planningMembers().map(key));
+  for(const option of [...select.options]) {
+    if(!option.value || allowed.has(option.value)) continue;
+    if(option.value===current) option.textContent+=' · capacidad 0';
+    else option.remove();
+  }
+}
 function matchesText(item, text) {
   return `${item.id} ${item.title} ${(item.tags || []).join(' ')} ${item.type}`.toLowerCase().includes(text.trim().toLowerCase());
 }
 function treeView({ availableOnly = false, picker = false, member = focusedMember, search = query } = {}) {
   const ws=state.workspace, tree=planningTree(), iteration=selected();
-  const eligible=new Set(member ? eligibleTasks(ws,member).map(i=>i.id) : []);
+  const eligible=new Set(member ? eligibleTasks(ws,member,iteration?.id).map(i=>i.id) : []);
   const matches=new Set();
   // Searching an Epic/Feature/Story includes all matching descendants.
   for (const item of ws.effectiveItems) {
@@ -517,7 +530,7 @@ function treeView({ availableOnly = false, picker = false, member = focusedMembe
   const roots=filterHierarchy(tree.roots,include);
   function nodeHtml(node,depth) {
     const sources=participantSources(node,ws,tree);
-    const participants=ws.members.filter(m=>sources.has(key(m)));
+    const participants=planningMembers(iteration?.id).filter(m=>sources.has(key(m)));
     const peopleButton=`<button class="people-button" type="button" data-action="participants" data-task="${node.id}" aria-controls="people-popover" aria-expanded="${peopleItem===node.id}" aria-label="Repartir ${escape(node.title)} entre personas">${participants.slice(0,3).map((m,index)=>`<span class="avatar c${index%4}" title="${escape(m.displayName)}">${escape(initials(m.displayName))}</span>`).join('')}<span>${participants.length ? `${participants.length} · reparto local` : '+ Repartir'}</span></button>`;
     const type=`<span class="node-type kind-${typeRank(node)}">${escape(node.type)}</span>`;
     if (!isExecutable(node)) {
@@ -533,7 +546,16 @@ function treeView({ availableOnly = false, picker = false, member = focusedMembe
     const leaf=picker ? `<label class="hierarchy-leaf ${disabled ? 'unavailable' : ''}">${contents}</label>` : `<div class="hierarchy-leaf" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
-  return roots.map(node=>nodeHtml(node,0)).join('') || `<div class="empty-result">${picker ? 'Sin tareas para esta persona. Reparte una rama en el paso 1.' : 'No hay tareas para esta selección. Cambia el filtro o reparte una rama entre personas.'}</div>`;
+  const empty=`<div class="empty-result">${picker ? 'Sin tareas para esta persona. Reparte una rama en el paso 1.' : 'No hay tareas para esta selección. Cambia el filtro o reparte una rama entre personas.'}</div>`;
+  if (!ws.sources) return roots.map(node=>nodeHtml(node,0)).join('') || empty;
+  // With several projects, each project is the top parent of its own backlog.
+  const projects=ws.sources.map(source=>{
+    const own=roots.filter(node=>node.sourceId===source.id);
+    if (!own.length) return '';
+    return `<details class="hierarchy-branch project-branch" data-project="${escape(source.id)}" ${picker || search || !collapsed.has(`project:${source.id}`) ? 'open' : ''}><summary><span class="branch-chevron">›</span><span class="node-type kind-project">Proyecto</span><span class="branch-title">${escape(source.config.project)} <small>${escape(source.config.team)}</small></span></summary><div class="hierarchy-children">${own.map(node=>nodeHtml(node,1)).join('')}</div></details>`;
+  }).join('');
+  const unknown=roots.filter(node=>!ws.sources.some(source=>source.id===node.sourceId)).map(node=>nodeHtml(node,0)).join('');
+  return projects+unknown || empty;
 }
 function hierarchyView() {
   return `<section class="hierarchy-surface"><div class="hierarchy-toolbar"><input class="search" id="search" aria-label="Buscar en el backlog" placeholder="Buscar rama o tarea" value="${escape(query)}"><select id="backlog-filter" aria-label="Filtrar backlog"><option value="all" ${backlogFilter==='all' ? 'selected' : ''}>Todo el backlog</option><option value="unshared" ${backlogFilter==='unshared' ? 'selected' : ''}>Sin personas</option></select><button class="button small" data-action="expand-tree">Expandir</button><button class="button small" data-action="collapse-tree">Plegar</button></div><div id="hierarchy-content">${treeView()}</div></section>`;
@@ -581,8 +603,8 @@ function previousTasks(iteration=selected()) {
   if (!previous) return {previous,tasks:[]};
   const base=new Map(ws.items.map(i=>[i.id,i]));
   const tasks=ws.effectiveItems.filter(i=>isExecutable(i) && (i.iterationPath===previous.path || base.get(i.id)?.iterationPath===previous.path)).map(item=>{
-    const done=ws.completedStates?.[item.type];
-    const status=done && item.state===done ? 'completed' : item.iterationPath===iteration.path ? 'moved' : item.iterationPath===ws.settings.backlogIteration.path ? 'backlog' : item.iterationPath!==previous.path ? 'elsewhere' : 'open';
+    // With several projects, each one closes a type with its own state.
+    const status=isCompleted(item,ws) ? 'completed' : item.iterationPath===iteration.path ? 'moved' : item.iterationPath===ws.settings.backlogIteration.path ? 'backlog' : item.iterationPath!==previous.path ? 'elsewhere' : 'open';
     return {item,base:base.get(item.id),status};
   });
   return {previous,tasks:tasks.sort((a,b)=>previousOrder[a.status]-previousOrder[b.status] || (a.item.priority ?? 5)-(b.item.priority ?? 5) || a.item.id-b.item.id)};
@@ -613,7 +635,8 @@ function previousView() {
     {name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
   ].filter(group=>group.tasks.length);
   const idle=ws.members.filter(member=>!owned(member).length), types=[...new Set(tasks.map(t=>t.item.type))];
-  const completion=types.length ? `<p class="completed-states">Al completar: ${types.map(type=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(type)}" title="Cambiar el estado completado de ${escape(type)}">${escape(type)} → ${escape(ws.completedStates?.[type] || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
+  const kinds=[...new Map(tasks.map(t=>[`${t.item.sourceId ?? ''}\n${t.item.type}`,t.item])).values()];
+  const completion=types.length ? `<p class="completed-states">Al completar: ${kinds.map(item=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(item.type)}" data-source="${escape(item.sourceId ?? '')}" title="Cambiar el estado completado de ${escape(item.type)}">${ws.sources ? `${escape(item.project)} · ` : ''}${escape(item.type)} → ${escape(completedState(item,ws) || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
   return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)}, márcalo como completado o mándalo al backlog.</p>${completion}</div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
     ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
     ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
@@ -623,27 +646,27 @@ function previousView() {
 // is known locally; the complete workflow can be read from Azure on demand.
 let completedStateChoice=null;
 const stateCategoryLabels={proposed:'Sin empezar',inprogress:'En curso',resolved:'Resuelto',completed:'Completado',removed:'Retirado'};
-function knownStates(type) {
+function knownStates(type, sourceId) {
   const ws=state.workspace, found=new Map();
   const add=(name,source)=>{const text=String(name ?? '').trim();if(text && !found.has(text.toLowerCase()))found.set(text.toLowerCase(),{name:text,source});};
-  add(ws.completedStates?.[type],'Elegido actualmente');
-  ws.items.filter(i=>i.type===type).forEach(i=>add(i.state,'En los datos importados'));
+  add(completedState({type,sourceId},ws),'Elegido actualmente');
+  ws.items.filter(i=>i.type===type && (i.sourceId ?? null)===(sourceId ?? null)).forEach(i=>add(i.state,'En los datos importados'));
   ['Closed','Done','Completed','Resolved','Removed'].forEach(name=>add(name,'Nombre habitual'));
   return [...found.values()];
 }
-function chooseCompletedState(type, taskId=null, states=null) {
-  completedStateChoice={type,taskId};
-  const current=state.workspace.completedStates?.[type];
-  const options=states ? states.map(s=>({name:s.name,source:stateCategoryLabels[s.category] || 'Sin categoría'})) : knownStates(type);
+function chooseCompletedState(type, taskId=null, states=null, sourceId=undefined) {
+  completedStateChoice={type,taskId,sourceId};
+  const current=completedState({type,sourceId},state.workspace), project=state.workspace.sources?.find(s=>s.id===sourceId)?.config.project;
+  const options=states ? states.map(s=>({name:s.name,source:stateCategoryLabels[s.category] || 'Sin categoría'})) : knownStates(type,sourceId);
   const checked=current || options.find(o=>o.source==='Completado')?.name;
-  showModal(`Estado completado de «${type}»`, 'Elige el estado que se asigna al marcar como completada una tarea de este tipo. Se recordará.', `<form id="completed-state-form"><div class="participant-list">${options.map(o=>`<label class="participant-option"><input type="radio" name="state" value="${escape(o.name)}" ${o.name===checked ? 'checked' : ''} required><span><strong>${escape(o.name)}</strong><small>${escape(o.source)}</small></span></label>`).join('')}<label class="participant-option"><input type="radio" name="state" value="" data-other-state><span class="other-state"><strong>Otro estado</strong><input name="other" maxlength="128" placeholder="Nombre exacto en Azure DevOps" aria-label="Otro estado"></span></label></div>${states ? '<p class="form-intro">Estados del flujo de trabajo en Azure DevOps.</p>' : `<p class="form-intro">La lista reúne los estados de los datos importados y nombres habituales.${state.mode==='demo' ? '' : ' Azure DevOps comprobará el estado al sincronizar.'}</p><button type="button" class="button small" data-action="load-work-item-states">Consultar todos los estados en Azure DevOps</button><div id="connection-progress" hidden></div>`}</form>`, `<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="completed-state-form">${taskId ? 'Guardar y marcar completada' : 'Guardar'}</button>`);
+  showModal(`Estado completado de «${type}»${project ? ` en ${project}` : ''}`,'Elige el estado que se asigna al marcar como completada una tarea de este tipo. Se recordará.', `<form id="completed-state-form"><div class="participant-list">${options.map(o=>`<label class="participant-option"><input type="radio" name="state" value="${escape(o.name)}" ${o.name===checked ? 'checked' : ''} required><span><strong>${escape(o.name)}</strong><small>${escape(o.source)}</small></span></label>`).join('')}<label class="participant-option"><input type="radio" name="state" value="" data-other-state><span class="other-state"><strong>Otro estado</strong><input name="other" maxlength="128" placeholder="Nombre exacto en Azure DevOps" aria-label="Otro estado"></span></label></div>${states ? '<p class="form-intro">Estados del flujo de trabajo en Azure DevOps.</p>' : `<p class="form-intro">La lista reúne los estados de los datos importados y nombres habituales.${state.mode==='demo' ? '' : ' Azure DevOps comprobará el estado al sincronizar.'}</p><button type="button" class="button small" data-action="load-work-item-states">Consultar todos los estados en Azure DevOps</button><div id="connection-progress" hidden></div>`}</form>`, `<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="completed-state-form">${taskId ? 'Guardar y marcar completada' : 'Guardar'}</button>`);
   modal.classList.add('connection-modal');
 }
 async function decidePrevious(id, decision) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
   if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
   if (decision==='complete') {
-    if (!ws.completedStates?.[item.type]) { chooseCompletedState(item.type,id); return; }
+    if (!completedState(item,ws)) { chooseCompletedState(item.type,id,null,item.sourceId); return; }
     await request('/api/complete-task',{id});
   }
   else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
@@ -676,25 +699,25 @@ function refreshPeople() {
   const ws=state.workspace,item=ws.effectiveItems.find(i=>i.id===peopleItem);
   if(!item){peoplePopover.hidePopover();return;}
   const sources=participantSources(item,ws,planningTree());
-  const members=ws.members.filter(m=>`${m.displayName} ${key(m)}`.toLowerCase().includes(peopleQuery.toLowerCase()));
+  const members=planningMembers().filter(m=>`${m.displayName} ${key(m)}`.toLowerCase().includes(peopleQuery.toLowerCase()));
   $('#people-options').innerHTML=members.map(m=>{
     const inherited=(sources.get(key(m)) || []).find(s=>s.inherited);
     return `<label class="person-option"><input type="checkbox" data-participant="${escape(key(m))}" ${sources.has(key(m)) ? 'checked' : ''}><span class="avatar">${escape(initials(m.displayName))}</span><span>${escape(m.displayName)}${inherited ? `<small>Heredado de #${inherited.id}</small>` : ''}</span></label>`;
   }).join('') || '<p class="empty-result">Sin coincidencias</p>';
 }
 function ensureSelection() {
-  const ws=state.workspace;
-  if(!ws.members.some(m=>key(m)===pickerMember))pickerMember=ws.members[0] ? key(ws.members[0]) : '';
+  const members=planningMembers();
+  if(!members.some(m=>key(m)===pickerMember))pickerMember=members[0] ? key(members[0]) : '';
 }
 function choosePerson(member) {
-  if(!state.workspace.members.some(m=>key(m)===member))return;
+  if(!planningMembers().some(m=>key(m)===member))return;
   const peopleScroll=$('.planning-people')?.scrollTop || 0;
   pickerMember=member;focusedMember=member;pickerQuery='';tab='planning';planningMode='person';render();
   if($('.planning-people'))$('.planning-people').scrollTop=peopleScroll;
 }
 function pickTasks(member) {
   modal.close();
-  pickerMember=state.workspace.members.some(m=>key(m)===member) ? member : focusedMember || pickerMember;
+  pickerMember=planningMembers().some(m=>key(m)===member) ? member : focusedMember || pickerMember;
   tab='planning';planningMode='person';ensureSelection();render();
 }
 function personMeter(member) {
@@ -761,9 +784,9 @@ function capacityView() {
     <header class="capacity-hero"><div><p class="eyebrow">PRIMERO, EL TIEMPO REAL</p><h2>El tiempo con el que cuenta el equipo.</h2><p>${escape(iteration.name)} · ${date(iteration.attributes?.startDate)} — ${date(iteration.attributes?.finishDate)}</p><span class="capacity-save-note">${ws.mode==='demo' ? 'Modo de ejemplo' : 'Guardado local · revisarás los cambios antes de enviarlos a Azure'}</span></div><div class="capacity-total"><strong>${number(total)}<small> h</small></strong><span>de capacidad${known.length<ws.members.length ? ' conocida' : ' del equipo'}</span><small>${known.length} de ${ws.members.length} personas con capacidad definida</small></div></header>
     <section class="capacity-shared"><div class="capacity-shared-icon" aria-hidden="true">☀</div><div><h3>Los días que descansáis juntos</h3><p>${team.off ? `${team.off} días laborables libres para todo el equipo` : 'Sin días libres comunes'} · ${team.available} días laborables disponibles</p>${capacityStatusLine('team',drafts,conflicts)}</div><button class="button" data-action="edit-capacity" data-owner="team">Editar calendario del equipo</button></section>
     <div class="capacity-section-title"><div><h3>El tiempo de cada persona</h3><p>Horas al día y ausencias. La capacidad se calcula al momento.</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : ''}</div>
-    <div class="capacity-people">${ws.members.map((member,index)=>{
+    <div class="capacity-people">${ws.members.map((member,index)=>({member,index,total:hours[member.id]})).sort((a,b)=>Number(a.total===0)-Number(b.total===0) || a.index-b.index).map(({member,index})=>{
       const entry=capacityOf(iteration.id,member.id), b=capacityBreakdown(member.id,entry), total=hours[member.id];
-      return `<section class="capacity-card capacity-profile ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${entry.activities.length>1 ? `${entry.activities.length} actividades` : 'Disponibilidad en la iteración'}</span></div></div><div class="capacity-profile-total">${total==null ? '—' : number(total)}<small> h</small></div><p class="capacity-equation">${total==null ? 'Define las horas para empezar' : `${number(b.daily)} h al día × ${b.available} días disponibles`}</p><div class="capacity-mini-days" aria-label="${b.available} días disponibles, ${b.off} días libres">${b.days.filter(isWorkingDay).slice(0,40).map(day=>`<span class="${containsDay(entry.daysOff,day) || containsDay(capacityOf(iteration.id,'team').daysOff,day) ? 'off' : ''}" title="${date(day)}"></span>`).join('')}</div><div class="capacity-profile-footer"><span>${b.off ? `${b.off} días libres` : 'Sin ausencias'}${b.days.length ? '' : ' · fechas sin definir'}</span><button class="button small" data-action="edit-capacity" data-owner="${escape(member.id)}">Ajustar capacidad</button></div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
+      return `<section class="capacity-card capacity-profile ${total===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${total===0 ? 'Fuera del reparto' : entry.activities.length>1 ? `${entry.activities.length} actividades` : 'Disponibilidad en la iteración'}</span></div></div><div class="capacity-profile-total">${total==null ? '—' : number(total)}<small> h</small></div><p class="capacity-equation">${total===0 ? 'No aparecerá en las fases de reparto' : total==null ? 'Define las horas para empezar' : `${number(b.daily)} h al día × ${b.available} días disponibles`}</p><div class="capacity-mini-days" aria-label="${b.available} días disponibles, ${b.off} días libres">${b.days.filter(isWorkingDay).slice(0,40).map(day=>`<span class="${containsDay(entry.daysOff,day) || containsDay(capacityOf(iteration.id,'team').daysOff,day) ? 'off' : ''}" title="${date(day)}"></span>`).join('')}</div><div class="capacity-profile-footer"><span>${b.off ? `${b.off} días libres` : 'Sin ausencias'}${b.days.length ? '' : ' · fechas sin definir'}</span><button class="button small" data-action="edit-capacity" data-owner="${escape(member.id)}">Ajustar capacidad</button></div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
     }).join('')}</div><div class="capacity-next"><span>${known.length<ws.members.length ? `${ws.members.length-known.length} personas con capacidad pendiente de definir` : 'La disponibilidad está lista. Puedes empezar a repartir el trabajo.'}</span><button class="button primary" data-action="tab" data-tab="hierarchy">Repartir ramas →</button></div>
   </section>`;
 }
@@ -835,7 +858,7 @@ function plannerView() {
 }
 function personPlannerView() {
   ensureSelection();const ws=state.workspace,iteration=selected();
-  if(!iteration || !ws.members.length)return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para planificar.</div>';
+  if(!iteration || !planningMembers().length)return '<div class="empty-result">No hay personas con capacidad para repartir trabajo en esta iteración.</div>';
   return `<div class="continuous-planner"><div class="planning-people" aria-label="Personas del equipo">${orderedPlanningMembers(ws,selectedIteration).map(({member:m,index,canConfirm,confirmed})=>`<div class="planning-person-card ${key(m)===pickerMember ? 'active' : ''}"><button class="planning-person" data-action="choose-person" data-member="${escape(key(m))}" aria-pressed="${key(m)===pickerMember}"><span class="person-name"><span class="avatar c${index%4}">${escape(initials(m.displayName))}</span><strong>${escape(m.displayName)}</strong></span>${personMeter(m)}${key(m)===pickerMember ? '<span class="assigning-label">Asignando ahora</span>' : ''}</button>${canConfirm ? `<button class="person-confirm ${confirmed ? 'confirmed' : ''}" data-action="confirm-person" data-member="${escape(key(m))}" aria-label="${confirmed ? 'Reparto confirmado de' : 'Confirmar reparto de'} ${escape(m.displayName)}" ${confirmed ? 'disabled' : ''}>${confirmed ? '✓ Confirmado en local' : 'Confirmar'}</button>` : ''}</div>`).join('')}</div><section class="planning-work" aria-label="Tareas de ${escape(memberName(pickerMember))}"><div class="active-assignee"><span class="avatar">${escape(initials(memberName(pickerMember)))}</span><div><span>Asignando tareas a</span><h2>${escape(memberName(pickerMember))}</h2></div></div><div class="planning-work-heading"><input id="picker-search" placeholder="Buscar tarea o rama" aria-label="Buscar tareas de esta persona" value="${escape(pickerQuery)}"><label class="show-unavailable"><input id="show-unavailable" type="checkbox" ${onlyAvailable ? '' : 'checked'}>Con otro responsable</label></div><div class="picker-toolbar"><label class="bulk-selection"><input id="toggle-visible" type="checkbox">Marcar visibles</label><span class="local-note">Borrador local · asignaciones pendientes de sincronizar</span></div><div id="picker-tree">${treeView({picker:true,member:pickerMember,search:pickerQuery})}</div></section></div>`;
 }
 function updateBulkCheckbox() {
@@ -886,10 +909,13 @@ function lane(member, allItems, index, iteration) {
 }
 function board(iteration, planned) {
   const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath !== iteration.path);
-  const eligible = new Set(focusedMember ? eligibleTasks(ws,focusedMember).map(i=>i.id) : []);
+  const members=planningMembers(iteration.id), activeKeys=new Set(members.map(key));
+  const eligible = new Set(focusedMember ? eligibleTasks(ws,focusedMember,iteration.id).map(i=>i.id) : []);
   const unassigned = planned.filter(i=>!i.assignedTo && (!focusedMember || eligible.has(i.id)));
   const outside = planned.filter(i=>(!focusedMember || eligible.has(i.id)) && i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
-  return `<div class="board"><section class="backlog" data-drop="backlog"><div class="section-heading"><h2>Backlog disponible</h2><span class="count">${backlog.length}</span></div><p class="section-meta">Pendientes y tareas de otras iteraciones</p>${treeView({availableOnly:true})}</section><section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${planned.length} tareas</span></div><p class="section-meta">Reparte el trabajo según la capacidad del equipo</p><div class="members-grid">${ws.members.filter(m=>!focusedMember || key(m)===focusedMember).map((m,index)=>lane(m,planned,index,iteration)).join('')}<section class="member" data-drop=""><div class="member-header"><div class="section-heading"><h3>Sin asignar</h3><span class="count">${unassigned.length}</span></div><p class="section-meta" style="margin:0">Dentro de esta iteración</p></div><div class="member-items">${filtered(unassigned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Reserva trabajo para esta iteración</div>'}</div></section>${outside.length ? `<section class="member"><div class="member-header"><h3>Otras personas</h3><p class="section-meta" style="margin:0">Responsables que no figuran en este equipo</p></div><div class="member-items">${filtered(outside).map(i=>taskCard(i)).join('')}</div></section>` : ''}</div></section></div><p class="bottom-note">Arrastra tareas para planificar. Pulsa una tarjeta para editar con teclado o en móvil. Las horas y los puntos se mantienen separados.</p>`;
+  const excluded=planned.filter(i=>i.assignedTo && ws.members.some(m=>key(m)===i.assignedTo) && !activeKeys.has(i.assignedTo));
+  const considered=planned.length-excluded.length;
+  return `<div class="board"><section class="backlog" data-drop="backlog"><div class="section-heading"><h2>Backlog disponible</h2><span class="count">${backlog.length}</span></div><p class="section-meta">Pendientes y tareas de otras iteraciones</p>${treeView({availableOnly:true})}</section><section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><p class="section-meta">Reparte el trabajo según la capacidad del equipo</p><div class="members-grid">${members.filter(m=>!focusedMember || key(m)===focusedMember).map((m,index)=>lane(m,planned,index,iteration)).join('')}<section class="member" data-drop=""><div class="member-header"><div class="section-heading"><h3>Sin asignar</h3><span class="count">${unassigned.length}</span></div><p class="section-meta" style="margin:0">Dentro de esta iteración</p></div><div class="member-items">${filtered(unassigned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Reserva trabajo para esta iteración</div>'}</div></section>${excluded.length ? `<section class="member zero-capacity"><div class="member-header"><h3>Fuera del reparto</h3><p class="section-meta" style="margin:0">Tareas asignadas a personas con capacidad 0</p></div><div class="member-items">${filtered(excluded).map(i=>taskCard(i)).join('')}</div></section>` : ''}${outside.length ? `<section class="member"><div class="member-header"><h3>Otras personas</h3><p class="section-meta" style="margin:0">Responsables que no figuran en este equipo</p></div><div class="member-items">${filtered(outside).map(i=>taskCard(i)).join('')}</div></section>` : ''}</div></section></div><p class="bottom-note">Arrastra tareas para planificar. Pulsa una tarjeta para editar con teclado o en móvil. Las horas y los puntos se mantienen separados.</p>`;
 }
 
 function render() {
@@ -923,6 +949,7 @@ function editTask(id) {
   const paths = [{ path:ws.settings.backlogIteration.path, name:'Backlog' },...planningIterations()];
   if (!paths.some(i=>i.path === item.iterationPath)) paths.push({ path:item.iterationPath, name:iterationName(item.iterationPath) });
   showModal(`#${id} · ${item.type}`, item.title, `<form id="task-form" data-task="${id}"><label class="form-field">Título<input name="title" required maxlength="255" value="${escape(item.title)}"></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
+  restrictAssignees($('#task-form [name="assignedTo"]'),item.assignedTo);
 }
 async function stage(id, changes) {
   await request('/api/stage', { edits:[{ id, changes }] }); review = null; render();
@@ -940,8 +967,8 @@ function capacityText(entry, owner) {
 function allocationView() {
   const ws=state.workspace;
   if(!ws?.sources) return '';
-  const iteration=selected(), plans=(ws.projectAllocations ?? []).filter(p=>p.iterationId===iteration?.id);
-  return `<section class="review-item project-allocation"><h2>Capacidad por proyecto</h2><p>Una capacidad por persona. Se reparte en proporción a las horas de sus tareas en esta iteración. Sin tareas estimadas, la capacidad queda sin repartir.</p><div class="table-wrap"><table><thead><tr><th>Persona</th>${ws.sources.map(s=>`<th>${escape(s.config.project)}</th>`).join('')}<th>Sin repartir</th></tr></thead><tbody>${ws.members.map(member=>{
+  const iteration=selected(), members=planningMembers(iteration?.id), plans=(ws.projectAllocations ?? []).filter(p=>p.iterationId===iteration?.id && members.some(m=>m.id===p.key));
+  return `<section class="review-item project-allocation"><h2>Capacidad por proyecto</h2><p>Una capacidad por persona. Se reparte en proporción a las horas de sus tareas en esta iteración. Las personas con capacidad 0 quedan fuera.</p><div class="table-wrap"><table><thead><tr><th>Persona</th>${ws.sources.map(s=>`<th>${escape(s.config.project)}</th>`).join('')}<th>Sin repartir</th></tr></thead><tbody>${members.map(member=>{
     const rows=plans.filter(p=>p.key===member.id), available=ws.capacityHours?.[iteration?.id]?.[member.id] ?? 0;
     return `<tr><th>${escape(member.displayName)}<small class="text-muted"> · ${number(available)} h totales</small></th>${ws.sources.map(s=>{const p=rows.find(p=>p.sourceId===s.id);return `<td>${p ? p.missingEstimate ? 'Falta estimar' : `${number(p.allocated)} h <small>(${number(p.ratio*100)} %)</small><br><small>${number(p.hours)} h de tareas</small>` : 'Sin equipo o iteración'}</td>`;}).join('')}<td>${number(Math.max(0,available-rows.reduce((n,p)=>n+p.allocated,0)))} h</td></tr>`;
   }).join('')}</tbody></table></div><p class="local-note">Azure guarda horas por día con dos decimales. El reparto puede variar unas centésimas por redondeo y respeta los días libres de cada proyecto.</p></section>`;
@@ -1060,11 +1087,11 @@ const actions = {
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
-  'edit-completed-state': el=>chooseCompletedState(el.dataset.type),
+  'edit-completed-state': el=>chooseCompletedState(el.dataset.type,null,null,el.dataset.source || undefined),
   'load-work-item-states': async()=>{
-    const {type,taskId}=completedStateChoice;
-    const result=await importWithProgress($('#connection-progress'),null,{path:'/api/work-item-states',input:{type},title:`Consultando los estados de «${type}»`});
-    chooseCompletedState(type,taskId,result.states);
+    const {type,taskId,sourceId}=completedStateChoice;
+    const result=await importWithProgress($('#connection-progress'),null,{path:'/api/work-item-states',input:{type,...(sourceId ? {sourceId} : {})},title:`Consultando los estados de «${type}»`});
+    chooseCompletedState(type,taskId,result.states,sourceId);
   },
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'choose-person': el=>choosePerson(el.dataset.member),
@@ -1134,10 +1161,10 @@ document.addEventListener('submit', async event => {
       return;
     }
     if (event.target.id === 'completed-state-form') {
-      const form=new FormData(event.target), {type,taskId}=completedStateChoice;
+      const form=new FormData(event.target), {type,taskId,sourceId}=completedStateChoice;
       const chosen=String(form.get('state') || form.get('other') || '').trim();
       if (!chosen) throw new Error('Indica el nombre del estado completado.');
-      await request('/api/completed-state',{type,state:chosen});
+      await request('/api/completed-state',{type,state:chosen,...(sourceId ? {sourceId} : {})});
       if (taskId) await request('/api/complete-task',{id:taskId});
       modal.close();review=null;render();
       toast(taskId ? `#${taskId} marcada como completada (${chosen}) en local.` : `«${type}» se completará con el estado ${chosen}.`);
@@ -1200,8 +1227,9 @@ peoplePopover.addEventListener('toggle',event=>{if(event.newState==='closed'){pe
 window.addEventListener('resize',()=>{if(peopleItem)positionPeople();});
 document.addEventListener('toggle',event=>{
   const element=event.target;
-  if (!element.matches?.('details[data-node]') || element.closest('#picker-tree')) return;
-  if(element.open)collapsed.delete(Number(element.dataset.node));else collapsed.add(Number(element.dataset.node));
+  if (!element.matches?.('details[data-node], details[data-project]') || element.closest('#picker-tree')) return;
+  const id=element.dataset.project ? `project:${element.dataset.project}` : Number(element.dataset.node);
+  if(element.open)collapsed.delete(id);else collapsed.add(id);
 },true);
 document.addEventListener('dragstart', event => {
   const card=event.target.closest('.task-card, [data-drag-task]'); if (!card || pending) return event.preventDefault();

@@ -142,10 +142,12 @@ const server = http.createServer(async (req, res) => {
           if (!workspace?.items.some(i => i.type === input.type)) throw fail('Elige un tipo de elemento de esta planificación.');
           if (workspace.mode === 'demo') return json(res, { states: DEMO_STATES });
           operation = { ...operation, message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.', updatedAt: Date.now() };
-          await azure.open(configFrom(workspace.config));
+          // Each project has its own workflow for the same type.
+          const config = workspace.sources?.find(s => s.id === input.sourceId)?.config ?? workspace.config;
+          await azure.open(configFrom(config));
           if (operation.cancelRequested) throw fail('Consulta cancelada.');
-          operation = { ...operation, message: `Consultando los estados de «${input.type}»…`, updatedAt: Date.now() };
-          return json(res, { states: await azure.workItemStates(workspace.config, input.type) });
+          operation = { ...operation, message: `Consultando los estados de «${input.type}» en ${config.project}…`, updatedAt: Date.now() };
+          return json(res, { states: await azure.workItemStates(config, input.type) });
         }
         if (path === '/api/maintenance') {
           const reportProgress = progress => {
@@ -336,7 +338,7 @@ const server = http.createServer(async (req, res) => {
           await planner.undoPlan(input.token);
         } else if (path === '/api/participants') {
           const data = structuredClone(store.data), workspace = data[data.mode];
-          setParticipants(workspace, input.assignments);
+          setParticipants(workspace, input.assignments, input.iterationId);
           await store.save(data); planner.review = null;
         } else if (path === '/api/complete-task' || path === '/api/completed-state') {
           const data = structuredClone(store.data), workspace = data[data.mode];

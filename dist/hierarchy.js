@@ -71,11 +71,16 @@ export function personPlanningStatus(workspace, member, iterationId) {
   const canConfirm=covered && meter.unknown===0;
   return {covered,canConfirm,signature,confirmed:canConfirm && workspace.confirmations?.[iterationId]?.[member]===signature};
 }
+export function hasPlanningCapacity(workspace, member, iterationId) {
+  const person=workspace.members.find(m=>memberKey(m)===member);
+  return !person || workspace.capacityHours?.[iterationId]?.[person.id] !== 0;
+}
 export function orderedPlanningMembers(workspace, iterationId) {
-  return workspace.members.map((member,index)=>({member,index,...personPlanningStatus(workspace,memberKey(member),iterationId)}))
+  return workspace.members.filter(member=>hasPlanningCapacity(workspace,memberKey(member),iterationId)).map((member,index)=>({member,index,...personPlanningStatus(workspace,memberKey(member),iterationId)}))
     .sort((a,b)=>Number(a.covered)-Number(b.covered) || a.index-b.index);
 }
-export function eligibleTasks(workspace, member) {
+export function eligibleTasks(workspace, member, iterationId) {
+  if(iterationId && !hasPlanningCapacity(workspace,member,iterationId)) return [];
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
   const tree=hierarchy(items);
   return items.filter(item=>isExecutable(item) && !isCompleted(item,workspace) && participantSources(item,workspace,tree).has(member));
@@ -92,7 +97,7 @@ export function selectionSummary(workspace, member, iterationId, selectedIds = [
   const person=workspace.members.find(m=>memberKey(m)===member);
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
   const planned=items.filter(i=>isExecutable(i) && i.assignedTo===member && i.iterationPath===iteration?.path);
-  const eligible=eligibleTasks(workspace,member);
+  const eligible=eligibleTasks(workspace,member,iterationId);
   const available=eligible.filter(i=>(!i.assignedTo || i.assignedTo===member) && !(i.assignedTo===member && i.iterationPath===iteration?.path));
   const wanted=new Set(selectedIds), selected=available.filter(i=>wanted.has(i.id));
   const hours=list=>list.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);

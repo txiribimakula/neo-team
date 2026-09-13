@@ -52,6 +52,8 @@ Los proyectos deben pertenecer a la misma organización. Se utiliza un equipo po
 
 La capacidad inicial toma una referencia por persona y nunca suma automáticamente sus capacidades de varios proyectos. Revísala en el paso **Capacidad**. La tabla **Capacidad por proyecto** reparte esa disponibilidad en proporción a las horas pendientes de las tareas asignadas: por ejemplo, 30 h de tareas en A y 10 h en B reparten una capacidad global de 32 h en 24 h para A y 8 h para B. Sin horas de tareas, la disponibilidad queda sin repartir. Las tareas sin estimar impiden enviar el reparto.
 
+Las personas con capacidad efectiva de **0 h** aparecen al final del paso Capacidad, resaltadas en rojo. Quedan fuera de Repartir ramas, Elegir tareas y del cálculo de capacidad por proyecto. Si ya tenían tareas asignadas, estas siguen visibles en un bloque «Fuera del reparto» para poder corregirlas, pero no consumen capacidad ni se distribuyen entre proyectos.
+
 La revisión muestra las horas diarias que se enviarán a cada proyecto y persona, considerando su calendario y sus días libres. Los días libres globales se incluyen como ausencias personales en cada proyecto. Azure recibe horas diarias con dos decimales, por lo que pueden aparecer pequeñas diferencias de redondeo. Si falla alguna tarea, se conserva el reparto de capacidad pendiente. Las capacidades confirmadas se guardan individualmente para poder reintentar los fallos sin repetir escrituras confirmadas.
 
 **Probar con un ejemplo** ofrece un espacio separado. Su sincronización es una simulación local y nunca contacta con Azure DevOps. Puedes entrar y salir conservando ambos borradores.

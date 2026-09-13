@@ -90,7 +90,7 @@ test('selection preview uses saved drafts and distinguishes zero from unknown ca
   let result=selectionSummary(ws,ana,'sprint-24',[1053]);
   assert.equal(result.plannedHours,38);assert.equal(result.capacity,null);assert.equal(result.freeHours,null);
   ws.capacityHours={'sprint-24':{ana:0}};
-  result=selectionSummary(ws,ana,'sprint-24',[1053]);assert.equal(result.capacity,0);assert.equal(result.freeHours,-44);
+  result=selectionSummary(ws,ana,'sprint-24',[1053]);assert.equal(result.capacity,0);assert.equal(result.freeHours,-38);assert.deepEqual(result.selected,[]);
   planTasks(ws,ana,[1053],'sprint-24');
   result=selectionSummary(ws,marcos,'sprint-24',[1053]);assert.deepEqual(result.invalidIds,[1053]);assert.equal(result.selectedHours,0);
 });

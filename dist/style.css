@@ -109,6 +109,8 @@
 .capacity-card h3{font-size:15px;margin:0 0 4px}
 .capacity-card>p{margin:0 0 12px;font-size:13px;line-height:1.5}
 .capacity-card.changed{border-color:#adc495;box-shadow:inset 3px 0 0 #82b74a}
+.capacity-card.zero-capacity,.member.zero-capacity{background:#fff1ef;border-color:#e5a39a;box-shadow:inset 4px 0 0 #c85043}
+.capacity-card.zero-capacity .capacity-profile-total,.capacity-card.zero-capacity .capacity-equation{color:#a63f35}
 .capacity-people{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px;align-items:start}
 .capacity-person{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .capacity-person strong{display:block;font-size:15px;line-height:1.4;overflow-wrap:anywhere}
@@ -234,3 +236,5 @@
 .maintenance-setup-type{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}.maintenance-setup-type .form-field{margin:0;flex:1;min-width:220px}
 .maintenance-states{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:8px;margin-bottom:16px}.maintenance-states .participant-option:has(input:checked){background:#fff1ef;border-color:#f0c6bf}
 .pill.maintenance-resolved{background:#fff4d7;color:#8a6a1f}.pill.maintenance-none{background:#eef1ec;color:var(--muted)}
+/* With several projects, the project is the top parent of each backlog. */
+.node-type.kind-project{background:#dfe8d8;color:#3d5a33}.project-branch>summary{background:#fff;border-color:#c9d6bf}.project-branch>summary .branch-title{font-size:16px;font-weight:700}

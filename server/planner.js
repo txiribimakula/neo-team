@@ -51,12 +51,13 @@ export function discardLocal(workspace,id) {
   else {delete workspace.drafts[id];delete workspace.conflicts[id];}
   for(const localId of ids) if(localId<0){delete workspace.participants?.[localId];delete workspace.participantExclusions?.[localId];}
 }
-export function setParticipants(workspace, assignments) {
+export function setParticipants(workspace, assignments, iterationId) {
   if (!workspace || !Array.isArray(assignments) || !assignments.length || assignments.length > 200) throw new Error('Reparto no válido.');
   const next = { ...workspace.participants };
   for (const assignment of assignments) {
     if (!workspace.items.some(i=>i.id === assignment.id)) throw new Error('El elemento no pertenece a este backlog.');
     if (!Array.isArray(assignment.members) || assignment.members.some(key=>!workspace.members.some(m=>identityKey(m) === key))) throw new Error('Elige integrantes de este equipo.');
+    if (iterationId && assignment.members.some(member=>!memberHasCapacity(workspace,member,iterationId))) throw new Error('Las personas con capacidad 0 quedan fuera del reparto de esta iteración.');
     const keys = [...new Set(assignment.members)];
     if (keys.length) next[assignment.id] = keys; else delete next[assignment.id];
   }
@@ -66,8 +67,9 @@ export function planTasks(workspace, member, ids, iterationId) {
   if (!workspace || !workspace.members.some(m=>identityKey(m) === member)) throw new Error('Elige una persona del equipo.');
   const iteration = workspace.iterations.find(i=>i.id === iterationId);
   if (!iteration) throw new Error('Elige una iteración del equipo.');
+  if (!memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
   if (!Array.isArray(ids) || !ids.length || ids.length > 200 || new Set(ids).size !== ids.length) throw new Error('Selecciona entre 1 y 200 tareas distintas.');
-  const eligible = new Map(eligibleTasks(workspace,member).map(i=>[i.id,i]));
+  const eligible = new Map(eligibleTasks(planningWorkspace(workspace),member,iterationId).map(i=>[i.id,i]));
   for (const id of ids) {
     const item = eligible.get(id);
     if (!item || !isExecutable(item)) throw new Error(`La tarea #${id} no forma parte del trabajo de esta persona.`);
@@ -100,6 +102,7 @@ export function toggleParticipation(workspace,id,member,selected,iterationId) {
   if (!workspace || !workspace.items.some(i=>i.id===id) || !workspace.members.some(m=>identityKey(m)===member) || typeof selected!=='boolean') throw new Error('Reparto no válido.');
   const iteration=workspace.iterations.find(i=>i.id===iterationId);
   if (iterationId && !iteration) throw new Error('Iteración no válida.');
+  if(selected && iterationId && !memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
   workspace.participants ??= {}; workspace.participantExclusions ??= {};
   if(selected) {
     workspace.participants[id]=[...new Set([...(workspace.participants[id] || []),member])];
@@ -120,6 +123,7 @@ export function stageChanges(workspace, id, changes) {
   if (workspace.creationAttempts?.[id]) throw new Error('Recupera primero el resultado de la creación enviada antes de editarla.');
   if (item.contextOnly) throw new Error('Este padre se ha importado solo como contexto.');
   if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Object.keys(changes).length) throw new Error('Indica algún cambio.');
+  const current = { ...item, ...workspace.drafts[id] };
   const draft = { ...workspace.drafts[id] };
   for (const [field, value] of Object.entries(changes)) {
     if (!Object.hasOwn(FIELD_LABELS, field)) throw new Error('Campo no editable.');
@@ -133,6 +137,11 @@ export function stageChanges(workspace, id, changes) {
     // The only state change is closing a task or bug with its type's completed state.
     if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !completedState(item,workspace) || value !== completedState(item,workspace))))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
     if (same(item[field], value)) delete draft[field]; else draft[field] = value;
+  }
+  if (['assignedTo','iterationPath'].some(field=>Object.hasOwn(changes,field) && !same(current[field],changes[field]))) {
+    const assignee=draft.assignedTo ?? item.assignedTo;
+    const iteration=workspace.iterations.find(i=>i.path===(draft.iterationPath ?? item.iterationPath));
+    if(assignee && iteration && !memberHasCapacity(workspace,assignee,iteration.id)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
   }
   if(workspace.sources) workspace.allocationIterations=[...new Set([...(workspace.allocationIterations ?? []),...workspace.iterations.filter(i=>i.path===item.iterationPath || i.path===draft.iterationPath).map(i=>i.id)])];
   if (item.localOnly) draft.title=changes.title ?? draft.title ?? item.title;
@@ -175,6 +184,12 @@ export function workingCapacity(iteration, capacity, memberId, workingDays = [1,
     if (days.includes(date.getUTCDay()) && !off.some(r => key >= r.start.slice(0,10) && key <= r.end.slice(0,10))) count++;
   }
   return Math.round(count * (record.activities ?? []).reduce((sum, a) => sum + (a.capacityPerDay ?? 0), 0) * 100) / 100;
+}
+function memberHasCapacity(workspace, member, iterationId) {
+  const person=workspace.members.find(m=>identityKey(m)===member);
+  const iteration=workspace.iterations.find(i=>i.id===iterationId);
+  if(!person || !iteration) return false;
+  return workingCapacity(iteration,effectiveCapacity(workspace,iterationId),person.id,workspace.settings.workingDays) !== 0;
 }
 
 // Capacity is staged like a work item: only what differs from the imported copy
@@ -316,9 +331,9 @@ export function projectCapacityPlans(workspace) {
   const plans=[];
   for (const iteration of workspace.iterations.filter(i=>(workspace.allocationIterations ?? []).includes(i.id) || effectiveItems(workspace).some(t=>isExecutable(t) && t.assignedTo && t.iterationPath===i.path))) for (const member of workspace.members) {
     const capacity=effectiveCapacity(workspace,iteration.id), global=capacityEntry(capacity,member.id);
-    const tasks=effectiveItems(workspace).filter(i=>isExecutable(i) && !i.contextOnly && i.assignedTo===identityKey(member) && i.iterationPath===iteration.path);
-    const total=tasks.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);
     const available=workingCapacity(iteration,capacity,member.id,workspace.settings.workingDays) ?? 0;
+    const tasks=available===0 ? [] : effectiveItems(workspace).filter(i=>isExecutable(i) && !i.contextOnly && i.assignedTo===identityKey(member) && i.iterationPath===iteration.path);
+    const total=tasks.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);
     const destinations=workspace.sources.filter(s=>iteration.sourceIterations[s.id] && s.members.some(m=>m.id===member.id));
     for (const source of destinations) {
       const remoteIterationId=iteration.sourceIterations[source.id], remoteIteration=source.iterations.find(i=>i.id===remoteIterationId);
@@ -331,7 +346,7 @@ export function projectCapacityPlans(workspace) {
       const days=workingCapacity(remoteIteration,unit,member.id,source.settings.workingDays) ?? 0;
       const globalDaily=global.activities.reduce((sum,a)=>sum+a.capacityPerDay,0);
       const entry={daysOff,activities:global.activities.map(a=>({name:a.name,capacityPerDay:Math.round((days && globalDaily ? available*ratio/days*a.capacityPerDay/globalDaily : 0)*100)/100}))};
-      plans.push({iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && (!days || !available)});
+      plans.push({iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && !days});
     }
   }
   return plans;
@@ -343,6 +358,7 @@ export function planningWorkspace(workspace) {
 }
 export function confirmPerson(workspace, member, iterationId) {
   if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
+  if (!memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
   const status=personPlanningStatus(planningWorkspace(workspace),member,iterationId);
   if (!status.canConfirm) throw new Error('Completa las horas y estima las tareas antes de confirmar.');
   workspace.confirmations ??= {};
