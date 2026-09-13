@@ -38,6 +38,12 @@ function isPastIteration(iteration, today) {
   return /^\d{4}-\d{2}-\d{2}$/.test(finish) && Number.isFinite(Date.parse(finish)) && finish < today;
 }
 
+// Workflow states with a normalized category, such as 'inprogress' or 'completed'.
+function workflowStates(states) {
+  const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return states.filter(s => s && normalize(s.name)).map(s => ({ name: s.name, category: normalize(s.category || s.stateCategory).replace(/\s/g, '') }));
+}
+
 export class AzureGateway {
   async open(config) {
     const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
@@ -98,6 +104,11 @@ export class AzureGateway {
     // accommodate custom fields and differences between Agile/Scrum/Basic.
     for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
     return result;
+  }
+  async completedState(config, type) {
+    const states = await this.call('neo_work_item_states', { project: config.project, type });
+    if (!Array.isArray(states)) throw new Error(`No se pudieron consultar los estados de «${type}».`);
+    return workflowStates(states).find(s => s.category === 'completed')?.name ?? null;
   }
   async capacity(config, iterationId) {
     const context = { project: config.project, team: config.team };
@@ -175,7 +186,7 @@ export class AzureGateway {
       if (!stateCategories.has(typeKey)) {
         const states = await this.call('neo_work_item_states', { project, type });
         if (!Array.isArray(states)) throw new Error(`Estados de «${type}» no válidos.`);
-        stateCategories.set(typeKey, states.filter(s => s && stateKey(s.name)).map(s => ({ name: s.name, category: stateKey(s.category || s.stateCategory).replace(/\s/g, '') })));
+        stateCategories.set(typeKey, workflowStates(states));
       }
       return stateCategories.get(typeKey);
     };

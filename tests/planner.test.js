@@ -189,3 +189,14 @@ test('reviewing the previous iteration carries tasks over or closes them with th
   await f.stage(1032,{state:'Closed'});await f.stage(1032,{state:'New'});
   assert.equal(f.workspace().drafts[1032],undefined,'undoing restores the imported state');
 });
+
+test('completing a task in a workspace imported without completed states looks the state up once in Azure',async t=>{
+  const f=await fixture(t),data=structuredClone(f.store.data);delete data.azure.completedStates;await f.store.save(data);
+  const lookups=[];f.azure.completedState=async(_config,type)=>{lookups.push(type);return 'Done';};
+  await f.planner.completeTask(1031);await f.planner.completeTask(1033);
+  assert.deepEqual(lookups,['Task'],'the state is kept for the next tasks of the same type');
+  assert.equal(f.workspace().drafts[1031].state,'Done');assert.deepEqual(f.workspace().completedStates,{Task:'Done'});
+  f.azure.completedState=async()=>null;
+  await assert.rejects(()=>f.planner.completeTask(1032),/Completed/);assert.equal(f.workspace().drafts[1032],undefined);
+  await assert.rejects(()=>f.planner.completeTask(1001),/tareas y bugs/);
+});

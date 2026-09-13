@@ -18,6 +18,13 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   await gateway.update({project:'Project'},42,8,{state:'Closed'});
   assert.deepEqual(call.args.updates,[{op:'test',path:'/rev',value:8},{op:'add',path:'/fields/System.State',value:'Closed'}]);
 });
+test('completed state lookup reads custom workflow categories',async()=>{
+  const gateway=new AzureGateway();
+  gateway.call=async(name,args)=>{assert.deepEqual([name,args],['neo_work_item_states',{project:'Project',type:'Task'}]);return [{name:'Active',category:'InProgress'},{name:'Entregado',stateCategory:' Completed '}];};
+  assert.equal(await gateway.completedState({project:'Project'},'Task'),'Entregado');
+  gateway.call=async()=>[{name:'Active',category:'InProgress'}];
+  assert.equal(await gateway.completedState({project:'Project'},'Task'),null);
+});
 test('import uses MCP for complete members, hierarchy, capacities and team scope',async()=>{
   const gateway=new AzureGateway(),calls=[],progress=[];gateway.open=async()=>{};
   gateway.call=async(name,args)=>{

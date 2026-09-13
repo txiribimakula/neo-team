@@ -347,6 +347,23 @@ export class Planner {
     }
     await this.store.save(data); this.lastBatch=null; this.review=null;
   }
+  // Closing needs the completed state of the type. A workspace imported without
+  // it looks it up once in Azure DevOps and keeps it for the rest of the tasks.
+  async completeTask(id) {
+    const workspace = this.workspace();
+    const item = workspace && effectiveItems(workspace).find(i => i.id === id);
+    if (!item || !isExecutable(item)) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
+    let completed = workspace.completedStates?.[item.type];
+    if (!completed && workspace.mode === 'azure') {
+      await this.azure.open(workspace.config);
+      completed = await this.azure.completedState(workspace.config, item.type);
+    }
+    if (!completed) throw new Error(`Azure DevOps no define un estado de categoría «Completed» para «${item.type}».`);
+    const data = structuredClone(this.store.data), next = data[data.mode];
+    next.completedStates = { ...next.completedStates, [item.type]: completed };
+    stageChanges(next, id, { state: completed });
+    await this.store.save(data); this.review = null;
+  }
   async prepareReview() {
     const workspace = this.workspace();
     if (!workspace) throw new Error('Importa una planificación primero.');

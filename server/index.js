@@ -91,7 +91,7 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/sync': 'Sincronizando cambios' };
+      const labels = { '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/complete-task': 'Consultando el estado completado', '/api/sync': 'Sincronizando cambios' };
       operation = { id: path.startsWith('/api/security-') && typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit'].includes(path) };
       try {
         if (['/api/security-groups', '/api/security-audit'].includes(path)) {
@@ -213,6 +213,8 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data), workspace = data[data.mode];
           setParticipants(workspace, input.assignments);
           await store.save(data); planner.review = null;
+        } else if (path === '/api/complete-task') {
+          await planner.completeTask(input.id);
         } else if (path === '/api/stage') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('Importa datos primero.');

@@ -524,24 +524,24 @@ function iterationView() {
 }
 // Step 2: each open task of the previous iteration moves to the one being
 // planned or is closed. Both decisions are local drafts until the review.
-const previousOrder={open:0,moved:1,elsewhere:2,completed:3};
+const previousOrder={open:0,moved:1,backlog:2,elsewhere:3,completed:4};
 function previousTasks(iteration=selected()) {
   const ws=state.workspace, previous=iteration ? previousIteration(ws.iterations,iteration.id) : null;
   if (!previous) return {previous,tasks:[]};
   const base=new Map(ws.items.map(i=>[i.id,i]));
   const tasks=ws.effectiveItems.filter(i=>isExecutable(i) && (i.iterationPath===previous.path || base.get(i.id)?.iterationPath===previous.path)).map(item=>{
     const done=ws.completedStates?.[item.type];
-    const status=done && item.state===done ? 'completed' : item.iterationPath===iteration.path ? 'moved' : item.iterationPath!==previous.path ? 'elsewhere' : 'open';
+    const status=done && item.state===done ? 'completed' : item.iterationPath===iteration.path ? 'moved' : item.iterationPath===ws.settings.backlogIteration.path ? 'backlog' : item.iterationPath!==previous.path ? 'elsewhere' : 'open';
     return {item,base:base.get(item.id),status};
   });
   return {previous,tasks:tasks.sort((a,b)=>previousOrder[a.status]-previousOrder[b.status] || (a.item.priority ?? 5)-(b.item.priority ?? 5) || a.item.id-b.item.id)};
 }
 function previousTaskRow({item,base,status},iteration) {
-  const ws=state.workspace, effort=item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar';
+  const effort=item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar';
   const decided=item.iterationPath!==base.iterationPath || item.state!==base.state;
-  const outcome={completed:'✓ Completada',moved:`→ Pasa a ${escape(iteration.name)}`,elsewhere:`Movida a ${escape(iterationName(item.iterationPath))}`}[status];
+  const outcome={completed:'✓ Completada',backlog:'↩ En el backlog, sin iteración',moved:`→ Pasa a ${escape(iteration.name)}`,elsewhere:`Movida a ${escape(iterationName(item.iterationPath))}`}[status];
   const actions=status==='open'
-    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" ${ws.completedStates?.[item.type] ? '' : 'disabled title="Azure DevOps no indicó el estado completado de este tipo"'}>✓ Marcar completada</button>`
+    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" title="Marcar como completada">✓ Completada</button><button class="button small" data-action="to-backlog" data-task="${item.id}" title="Mandar al backlog: quita la iteración y conserva el responsable">↩ Backlog</button>`
     : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button small subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
   return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>#${item.id}</span><span class="pill">${escape(base.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
 }
@@ -562,7 +562,7 @@ function previousView() {
     {name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
   ].filter(group=>group.tasks.length);
   const idle=ws.members.filter(member=>!owned(member).length);
-  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)} o márcalo como completado.</p></div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
+  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)}, márcalo como completado o mándalo al backlog.</p></div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
     ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
     ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
     <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes continuar y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
@@ -570,10 +570,12 @@ function previousView() {
 async function decidePrevious(id, decision) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
   if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
-  const changes=decision==='carry' ? {iterationPath:iteration.path} : decision==='complete' ? {state:ws.completedStates?.[item.type]} : {iterationPath:base.iterationPath,state:base.state};
-  await request('/api/stage',{edits:[{id,changes}]});review=null;render();
+  // Completing goes through the server, which can look up the completed state in Azure DevOps.
+  if (decision==='complete') await request('/api/complete-task',{id});
+  else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
+  review=null;render();
   document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
-  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
+  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
 function editParticipants(id,anchor) {
   if(peopleItem===id && peoplePopover.matches(':popover-open')) {peoplePopover.hidePopover();return;}
@@ -920,6 +922,7 @@ const actions = {
   'choose-iteration': el=>{selectedIteration=el.dataset.iteration;tab='previous';render();window.scrollTo({top:0});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
+  'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'choose-person': el=>choosePerson(el.dataset.member),
   'planning-view':el=>{planningMode=el.dataset.view;focusedMember=planningMode==='team' ? '' : pickerMember;query='';render();$(`[data-action="planning-view"][data-view="${planningMode}"]`)?.focus({preventScroll:true});},
