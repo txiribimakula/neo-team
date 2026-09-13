@@ -34,7 +34,7 @@ export async function auditGroup(call, catalog, descriptor, progress = () => {})
   async function attempt(name, fn) {
     emit(`Consultando ${name}…`);
     try { const result = await fn(); report.coverage.push({ name, status: 'ok', count: Array.isArray(result) ? result.length : undefined }); return result; }
-    catch (error) { counts.warnings++; report.coverage.push({ name, status: 'error', message: error.message }); return null; }
+    catch (error) { if (error.code === 'AZURE_AUTHENTICATION_REQUIRED' || /\bAzure HTTP 401\b/.test(error.message)) throw error; counts.warnings++; report.coverage.push({ name, status: 'error', message: error.message }); return null; }
   }
   emit(`Resolviendo el grupo ${group.name} y sus herencias…`);
   const root = (await call({ action: 'identity', descriptor }))[0];

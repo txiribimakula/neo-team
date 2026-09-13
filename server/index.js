@@ -101,6 +101,7 @@ const server = http.createServer(async (req, res) => {
             operation = { ...operation, ...progress, updatedAt: Date.now() };
           };
           reportProgress({ message: 'Conectando a Azure DevOps. Completa el acceso de Microsoft si se solicita.' });
+          if (input.reauthenticate === true) await azure.close();
           await azure.open(configFrom(store.data.config, false));
           reportProgress({ message: 'Consultando la seguridad del proyecto…' });
           const call = args => azure.call('neo_security_read', args);

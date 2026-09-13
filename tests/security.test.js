@@ -77,3 +77,53 @@ test('security UI escapes group, resource, token and coverage text', async () =>
   assert.ok(html.includes('&lt;img')); assert.ok(!html.includes('<img src=x'));
   assert.ok(html.includes('&lt;iframe&gt;')); assert.ok(html.includes('Exportar informe'));
 });
+
+test('401 renews the token once and retries the same read without leaking credentials', async () => {
+  const tokens = [], requests = [];
+  const reader = securityReader('organization', async options => {
+    tokens.push(options?.forceRefresh === true);
+    return options?.forceRefresh ? 'fresh-token' : 'cached-token';
+  }, async (url, options) => {
+    requests.push({ url: url.href, authorization: options.headers.Authorization });
+    return requests.length === 1 ? new Response('private server detail', { status: 401 }) : new Response(JSON.stringify({ value: [] }));
+  });
+  assert.deepEqual(await reader({ action: 'acl', namespaceId: namespace.namespaceId, descriptors: [root.descriptor] }), []);
+  assert.deepEqual(tokens, [false, true]);
+  assert.equal(requests[0].url, requests[1].url);
+  assert.equal(requests[1].authorization, 'Bearer fresh-token');
+});
+test('persistent 401 is bounded, identifies its source and stops the audit', async () => {
+  let requests = 0, refreshes = 0;
+  const reader = securityReader('organization', async options => { if (options?.forceRefresh) refreshes++; return 'sensitive-token'; }, async () => {
+    requests++; return new Response('sensitive body', { status: 401 });
+  });
+  await assert.rejects(reader({ action: 'identity', descriptor: 'group' }), error => {
+    assert.equal(error.code, 'AZURE_AUTHENTICATION_REQUIRED');
+    assert.match(error.message, /vssps.dev.azure.com.*identities/);
+    assert.ok(!error.message.includes('sensitive')); return true;
+  });
+  assert.equal(requests, 2); assert.equal(refreshes, 1);
+  let resources = 0;
+  await assert.rejects(auditGroup(async args => {
+    if (args.action === 'resources') { resources++; throw new Error('Azure HTTP 401 en dev.azure.com'); }
+    return mockCall(args);
+  }, catalog, 'graph-root'), /401/);
+  assert.equal(resources, 1, 'does not continue through every resource and trigger repeated logins');
+});
+test('403 is a coverage failure and never triggers token renewal', async () => {
+  const options = [];
+  const reader = securityReader('organization', async option => { options.push(option); return 'token'; }, async () => new Response('', { status: 403 }));
+  await assert.rejects(reader({ action: 'acl', namespaceId: namespace.namespaceId, descriptors: [root.descriptor] }), /403/);
+  assert.deepEqual(options, [undefined]);
+});
+test('failed login during renewal is sanitized and remains recoverable as an authentication error', async () => {
+  const reader = securityReader('organization', async options => {
+    if (options?.forceRefresh) throw new Error('private authentication details');
+    return 'token';
+  }, async () => new Response('', { status: 401 }));
+  await assert.rejects(reader({ action: 'identity', descriptor: 'group' }), e => {
+    assert.equal(e.code, 'AZURE_AUTHENTICATION_REQUIRED');
+    assert.match(e.message, /no se pudo renovar/);
+    assert.ok(!e.message.includes('private')); return true;
+  });
+});

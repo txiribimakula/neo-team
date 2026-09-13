@@ -799,11 +799,18 @@ async function loadSecurity() {
   if (!response.ok) throw new Error('No se pudo recuperar el informe de permisos.');
   securitySnapshot = (await response.json()).security;
 }
-async function securityQuery(descriptor) {
+async function securityQuery(descriptor, reauthenticate = false) {
   showModal(descriptor ? 'Analizar permisos' : 'Cargar grupos de permisos', 'Consulta de seguridad de Azure DevOps.', '<div id="connection-progress"></div>');
-  const result = await importWithProgress($('#connection-progress'), null, { path: descriptor ? '/api/security-audit' : '/api/security-groups', input: { descriptor } });
-  securitySnapshot = result.security;
-  resetPermissionFilters(); tab = 'permissions'; modal.close(); render();
+  try {
+    const result = await importWithProgress($('#connection-progress'), null, { path: descriptor ? '/api/security-audit' : '/api/security-groups', input: { descriptor, reauthenticate } });
+    securitySnapshot = result.security;
+    resetPermissionFilters(); tab = 'permissions'; modal.close(); render();
+  } catch (error) {
+    if (/\bAzure HTTP 401\b/.test(error.message)) {
+      $('.modal-footer').innerHTML = `<button class="button" data-action="connect">Revisar conexión</button><button class="button primary" data-action="security-reconnect" data-descriptor="${escape(descriptor || '')}">Reconectar y reintentar</button>`;
+    }
+    throw error;
+  }
 }
 function exportSecurity() {
   const blob = new Blob([JSON.stringify(securitySnapshot, null, 2)], { type: 'application/json' });
@@ -813,6 +820,7 @@ function exportSecurity() {
 const actions = {
   permissions: async () => { await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
   'security-back': () => { tab = 'capacity'; render(); },
+  'security-reconnect': el => securityQuery(el.dataset.descriptor || undefined, true),
   'security-refresh': () => securityQuery(),
   'security-group': el => securityQuery(el.dataset.descriptor),
   'security-export': exportSecurity,

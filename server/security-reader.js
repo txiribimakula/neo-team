@@ -1,29 +1,42 @@
 // Read-only Azure REST adapter, used exclusively inside the MCP process.
 const enc = encodeURIComponent;
 export function securityReader(organization, tokenProvider, fetcher = fetch) {
-  async function get(host, path, query = {}) {
-    const url = new URL(`https://${host}/${enc(organization)}/${path}`);
-    for (const [key, value] of Object.entries({ 'api-version': '7.1', ...query })) if (value !== undefined) url.searchParams.set(key, value);
-    const response = await fetcher(url, { method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${await tokenProvider()}`, Accept: 'application/json' }, signal: AbortSignal.timeout(60000) });
-    if (!response.ok) throw new Error(`Azure HTTP ${response.status}: ${response.status === 403 ? 'tu cuenta no puede consultar esta seguridad' : response.status === 401 ? 'la sesión no permite acceder a estos datos' : 'no se pudo consultar esta fuente'}`);
-    return { data: await response.json(), next: response.headers.get('x-ms-continuationtoken') };
-  }
-  async function list(host, path, query = {}) {
-    const values = [], seen = new Set();
-    let next;
-    do {
-      const page = await get(host, path, { ...query, continuationToken: next });
-      if (!Array.isArray(page.data.value)) throw new Error('Azure devolvió una lista de seguridad no válida.');
-      values.push(...page.data.value);
-      next = page.next;
-      if (next && seen.has(next)) throw new Error('Azure repitió la página; la consulta no está completa.');
-      seen.add(next);
-    } while (next);
-    return values;
-  }
-  const dev = 'dev.azure.com', graph = 'vssps.dev.azure.com';
-  const cleanIdentity = i => ({ id: i.id, descriptor: i.descriptor, subjectDescriptor: i.subjectDescriptor, name: i.providerDisplayName || i.customDisplayName || i.descriptor, isContainer: i.isContainer, members: i.members || [], memberOf: i.memberOf || [] });
   return async ({ action, project, descriptor, namespaceId, descriptors, kind, resourceId }) => {
+    let refreshed = false;
+    async function get(host, path, query = {}) {
+      const url = new URL(`https://${host}/${enc(organization)}/${path}`);
+      for (const [key, value] of Object.entries({ 'api-version': '7.1', ...query })) if (value !== undefined) url.searchParams.set(key, value);
+      const source = `${host} · ${path.split('_apis/').at(-1).split('/').slice(0, 2).join('/')}`;
+      const send = async token => fetcher(url, { method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-TFS-FedAuthRedirect': 'Suppress' }, signal: AbortSignal.timeout(60000) });
+      let response = await send(await tokenProvider());
+      if (response.status === 401 && !refreshed) {
+        refreshed = true;
+        await response.body?.cancel();
+        let token;
+        try { token = await tokenProvider({ forceRefresh: true }); }
+        catch { throw Object.assign(new Error(`Azure HTTP 401 en ${source}: no se pudo renovar la sesión. Reconecta o revisa el método de acceso en Configuración.`), { code: 'AZURE_AUTHENTICATION_REQUIRED' }); }
+        response = await send(token);
+      }
+      if (!response.ok) {
+        throw Object.assign(new Error(`Azure HTTP ${response.status} en ${source}: ${response.status === 403 ? 'tu cuenta no puede consultar esta seguridad' : response.status === 401 ? 'Azure sigue rechazando la autenticación tras intentar renovar la sesión. Reconecta con una cuenta con acceso a la organización; si usas Azure CLI, renueva su inicio de sesión o elige Microsoft en Configuración.' : 'no se pudo consultar esta fuente'}`), { code: response.status === 401 ? 'AZURE_AUTHENTICATION_REQUIRED' : 'AZURE_SECURITY_ERROR' });
+      }
+      return { data: await response.json(), next: response.headers.get('x-ms-continuationtoken') };
+    }
+    async function list(host, path, query = {}) {
+      const values = [], seen = new Set();
+      let next;
+      do {
+        const page = await get(host, path, { ...query, continuationToken: next });
+        if (!Array.isArray(page.data.value)) throw new Error('Azure devolvió una lista de seguridad no válida.');
+        values.push(...page.data.value);
+        next = page.next;
+        if (next && seen.has(next)) throw new Error('Azure repitió la página; la consulta no está completa.');
+        seen.add(next);
+      } while (next);
+      return values;
+    }
+    const dev = 'dev.azure.com', graph = 'vssps.dev.azure.com';
+    const cleanIdentity = i => ({ id: i.id, descriptor: i.descriptor, subjectDescriptor: i.subjectDescriptor, name: i.providerDisplayName || i.customDisplayName || i.descriptor, isContainer: i.isContainer, members: i.members || [], memberOf: i.memberOf || [] });
     const p = enc(project);
     if (action === 'catalog') {
       const { data: info } = await get(dev, `_apis/projects/${p}`);
@@ -36,7 +49,7 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
         const ids = new Set(groups.map(g => g.descriptor));
         for (const g of all) if (!ids.has(g.descriptor)) groups.push({ descriptor: g.descriptor, name: g.displayName, principalName: g.principalName, description: g.description, scope: 'other' });
         coverage.push({ name: 'Otros grupos visibles de la organización', status: 'ok' });
-      } catch (e) { coverage.push({ name: 'Otros grupos de la organización', status: 'error', message: e.message }); }
+      } catch (e) { if (e.code === 'AZURE_AUTHENTICATION_REQUIRED') throw e; coverage.push({ name: 'Otros grupos de la organización', status: 'error', message: e.message }); }
       return { project: { id: info.id, name: info.name, visibility: info.visibility }, groups, namespaces: await list(dev, '_apis/securitynamespaces'), coverage, fetchedAt: new Date().toISOString() };
     }
     if (action === 'identity') return (await list(graph, '_apis/identities', { ...(descriptor ? { subjectDescriptors: descriptor } : { descriptors: descriptors.join(',') }), queryMembership: 'Direct' })).map(cleanIdentity);

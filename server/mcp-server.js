@@ -1,3 +1,4 @@
+import { createCachedTokenProvider } from './token-cache.js';
 // Local extension of Microsoft's pinned MCP tool implementations. No Azure calls
 // are made by the HTTP application: all data access goes through this MCP server.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -15,21 +16,7 @@ import { wrapExternalToolResponse } from '@azure-devops/mcp/dist/shared/content-
 const [organization, authentication = 'interactive', tenant] = process.argv.slice(2);
 if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization ?? '')) throw new Error('Organización inválida');
 if (!['interactive', 'azcli'].includes(authentication)) throw new Error('Autenticación inválida');
-let authenticator, cachedToken, refreshAt = 0;
-const tokenProvider = async () => {
-  if (cachedToken && Date.now() < refreshAt) return cachedToken;
-  authenticator ??= createAuthenticator(authentication, tenant || await getOrgTenant(organization));
-  cachedToken = await authenticator();
-  // The official browser fallback does not always retain an account for silent
-  // auth. Keep its access token only in this process until shortly before expiry.
-  let expires = Date.now() + 40 * 60000;
-  try {
-    const payload = JSON.parse(Buffer.from(cachedToken.split('.')[1], 'base64url').toString());
-    if (Number.isFinite(payload.exp)) expires = Math.min(expires, payload.exp * 1000 - 120000);
-  } catch { /* An opaque token is retained for at most 40 minutes. */ }
-  refreshAt = expires;
-  return cachedToken;
-};
+const tokenProvider = createCachedTokenProvider(async () => createAuthenticator(authentication, tenant || await getOrgTenant(organization)));
 const connectionProvider = async () => new WebApi(`https://dev.azure.com/${organization}`, getBearerHandler(await tokenProvider()));
 const server = new McpServer({ name: 'Neo Team · Azure DevOps MCP', version: '0.1.0' });
 // Keep the official untrusted-content boundary on every registered tool.
