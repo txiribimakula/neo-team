@@ -10,12 +10,13 @@ test('security HTTP preserves reports on cancellation, supports recovery and iso
   const directory = await mkdtemp(join(tmpdir(), 'neo-security-http-'));
   const patch = `
     import { AzureGateway } from ${JSON.stringify(new URL('../server/azure.js', import.meta.url).href)};
-    AzureGateway.prototype.open = async function() {};
+    AzureGateway.prototype.open = async function(config) { this.auth = config.authentication; };
     AzureGateway.prototype.close = async function() {};
     AzureGateway.prototype.call = async function(name, args) {
+      if (name === 'neo_security_login') { if (this.auth !== 'interactive') throw new Error('Browser recovery used CLI'); this.browserLogin = true; return { authenticated:true }; }
       if (name !== 'neo_security_read') throw new Error('Unexpected Azure call');
       await new Promise(resolve => setTimeout(resolve, 30));
-      if (args.action === 'catalog') return { project: { id:'project', name:'Project' }, groups:[{descriptor:'group',name:'Group'}], namespaces:[{namespaceId:'namespace',name:'Project',actions:[{bit:1,name:'Read'}]}], coverage:[] };
+      if (args.action === 'catalog') return { browserLogin: !!this.browserLogin, project: { id:'project', name:'Project' }, groups:[{descriptor:'group',name:'Group'}], namespaces:[{namespaceId:'namespace',name:'Project',actions:[{bit:1,name:'Read'}]}], coverage:[] };
       if (args.action === 'identity') return [{id:'group-id',descriptor:'legacy-group',name:'Group',members:[],memberOf:[]}];
       if (args.action === 'resources') return [];
       if (args.action === 'acl') return [{token:'project',acesDictionary:{'legacy-group':{allow:1,deny:0}}}];
@@ -45,7 +46,7 @@ test('security HTTP preserves reports on cancellation, supports recovery and iso
   };
   assert.equal((await fetch(url + '/api/security')).status, 403);
   assert.equal((await post('/api/security-groups')).status, 400);
-  state = await (await post('/api/config', { config: { organization: 'example', project: 'Project', team: 'Team' } })).json();
+  state = await (await post('/api/config', { config: { organization: 'example', project: 'Project', team: 'Team', authentication: 'azcli' } })).json();
   const version = state.version;
   assert.equal((await post('/api/security-groups', { operationId: 'groups' })).status, 200);
   assert.equal((await snapshot()).catalog.groups.length, 1);
@@ -69,6 +70,10 @@ test('security HTTP preserves reports on cancellation, supports recovery and iso
   assert.deepEqual(await snapshot(), saved, 'failed audits preserve the report');
   state = await (await fetch(url + '/api/state')).json();
   assert.equal(state.busy, false); assert.equal(state.version, version, 'security reads never alter planning data');
+  assert.equal((await post('/api/security-groups', { operationId:'browser-login', reauthenticate:true })).status, 200);
+  assert.equal((await snapshot()).catalog.browserLogin, true, 'reconnect explicitly invokes browser login even when configured to use CLI');
+  state = await (await fetch(url + '/api/state')).json();
+  assert.equal(state.config.authentication, 'azcli', 'a browser retry does not silently rewrite the saved connection');
   state = await (await post('/api/config', { config: { organization: 'example', project: 'Other', team: 'Team' } })).json();
   assert.equal(await snapshot(), null, 'a different project cannot display the previous security report');
 });

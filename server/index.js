@@ -100,11 +100,15 @@ const server = http.createServer(async (req, res) => {
             if (operation.cancelRequested) throw fail('Consulta cancelada.');
             operation = { ...operation, ...progress, updatedAt: Date.now() };
           };
-          reportProgress({ message: 'Conectando a Azure DevOps. Completa el acceso de Microsoft si se solicita.' });
-          if (input.reauthenticate === true) await azure.close();
-          await azure.open(configFrom(store.data.config, false));
+          const securityConfig = configFrom(store.data.config, false);
+          const browserLogin = input.reauthenticate === true;
+          reportProgress({ message: browserLogin ? 'Abriendo el navegador de Microsoft para elegir cuenta…' : securityConfig.authentication === 'azcli' ? 'Usando la sesión existente de Azure CLI. Este método no abre una ventana de autenticación.' : 'Usando el acceso de Microsoft. La sesión del sistema puede reutilizarse sin abrir una ventana.' });
+          if (browserLogin) await azure.close();
+          await azure.open(browserLogin ? { ...securityConfig, authentication: 'interactive' } : securityConfig);
+          if (operation.cancelRequested) throw fail('Consulta cancelada.');
+          if (browserLogin) await azure.call('neo_security_login', {});
           reportProgress({ message: 'Consultando la seguridad del proyecto…' });
-          const call = args => azure.call('neo_security_read', args);
+          const call = args => azure.call('neo_security_read', { project: securityConfig.project, ...args });
           if (path === '/api/security-groups') {
             const catalog = await call({ action: 'catalog', project: store.data.config.project });
             reportProgress({ message: `${catalog.groups.length} grupos encontrados.` });

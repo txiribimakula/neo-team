@@ -48,7 +48,7 @@ test('real bundled MCP initializes and advertises the required schemas without a
   const gateway=new AzureGateway();t.after(()=>gateway.close());
   await gateway.open({organization:'example',authentication:'interactive'});
   const {tools}=await gateway.client.listTools();
-  for(const name of ['neo_team_members','neo_team_days_off','neo_work_item_states','neo_security_read','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
+  for(const name of ['neo_team_members','neo_team_days_off','neo_work_item_states','neo_security_read','neo_security_login','wit_backlog','work'])assert.ok(tools.some(tool=>tool.name===name));
   const write=tools.find(tool=>tool.name==='wit_work_item_write');
   const schema=JSON.stringify(write.inputSchema);assert.match(schema,/test/);assert.match(schema,/number/);assert.match(schema,/updates/);
 });

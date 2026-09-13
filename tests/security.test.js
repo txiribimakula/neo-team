@@ -127,3 +127,18 @@ test('failed login during renewal is sanitized and remains recoverable as an aut
     assert.ok(!e.message.includes('private')); return true;
   });
 });
+test('security rejection is contrasted with a project read using exactly the same renewed credential', async () => {
+  const requests = [];
+  const reader = securityReader('organization', async options => options?.forceRefresh ? 'fresh' : 'original', async (url, options) => {
+    requests.push({ path: url.pathname, token: options.headers.Authorization });
+    return url.pathname.includes('/projects/') ? new Response(JSON.stringify({ id: projectId, name: 'Project' })) : new Response('', { status: 401 });
+  });
+  await assert.rejects(reader({ action: 'identity', descriptor: 'group', project: 'Project' }), e => {
+    assert.match(e.message, /SÍ puede leer el proyecto/);
+    assert.match(e.message, /vssps.dev.azure.com/);
+    assert.ok(!e.message.includes('fresh')); return true;
+  });
+  assert.equal(requests.length, 3);
+  assert.equal(requests[1].token, requests[2].token);
+  assert.equal(requests[2].path, '/organization/_apis/projects/Project');
+});

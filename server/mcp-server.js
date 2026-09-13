@@ -1,3 +1,4 @@
+import { createBrowserAuthenticator } from './browser-auth.js';
 import { createCachedTokenProvider } from './token-cache.js';
 // Local extension of Microsoft's pinned MCP tool implementations. No Azure calls
 // are made by the HTTP application: all data access goes through this MCP server.
@@ -16,7 +17,12 @@ import { wrapExternalToolResponse } from '@azure-devops/mcp/dist/shared/content-
 const [organization, authentication = 'interactive', tenant] = process.argv.slice(2);
 if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization ?? '')) throw new Error('Organización inválida');
 if (!['interactive', 'azcli'].includes(authentication)) throw new Error('Autenticación inválida');
-const tokenProvider = createCachedTokenProvider(async () => createAuthenticator(authentication, tenant || await getOrgTenant(organization)));
+let useBrowser = false;
+const tokenProvider = createCachedTokenProvider(async options => {
+  if (options.interactive === true) useBrowser = true;
+  const organizationTenant = tenant || await getOrgTenant(organization);
+  return useBrowser ? createBrowserAuthenticator(organizationTenant) : createAuthenticator(authentication, organizationTenant);
+});
 const connectionProvider = async () => new WebApi(`https://dev.azure.com/${organization}`, getBearerHandler(await tokenProvider()));
 const server = new McpServer({ name: 'Neo Team · Azure DevOps MCP', version: '0.1.0' });
 // Keep the official untrusted-content boundary on every registered tool.
@@ -29,6 +35,10 @@ configureCoreTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1
 configureWorkTools(server, tokenProvider, connectionProvider);
 configureWorkItemTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 
+server.tool('neo_security_login', 'Explicitly open Microsoft account selection in the browser for this MCP session.', {}, async () => {
+  await tokenProvider({ forceRefresh: true, interactive: true });
+  return { content: [{ type: 'text', text: JSON.stringify({ authenticated: true, method: 'browser' }) }] };
+});
 const readSecurity = securityReader(organization, tokenProvider);
 server.tool('neo_security_read', 'Read project groups, memberships, ACLs and resource roles. Does not change permissions.', {
   action: z.enum(['catalog', 'identity', 'acl', 'resources', 'roles', 'feedPermissions', 'feedViews']),

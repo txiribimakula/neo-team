@@ -9,7 +9,7 @@ export function createCachedTokenProvider(createAuthenticator, now = Date.now) {
       authenticator = undefined;
     }
     if (cachedToken && now() < refreshAt) return cachedToken;
-    authenticator ??= await createAuthenticator();
+    authenticator ??= await createAuthenticator(options);
     const token = await authenticator();
     let expires = now() + 40 * 60000;
     try {

@@ -807,7 +807,7 @@ async function securityQuery(descriptor, reauthenticate = false) {
     resetPermissionFilters(); tab = 'permissions'; modal.close(); render();
   } catch (error) {
     if (/\bAzure HTTP 401\b/.test(error.message)) {
-      $('.modal-footer').innerHTML = `<button class="button" data-action="connect">Revisar conexión</button><button class="button primary" data-action="security-reconnect" data-descriptor="${escape(descriptor || '')}">Reconectar y reintentar</button>`;
+      $('.modal-footer').innerHTML = `<button class="button" data-action="connect">Revisar conexión</button><button class="button primary" data-action="security-reconnect" data-descriptor="${escape(descriptor || '')}">Elegir cuenta en el navegador y reintentar</button>`;
     }
     throw error;
   }

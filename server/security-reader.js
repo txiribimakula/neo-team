@@ -7,18 +7,35 @@ export function securityReader(organization, tokenProvider, fetcher = fetch) {
       const url = new URL(`https://${host}/${enc(organization)}/${path}`);
       for (const [key, value] of Object.entries({ 'api-version': '7.1', ...query })) if (value !== undefined) url.searchParams.set(key, value);
       const source = `${host} · ${path.split('_apis/').at(-1).split('/').slice(0, 2).join('/')}`;
-      const send = async token => fetcher(url, { method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-TFS-FedAuthRedirect': 'Suppress' }, signal: AbortSignal.timeout(60000) });
-      let response = await send(await tokenProvider());
+      const send = async (token, target = url) => fetcher(target, { method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-TFS-FedAuthRedirect': 'Suppress' }, signal: AbortSignal.timeout(60000) });
+      let token = await tokenProvider();
+      let response = await send(token);
       if (response.status === 401 && !refreshed) {
         refreshed = true;
         await response.body?.cancel();
-        let token;
         try { token = await tokenProvider({ forceRefresh: true }); }
         catch { throw Object.assign(new Error(`Azure HTTP 401 en ${source}: no se pudo renovar la sesión. Reconecta o revisa el método de acceso en Configuración.`), { code: 'AZURE_AUTHENTICATION_REQUIRED' }); }
         response = await send(token);
       }
       if (!response.ok) {
-        throw Object.assign(new Error(`Azure HTTP ${response.status} en ${source}: ${response.status === 403 ? 'tu cuenta no puede consultar esta seguridad' : response.status === 401 ? 'Azure sigue rechazando la autenticación tras intentar renovar la sesión. Reconecta con una cuenta con acceso a la organización; si usas Azure CLI, renueva su inicio de sesión o elige Microsoft en Configuración.' : 'no se pudo consultar esta fuente'}`), { code: response.status === 401 ? 'AZURE_AUTHENTICATION_REQUIRED' : 'AZURE_SECURITY_ERROR' });
+        let comparison = '';
+        if (response.status === 401 && project && !(host === 'dev.azure.com' && path === `_apis/projects/${enc(project)}`)) {
+          // Use the very same credential against the project API. A working
+          // project read distinguishes source-specific rejection from a wholly
+          // invalid session; it does not prove the cause of the security denial.
+          try {
+            const probeUrl = new URL(`https://dev.azure.com/${enc(organization)}/_apis/projects/${enc(project)}?api-version=7.1`);
+            const probe = await send(token, probeUrl);
+            if (probe.ok) {
+              const info = await probe.json();
+              if (typeof info.id === 'string' && typeof info.name === 'string') comparison = 'La misma credencial SÍ puede leer el proyecto. El rechazo afecta a esta fuente de seguridad; iniciar sesión otra vez no garantiza resolverlo. ';
+            } else {
+              if (probe.status === 401) comparison = 'La misma credencial también recibe 401 al consultar el proyecto. ';
+              await probe.body?.cancel();
+            }
+          } catch { /* Preserve the original source failure if the comparison is unavailable. */ }
+        }
+        throw Object.assign(new Error(`Azure HTTP ${response.status} en ${source}: ${response.status === 403 ? 'tu cuenta no puede consultar esta seguridad' : response.status === 401 ? comparison + 'Azure sigue rechazando la autenticación tras intentar renovar la sesión. Reconecta con una cuenta con acceso a la organización; si usas Azure CLI, renueva su inicio de sesión o elige Microsoft en Configuración.' : 'no se pudo consultar esta fuente'}`), { code: response.status === 401 ? 'AZURE_AUTHENTICATION_REQUIRED' : 'AZURE_SECURITY_ERROR' });
       }
       return { data: await response.json(), next: response.headers.get('x-ms-continuationtoken') };
     }
