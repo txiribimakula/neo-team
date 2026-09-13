@@ -118,3 +118,7 @@ Cada paso de planificación ofrece su propia actualización: **Actualizar iterac
 Los borradores de tareas impiden actualizar tareas, pero no capacidad, y viceversa. Actualizar el calendario requiere resolver ambos borradores porque sus fechas afectan a los dos. Un fallo o cancelación conserva la copia anterior completa. Al actualizar capacidad con varios proyectos, se reconstruye la disponibilidad global sumando las horas de sus asignaciones de Azure y teniendo en cuenta los días laborables y ausencias.
 
 Mantenimiento, grupos de permisos e informe de un grupo mantienen sus botones independientes de actualización; no vuelven a importar la planificación.
+
+## Diagnóstico de errores
+
+Cuando una operación falla de forma inesperada, el recuadro de progreso muestra el motivo y el servidor guarda un informe en `.neo-team/last-error.json` (o en `NEO_TEAM_DATA_DIR`). Incluye el paso en el que se detuvo, la actividad reciente y la pila del error; también se escribe en la terminal del servidor. Los errores internos indican el paso y el archivo y la línea donde ocurrieron. Si el servidor se detiene durante una operación, deja el mismo informe antes de salir. El informe no contiene credenciales ni datos de la planificación.

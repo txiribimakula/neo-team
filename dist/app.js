@@ -76,10 +76,11 @@ async function request(path, input = {}) {
   enabled.forEach(el => el.disabled = true);
   $('#save-status').textContent = 'Procesando…';
   try {
-    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) });
-    const data = await response.json();
+    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) })
+      .catch(() => { throw new Error('Se perdió la conexión con el servidor local de Neo Team antes de recibir la respuesta. Si se ha detenido, revisa la terminal donde se ejecuta y el archivo .neo-team/last-error.json.'); });
+    const data = await response.json().catch(() => { throw new Error(`El servidor local respondió sin datos válidos (HTTP ${response.status}).`); });
     if (!response.ok) {
-      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { stateReview: data.stateReview });
+      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { stateReview: data.stateReview, diagnostics: data.diagnostics });
     }
     if (data.state) state = data.state;
     else if (data.csrf) state = data;
@@ -363,7 +364,7 @@ async function importWithProgress(target, existing = null, start = null) {
       if (existing) {
         if (!progress) fail(new Error('La operación ya no está disponible. Actualiza los datos para comprobar el resultado.'));
         else if (progress.status === 'complete') finish();
-        else if (['failed', 'cancelled'].includes(progress.status)) fail(Object.assign(new Error(progress.error || progress.message), { stateReview: progress.stateReview }));
+        else if (['failed', 'cancelled'].includes(progress.status)) fail(Object.assign(new Error(progress.error || progress.message), { stateReview: progress.stateReview, diagnostics: progress.diagnostics }));
       }
       $('.import-progress-connection', target).textContent = '';
     } catch {
@@ -381,7 +382,8 @@ async function importWithProgress(target, existing = null, start = null) {
   } catch (error) {
     target.classList.add('failed');
     $('.import-progress-heading strong', target).textContent = isImport ? 'Importación detenida' : 'Operación detenida';
-    $('.import-progress-note', target).textContent = 'La operación no se ha completado. Puedes volver a intentarlo.';
+    $('.import-progress-phase', target).textContent = error.message;
+    $('.import-progress-note', target).textContent = `La operación no se ha completado. Puedes volver a intentarlo.${error.diagnostics ? ` Detalle técnico guardado en ${error.diagnostics}.` : ''}`;
     throw error;
   } finally {
     stopped = true;

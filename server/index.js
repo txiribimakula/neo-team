@@ -11,6 +11,7 @@ import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges, setCompletedState, completeTask } from './planner.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES } from './demo.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
+import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const port = Number(process.env.NEO_TEAM_PORT || 4310);
@@ -40,6 +41,27 @@ const maintenanceKey = () => store.data.mode === 'demo' ? 'demo' : [store.data.c
 const currentMaintenanceSettings = () => store.data.maintenanceSettings?.[maintenanceKey()] ?? null;
 const currentMaintenance = () => maintenance?.scope === maintenanceScope() ? maintenance : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+// Local steps after the Azure queries join the activity, so a failure shows
+// where it stopped instead of the last request sent to Azure.
+function step(message) {
+  const at = Date.now();
+  operation = { ...operation, message, step: message, updatedAt: at, activity: [...(operation.activity ?? []), { at, kind: 'info', message }].slice(-80) };
+  if (operation.path === '/api/import') importProgress = operation;
+}
+function explain(error) {
+  if (!isInternalError(error) || error.explained) return error;
+  const location = errorLocation(error);
+  error.message = `Error interno durante «${operation?.step || operation?.message || 'la operación'}»${location ? ` (${location})` : ''}: ${error.message}`;
+  error.explained = true;
+  return error;
+}
+async function saveDiagnostics(kind, error) {
+  const where = operation?.step || operation?.message;
+  console.error(`[neo-team] ${operation?.title ?? kind} falló${where ? ` en «${where}»` : ''}:`, error);
+  try {
+    return await recordFailure(store.directory, { kind, operation: operation && { path: operation.path, title: operation.title, status: operation.status, phase: operation.phase, step: operation.step, message: operation.message, counts: operation.counts, pendingCall: operation.pendingCall, startedAt: new Date(operation.startedAt).toISOString(), activity: operation.activity ?? [] }, error: describeError(error) });
+  } catch (failure) { console.error('[neo-team] No se pudo guardar el diagnóstico:', failure); return null; }
+}
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function configFrom(input, requireTeam = true) {
   let organization = String(input?.organization || '').trim();
@@ -231,12 +253,13 @@ const server = http.createServer(async (req, res) => {
           try {
             const workspace=await refreshSection(store.data.azure,input.section,azure,store.data.stateRules ?? [],progress=>{
               if(operation.cancelRequested) throw fail('Actualización cancelada.');
-              operation={...operation,...progress,updatedAt:Date.now()};
+              operation={...operation,...progress,step:null,updatedAt:Date.now()};
             });
             if(operation.cancelRequested) throw fail('Actualización cancelada.');
             const data=structuredClone(store.data);data.azure=workspace;
-            operation={...operation,cancellable:false};await store.save(data);planner.review=null;
+            operation={...operation,cancellable:false};step('Calculando la planificación y guardando la copia local…');await store.save(data);planner.review=null;
           } catch(error) {
+            explain(error);
             if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;operation={...operation,stateReview};}
             throw error;
           }
@@ -253,13 +276,16 @@ const server = http.createServer(async (req, res) => {
             for (const [projectIndex,config] of configs.entries()) {
             const imported = await azure.import(config, progress => {
               if (operation.cancelRequested) throw fail('Importación cancelada.');
-              operation = { ...operation, ...progress, message: `${config.project} (${projectIndex+1}/${configs.length}) · ${progress.message}`, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
+              operation = { ...operation, ...progress, step: null, message: `${config.project} (${projectIndex+1}/${configs.length}) · ${progress.message}`, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
               importProgress = operation;
             }, store.data.stateRules || []);
-            workspace = workspace && (workspace.sources || sourceId(workspace.config)!==sourceId(config)) ? mergeProjects(workspace,imported) : imported;
+            const merge = workspace && (workspace.sources || sourceId(workspace.config)!==sourceId(config));
+            if (merge) step(`${config.project} (${projectIndex+1}/${configs.length}) · Uniendo con la planificación existente…`);
+            workspace = merge ? mergeProjects(workspace,imported) : imported;
             }
             if (operation.cancelRequested) throw fail('Importación cancelada.');
-            operation = { ...operation, cancellable: false, phase: 'saving', message: 'Guardando la copia local…', updatedAt: Date.now() };
+            operation = { ...operation, cancellable: false, phase: 'saving' };
+            step('Calculando la planificación y guardando la copia local…');
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
             // States chosen as completed by the person take precedence over Azure's categories.
             workspace.completedStates = { ...workspace.completedStates, ...(store.data.azure?.completedStates || {}) };
@@ -270,6 +296,7 @@ const server = http.createServer(async (req, res) => {
             operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
             importProgress = operation;
           } catch (error) {
+            explain(error);
             if(error.stateReview) error.stateReview={...error.stateReview,refreshAll:input.refreshAll===true};
             stateReview = error.stateReview || null;
             operation = { ...operation, status: 'failed', message: `Importación detenida: ${error.message}`, stateReview };
@@ -345,9 +372,13 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/review') return json(res, { review: await planner.prepareReview(), state: publicState() });
         else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState() });
         else throw fail('Operación no encontrada.', 404);
+        operation = { ...operation, step: 'Preparando la planificación para la interfaz' };
         return json(res, publicState());
       } catch (error) {
-        operation = { ...operation, status: operation.cancelRequested ? 'cancelled' : 'failed', error: operation.cancelRequested ? 'Consulta cancelada.' : error.message };
+        explain(error);
+        // Validation and cancellation are expected; anything else leaves a report.
+        if (!operation.cancelRequested && !error.status && !error.stateReview) error.diagnostics = await saveDiagnostics('operation', error);
+        operation = { ...operation, status: operation.cancelRequested ? 'cancelled' : 'failed', error: operation.cancelRequested ? 'Consulta cancelada.' : error.message, diagnostics: error.diagnostics ?? null };
         if (operation.cancelRequested) throw fail('Consulta cancelada.');
         throw error;
       } finally {
@@ -361,8 +392,10 @@ const server = http.createServer(async (req, res) => {
     if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
-  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}) }, error.status || 400); }
+  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}), ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) }, error.status || 400); }
 });
 server.listen(port, '127.0.0.1', () => console.log(`Neo Team: http://127.0.0.1:${port}`));
+// A crash would otherwise only leave a lost connection in the interface.
+for (const kind of ['uncaughtException', 'unhandledRejection']) process.on(kind, async error => { await saveDiagnostics(kind, error); process.exit(1); });
 async function shutdown() { server.close(); await azure.close(); process.exit(0); }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
