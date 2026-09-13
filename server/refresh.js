@@ -15,7 +15,7 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     next.conflicts={};
     if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.completedStates={...refreshed[index].completedStates,...source.completedStates};});
     else {next.backlogLevels=refreshed[0].backlogLevels;next.completedStates={...refreshed[0].completedStates,...next.completedStates};}
-    next.warnings=refreshed.flatMap(data=>data.warnings ?? []);
+    next.warnings=[...new Set([...(next.warnings ?? []),...refreshed.flatMap(data=>data.warnings ?? [])])];
   } else if(section==='capacity') {
     if(!next.sources) next.capacities=refreshed[0].capacities;
     else {

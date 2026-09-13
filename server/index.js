@@ -237,7 +237,7 @@ const server = http.createServer(async (req, res) => {
             const data=structuredClone(store.data);data.azure=workspace;
             operation={...operation,cancellable:false};await store.save(data);planner.review=null;
           } catch(error) {
-            if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;}
+            if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;operation={...operation,stateReview};}
             throw error;
           }
         } else if (path === '/api/import') {

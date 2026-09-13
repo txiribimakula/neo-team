@@ -174,11 +174,11 @@ export class AzureGateway {
       }
       return {...snapshot,capacities};
     }
-    report('settings', 'Leyendo la configuración del equipo…');
+    if(!snapshot) report('settings', 'Leyendo la configuración del equipo…');
     const rawSettings = snapshot ? snapshot.settings : await this.call('work', { action: 'get_team_settings', ...context });
     const settings = { ...rawSettings, backlogIteration: normalizeIteration(rawSettings?.backlogIteration, config.project, 'el backlog') };
     if (typeof settings.defaultIteration?.path === 'string') settings.defaultIteration = normalizeIteration(settings.defaultIteration, config.project, 'la iteración predeterminada');
-    report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
+    if(section!=='tasks') report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
     const rawIterations = section==='tasks' ? snapshot.iterations : await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const today = new Date().toISOString().slice(0, 10);
@@ -186,10 +186,10 @@ export class AzureGateway {
     const iterations=rawIterations.filter(i=>!isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración del equipo'));
     if(section==='iterations') return {...snapshot,iterations};
     const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
-    report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
+    if(!snapshot) report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
     const members = snapshot ? snapshot.members : await this.call('neo_team_members', context);
     if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
-    report('backlogs', 'Consultando los niveles de backlog…', { members: members.length });
+    if(!snapshot?.backlogLevels) report('backlogs', 'Consultando los niveles de backlog…', { members: members.length });
     const levels = snapshot?.backlogLevels ?? await this.call('wit_backlog', { action: 'list', ...context });
     if (!Array.isArray(levels)) throw new Error('Azure DevOps no devolvió una lista válida de niveles de backlog del equipo.');
     report('states','Comprobando los estados antes de descargar tareas…');

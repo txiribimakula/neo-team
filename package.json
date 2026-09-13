@@ -11,7 +11,7 @@
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
     "test": "node --test tests/*.test.js",
-    "check": "node --check server/index.js && node --check server/azure.js && node --check server/planner.js && node --check dist/app.js && node --check server/security.js && node --check server/security-reader.js && node --check server/security-diagnostics.js && node --check server/token-cache.js && node --check server/browser-auth.js && node --check server/mcp-server.js && node --check dist/permissions.js && node --check dist/maintenance.js && node --check server/activity.js && node --check server/maintenance.js && node --check server/multi-project.js && node --check server/import-query.js"
+    "check": "node --check server/index.js && node --check server/azure.js && node --check server/planner.js && node --check dist/app.js && node --check server/security.js && node --check server/security-reader.js && node --check server/security-diagnostics.js && node --check server/token-cache.js && node --check server/browser-auth.js && node --check server/mcp-server.js && node --check dist/permissions.js && node --check dist/maintenance.js && node --check server/activity.js && node --check server/maintenance.js && node --check server/multi-project.js && node --check server/import-query.js && node --check server/refresh.js"
   },
   "dependencies": {
     "@azure-devops/mcp": "2.10.0",

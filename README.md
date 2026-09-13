@@ -44,7 +44,7 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
 7. En **Elegir tareas**, utiliza la vista del equipo o por persona, estima las horas pendientes y asigna las tareas. Cada tarea indica su proyecto. La persona debe pertenecer al equipo de ese proyecto.
 8. En **Revisar y sincronizar**, comprueba los cambios de tareas y capacidad antes de enviarlos. Se comparan con Azure para detectar conflictos. La revisión de la iteración anterior solo aparece en copias antiguas o en el ejemplo; las nuevas importaciones excluyen todas las iteraciones pasadas.
 
-**Añadir proyecto** conserva los proyectos importados. **Actualizar datos** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
+**Añadir proyecto** conserva los proyectos importados. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
 
 ### Planificación conjunta
 
@@ -110,3 +110,11 @@ Cada creación incluye una etiqueta técnica única `neo-create-…` que permite
 Los cambios existentes comparan los valores originales, locales y remotos. Un conflicto requiere elegir una versión; las escrituras comprueban además `/rev` de forma atómica. Un cambio remoto después de revisar detiene la sincronización. Los fallos parciales conservan los elementos pendientes. El reparto compartido de ramas y las confirmaciones personales son locales; las asignaciones de responsable sí se envían a Azure.
 
 La creación real depende de los tipos y campos habilitados en el proceso del proyecto. Se han probado los contratos MCP y escenarios de error con datos controlados; no se ha creado ningún elemento en una organización real durante el desarrollo.
+
+## Actualizar una sección
+
+Cada paso de planificación ofrece su propia actualización: **Actualizar iteraciones**, **Actualizar capacidad** y **Actualizar tareas y jerarquía**. Repartir ramas y elegir tareas comparten el backlog. Se consulta solo la información de ese ámbito en los proyectos importados y se conservan los datos de las demás secciones. Para actualizar tareas se reutilizan las iteraciones y los integrantes ya importados; usa sus botones o **Actualizar toda la planificación** si también han cambiado.
+
+Los borradores de tareas impiden actualizar tareas, pero no capacidad, y viceversa. Actualizar el calendario requiere resolver ambos borradores porque sus fechas afectan a los dos. Un fallo o cancelación conserva la copia anterior completa. Al actualizar capacidad con varios proyectos, se reconstruye la disponibilidad global sumando las horas de sus asignaciones de Azure y teniendo en cuenta los días laborables y ausencias.
+
+Mantenimiento, grupos de permisos e informe de un grupo mantienen sus botones independientes de actualización; no vuelven a importar la planificación.
