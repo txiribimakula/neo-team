@@ -33,7 +33,8 @@ test('refresh retains the global budget, project origins and locally defined par
 test('prevents ID collisions across organizations, ambiguous team capacity and incompatible calendars',()=>{
  const a=project('A',1), b=project('B',2);
  b.config.organization='other';assert.throws(()=>mergeProjects(a,b),/misma organización/);
- b.config.organization='org';b.iterations[0].attributes.finishDate='2026-09-19T00:00:00Z';assert.throws(()=>mergeProjects(a,b),/solapadas/);
+ b.config.organization='org';b.iterations[0].attributes.finishDate='2026-09-19T00:00:00Z';assert.throws(()=>mergeProjects(a,b),{message:'Los proyectos tienen iteraciones solapadas con fechas distintas. Alinea sus fechas para compartir una única capacidad: «A» · Sprint A (2026-09-14 → 2026-09-18) se solapa con «B» · Sprint B (2026-09-14 → 2026-09-19).'});
+ const twice=project('B',2);twice.iterations.push({...twice.iterations[0],id:'iteration-B2',name:'Sprint B bis',path:'B\\Sprint bis'});assert.throws(()=>mergeProjects(a,twice),{message:'«B» tiene dos iteraciones con las mismas fechas (2026-09-14 → 2026-09-18): «Sprint B» y «Sprint B bis». Corrige el calendario del equipo antes de unirlo.'});
  const other=project('A',2);other.config.team='another';assert.throws(()=>mergeProjects(a,other),/otro equipo/);
 });
 test('unassigned tasks release their project allocation and unknown estimates stop the review',async()=>{

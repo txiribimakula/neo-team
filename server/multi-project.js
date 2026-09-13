@@ -45,14 +45,24 @@ export function mergeProjects(previous, imported) {
       joint = { ...iteration, id: `joint:${group}`, path: `Planificación\\${group}`, name: dates ? `${dates.split('/').join(' → ')}` : `${source.config.project} · ${iteration.name}`, sourceIterations: {} };
       periods.set(group,joint); iterations.push(joint);
     }
-    if (joint.sourceIterations[source.id]) throw new Error(`«${source.config.project}» tiene dos iteraciones con las mismas fechas. Corrige el calendario del equipo antes de unirlo.`);
+    if (joint.sourceIterations[source.id]) {
+      const first = source.iterations.find(i => i.id === joint.sourceIterations[source.id]);
+      throw new Error(`«${source.config.project}» tiene dos iteraciones con las mismas fechas (${dates.replace('/',' → ')}): «${first?.name}» y «${iteration.name}». Corrige el calendario del equipo antes de unirlo.`);
+    }
     joint.sourceIterations[source.id] = iteration.id;
   }
-  for (const a of iterations) for (const b of iterations) {
-    if(a===b || !period(a) || !period(b)) continue;
-    if(a.attributes.startDate.slice(0,10)<=b.attributes.finishDate.slice(0,10) && b.attributes.startDate.slice(0,10)<=a.attributes.finishDate.slice(0,10)) throw new Error('Los proyectos tienen iteraciones solapadas con fechas distintas. Alinea sus fechas para compartir una única capacidad.');
-  }
   iterations.sort((a,b)=>(a.attributes?.startDate ?? '').localeCompare(b.attributes?.startDate ?? ''));
+  // Name every conflicting sprint with its project and dates, so the calendar to fix is clear.
+  const describe = joint => Object.entries(joint.sourceIterations).map(([id, iterationId]) => {
+    const source = sources.find(s => s.id === id), iteration = source.iterations.find(i => i.id === iterationId);
+    return `«${source.config.project}» · ${iteration.name} (${period(iteration).replace('/',' → ')})`;
+  }).join(' y ');
+  const overlaps = [];
+  for (const [index, a] of iterations.entries()) for (const b of iterations.slice(index + 1)) {
+    if(!period(a) || !period(b)) continue;
+    if(a.attributes.startDate.slice(0,10)<=b.attributes.finishDate.slice(0,10) && b.attributes.startDate.slice(0,10)<=a.attributes.finishDate.slice(0,10)) overlaps.push(`${describe(a)} se solapa con ${describe(b)}`);
+  }
+  if (overlaps.length) throw new Error(`Los proyectos tienen iteraciones solapadas con fechas distintas. Alinea sus fechas para compartir una única capacidad: ${overlaps.slice(0,5).join('; ')}${overlaps.length > 5 ? `; y ${overlaps.length - 5} solapamientos más` : ''}.`);
   const workspace = { ...structuredClone(previous), config: previous.config, sources, members, iterations, settings: { ...previous.settings, backlogIteration: { path: 'Planificación' } }, capacities: {}, items: [], warnings: [...new Set([...(previous.warnings ?? []),...(imported.warnings ?? [])])], importedAt: imported.importedAt };
   // Convert the previous projection to remote paths before projecting onto the new calendar.
   const retained = previous.items.filter(item=>!previous.iterations.some(i=>i.past && i.path===item.iterationPath)).filter(item => (item.sourceId ?? sourceId(previous.config)) !== incoming).map(item => {
