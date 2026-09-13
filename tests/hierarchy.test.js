@@ -117,3 +117,11 @@ test('demo migration adds the previous iteration once without discarding local w
   assert.deepEqual(ws.drafts,{1042:{remainingWork:99}});assert.equal(ws.completedStates.Task,'Closed');
   assert.equal(upgradeDemoPreviousIteration(ws),false);
 });
+
+test('each project keeps an independent hierarchy even with parent links across projects',()=>{
+  const items=[{id:10,type:'Epic',sourceId:'a',project:'A'},{id:5,type:'Epic',sourceId:'b',project:'B'},{id:21,type:'Feature',parent:10,sourceId:'b',project:'B'},{id:11,type:'Feature',parent:10,sourceId:'a',project:'A'}];
+  const tree=hierarchy(items);
+  assert.deepEqual(tree.roots.map(n=>n.id),[10,5,21]);
+  assert.deepEqual(tree.nodes.get(10).children.map(n=>n.id),[11]);
+  assert.deepEqual(ancestors(21,tree),[]);
+});

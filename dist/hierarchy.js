@@ -19,7 +19,8 @@ export function hierarchy(items) {
   const parents = new Map();
   for (const item of nodes.values()) {
     const parent = Number(item.parent);
-    if (parent !== item.id && nodes.has(parent)) parents.set(item.id,parent);
+    // Each project keeps an independent backlog: a link to another project's item is not a parent here.
+    if (parent !== item.id && nodes.has(parent) && (nodes.get(parent).sourceId ?? null) === (item.sourceId ?? null)) parents.set(item.id,parent);
   }
   // Invalid/cyclic links never hide tasks or cause unbounded traversal.
   for (const id of nodes.keys()) {
@@ -35,7 +36,7 @@ export function hierarchy(items) {
     else roots.push(node);
   }
   const compare = (a,b) => typeRank(a)-typeRank(b) || (a.priority ?? 5)-(b.priority ?? 5) || a.id-b.id;
-  roots.sort(compare); for (const node of nodes.values()) node.children.sort(compare);
+  roots.sort((a,b) => (a.project ?? '').localeCompare(b.project ?? '') || compare(a,b)); for (const node of nodes.values()) node.children.sort(compare);
   return {roots,nodes,parents};
 }
 export function ancestors(id, tree) {

@@ -65,12 +65,18 @@ export function mergeProjects(previous, imported) {
   if (overlaps.length) throw new Error(`Los proyectos tienen iteraciones solapadas con fechas distintas. Alinea sus fechas para compartir una única capacidad: ${overlaps.slice(0,5).join('; ')}${overlaps.length > 5 ? `; y ${overlaps.length - 5} solapamientos más` : ''}.`);
   const workspace = { ...structuredClone(previous), config: previous.config, sources, members, iterations, settings: { ...previous.settings, backlogIteration: { path: 'Planificación' } }, capacities: {}, items: [], warnings: [...new Set([...(previous.warnings ?? []),...(imported.warnings ?? [])])], importedAt: imported.importedAt };
   // Convert the previous projection to remote paths before projecting onto the new calendar.
-  const retained = previous.items.filter(item=>!previous.iterations.some(i=>i.past && i.path===item.iterationPath)).filter(item => (item.sourceId ?? sourceId(previous.config)) !== incoming).map(item => {
+  // A work item belongs to one project at a time. The incoming project was just read
+  // from Azure, while the others come from the local copy: an item moved since then
+  // stays only in the project where Azure has it now.
+  const current = new Set(imported.items.map(item => item.id));
+  const retained = previous.items.filter(item=>!previous.iterations.some(i=>i.past && i.path===item.iterationPath)).filter(item => (item.sourceId ?? sourceId(previous.config)) !== incoming && !current.has(item.id)).map(item => {
     const source = sourcesOf(previous).find(s=>s.id===(item.sourceId ?? sourceId(previous.config)));
     return planningItem(workspace,{...item,...remoteFields(previous,item,{iterationPath:item.iterationPath})},source);
   });
   workspace.items = [...retained,...imported.items.map(item=>planningItem(workspace,item,sources.find(s=>s.id===incoming)))];
-  if (new Set(workspace.items.map(i=>i.id)).size !== workspace.items.length) throw new Error('Hay elementos duplicados entre los proyectos importados.');
+  const seen = new Map(), duplicates = [];
+  for (const item of workspace.items) { if (seen.has(item.id)) duplicates.push([seen.get(item.id), item]); else seen.set(item.id, item); }
+  if (duplicates.length) throw new Error(`Hay elementos duplicados entre los proyectos importados: ${duplicates.slice(0,5).map(([a,b]) => `#${a.id} «${a.title}» (${a.project ?? '?'} y ${b.project ?? '?'})`).join('; ')}${duplicates.length > 5 ? `; y ${duplicates.length - 5} más` : ''}.`);
   for (const iteration of iterations) {
     const old = previous.iterations.find(i => period(i) && period(i) === period(iteration));
     const oldCapacity = old && previous.capacities?.[old.id];

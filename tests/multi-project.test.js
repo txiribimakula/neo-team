@@ -102,3 +102,9 @@ test('completed state names remain scoped to their project',async()=>{
  setCompletedState(ws,'Task','Finished',ws.sources[1].id);
  assert.equal(ws.drafts[1].state,'Closed');assert.equal(ws.drafts[2].state,'Finished');
 });
+test('an item moved between projects stays only where Azure has it now, and real duplicates are named',()=>{
+ const moved=mergeProjects(project('A',1),project('B',1));
+ assert.deepEqual(moved.items.map(i=>[i.id,i.project,i.title]),[[1,'B','Task B']]);
+ const twice=project('B',2);twice.items.push({...twice.items[0]});
+ assert.throws(()=>mergeProjects(project('A',1),twice),{message:'Hay elementos duplicados entre los proyectos importados: #2 «Task B» (B y B).'});
+});
