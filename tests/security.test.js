@@ -199,3 +199,28 @@ test('group detail resolves legacy descriptors directly, without requiring a Gra
   assert.deepEqual(calls[0], {action:'identity',descriptors:[root.descriptor]});
   assert.ok(!calls.some(c => c.descriptor));
 });
+test('Azure users without isContainer do not block scoped groups and trimmed groups use schema metadata', async () => {
+  const reader = securityReader('organization', async () => 'token', async url => new Response(JSON.stringify(url.pathname.includes('/projects/') ? {id:projectId,name:'Project'} : {value:[
+    // Shape documented by Azure: users omit isContainer rather than sending false.
+    {descriptor:'user',providerDisplayName:'User',properties:{SchemaClassName:{$type:'System.String',$value:'User'}}},
+    {descriptor:'group',providerDisplayName:'Developers',isContainer:true},
+    {descriptor:'trimmed',providerDisplayName:'QA',properties:{SchemaClassName:{$value:'Group'}}},
+    {descriptor:'scalar',providerDisplayName:'Reviewers',properties:{SchemaClassName:'Group'}},
+    {descriptor:'unknown',providerDisplayName:'Unknown'},
+    {descriptor:'foreign',properties:{ScopeId:{$value:'another-project'}}},
+  ]})));
+  const result = await reader({action:'catalog',project:'Project'});
+  assert.deepEqual(result.groups.map(g=>g.name), ['Developers','QA','Reviewers']);
+  assert.equal(result.coverage.length,1);
+  assert.equal(result.coverage[0].count,1);
+  assert.equal(result.coverage[0].status,'partial');
+});
+test('identity detail uses the same schema fallback for group membership labels', async () => {
+  const reader = securityReader('organization', async () => 'token', async () => new Response(JSON.stringify({value:[
+    {descriptor:'group',properties:{SchemaClassName:{$value:'Group'}}},
+    {descriptor:'user',properties:{SchemaClassName:{$value:'User'}}},
+  ]})));
+  const result=await reader({action:'identity',descriptors:['group','user']});
+  assert.equal(result[0].isContainer,true);
+  assert.equal(result[1].isContainer,false);
+});
