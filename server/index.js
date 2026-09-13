@@ -1,3 +1,5 @@
+import {refreshSection} from './refresh.js';
+import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -109,8 +111,8 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // On demand, cancellable: the person chooses the completed state from this list.
         if (path === '/api/work-item-states') {
@@ -220,27 +222,42 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/config') {
           const config = configFrom(input.config);
           const data = structuredClone(store.data);
-          if (scope(data.config) !== scope(config)) {
-            if (pendingChanges(data.azure)) throw fail('Hay cambios pendientes en el equipo anterior. Sincronízalos o descártalos antes de cambiar de equipo.');
-            data.azure = null;
-            stateReview = null;
-          }
+          if (data.azure && data.azure.config.organization.toLowerCase() !== config.organization.toLowerCase()) throw fail('La planificación conjunta utiliza proyectos de la misma organización.');
           data.config = config;
-          if (data.azure) data.azure.config = config;
+          stateReview = null;
           await store.save(data); planner.review = null;
+        } else if(path==='/api/refresh-section') {
+          stateReview=null;
+          try {
+            const workspace=await refreshSection(store.data.azure,input.section,azure,store.data.stateRules ?? [],progress=>{
+              if(operation.cancelRequested) throw fail('Actualización cancelada.');
+              operation={...operation,...progress,updatedAt:Date.now()};
+            });
+            if(operation.cancelRequested) throw fail('Actualización cancelada.');
+            const data=structuredClone(store.data);data.azure=workspace;
+            operation={...operation,cancellable:false};await store.save(data);planner.review=null;
+          } catch(error) {
+            if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;}
+            throw error;
+          }
         } else if (path === '/api/import') {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
-          if (pendingChanges(store.data.azure)) throw fail('Sincroniza o descarta los cambios pendientes antes de volver a importar.');
+          if (Object.keys(store.data.azure?.drafts ?? {}).length || Object.keys(store.data.azure?.capacityDrafts ?? {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de importar proyectos.');
           const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
           operation = { ...operation, id, message: 'Iniciando importación…' };
           stateReview = null;
           importProgress = operation;
           try {
-            const workspace = await azure.import(store.data.config, progress => {
+            const configs = input.refreshAll && store.data.azure ? sourcesOf(store.data.azure).map(s=>s.config) : [store.data.config];
+            let workspace = store.data.azure;
+            for (const [projectIndex,config] of configs.entries()) {
+            const imported = await azure.import(config, progress => {
               if (operation.cancelRequested) throw fail('Importación cancelada.');
-              operation = { ...operation, ...progress, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
+              operation = { ...operation, ...progress, message: `${config.project} (${projectIndex+1}/${configs.length}) · ${progress.message}`, updatedAt: Date.now(), cancellable: progress.phase !== 'saving' };
               importProgress = operation;
             }, store.data.stateRules || []);
+            workspace = workspace && (workspace.sources || sourceId(workspace.config)!==sourceId(config)) ? mergeProjects(workspace,imported) : imported;
+            }
             if (operation.cancelRequested) throw fail('Importación cancelada.');
             operation = { ...operation, cancellable: false, phase: 'saving', message: 'Guardando la copia local…', updatedAt: Date.now() };
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
@@ -253,6 +270,7 @@ const server = http.createServer(async (req, res) => {
             operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
             importProgress = operation;
           } catch (error) {
+            if(error.stateReview) error.stateReview={...error.stateReview,refreshAll:input.refreshAll===true};
             stateReview = error.stateReview || null;
             operation = { ...operation, status: 'failed', message: `Importación detenida: ${error.message}`, stateReview };
             importProgress = operation;
@@ -286,7 +304,7 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/complete-task' || path === '/api/completed-state') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (path === '/api/complete-task') completeTask(workspace, input.id);
-          else setCompletedState(workspace, input.type, input.state);
+          else setCompletedState(workspace, input.type, input.state, input.sourceId);
           await store.save(data); planner.review = null;
         } else if (path === '/api/stage') {
           const data = structuredClone(store.data), workspace = data[data.mode];
@@ -306,7 +324,14 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve-capacity') {
           const data = structuredClone(store.data);
-          resolveCapacityConflict(data[data.mode], input.iterationId, input.key, input.choice);
+          if (input.sourceId && data[data.mode].sources) {
+            const source=data[data.mode].sources.find(s=>s.id===input.sourceId);
+            const plan=planner.review?.capacityPlans.find(p=>p.sourceId===input.sourceId && p.iterationId===input.iterationId && p.key===input.key && p.conflict);
+            if (!source || !plan || input.choice!=='local') throw fail('Vuelve a revisar el reparto de capacidad.');
+            const record=source.capacities?.[plan.remoteIterationId]?.teamMembers?.find(m=>m.teamMember.id===input.key);
+            if(record) Object.assign(record,plan.remote);
+            else { source.capacities[plan.remoteIterationId] ??= {teamMembers:[],daysOff:[]}; source.capacities[plan.remoteIterationId].teamMembers.push({teamMember:source.members.find(m=>m.id===input.key),...plan.remote}); }
+          } else resolveCapacityConflict(data[data.mode], input.iterationId, input.key, input.choice);
           await store.save(data); planner.review = null;
         } else if (path === '/api/discard') {
           const data = structuredClone(store.data), workspace = data[data.mode];

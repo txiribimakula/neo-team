@@ -1,5 +1,6 @@
+import { sourcesOf, sourceFor, planningItem, remoteFields } from './multi-project.js';
 import { randomUUID } from 'node:crypto';
-import { eligibleTasks, isExecutable, hierarchy, ancestors, participantSources, personPlanningStatus } from '../dist/hierarchy.js';
+import { eligibleTasks, isExecutable, completedState, hierarchy, ancestors, participantSources, personPlanningStatus } from '../dist/hierarchy.js';
 
 export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', remainingWork: 'Horas pendientes', state: 'Estado' };
 export function identityKey(identity) {
@@ -34,7 +35,9 @@ export function createLocalItem(workspace, input) {
   if (input.parent && (!parent || !allowed[input.type].includes(parent.type))) throw new Error('El padre no corresponde a este nivel de jerarquía.');
   if (input.type!=='Epic' && !parent) throw new Error('Elige un padre para mantener la jerarquía.');
   const id=Math.min(0,...workspace.items.map(i=>i.id),workspace.nextLocalId || 0)-1;
-  const item={id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true};
+  const origin=workspace.sources ? (parent ? sourceFor(workspace,parent) : workspace.sources.find(s=>s.id===input.sourceId)) : null;
+  if(workspace.sources && !origin) throw new Error('Elige el proyecto del nuevo elemento.');
+  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true};
   workspace.items.push(item);workspace.nextLocalId=id;
   stageChanges(workspace,id,{title:item.title,...(input.assignedTo ? {assignedTo:input.assignedTo} : {}),...(input.iterationPath ? {iterationPath:input.iterationPath} : {}),...(input.remainingWork!==undefined ? {remainingWork:input.remainingWork} : {})});
   return id;
@@ -121,14 +124,17 @@ export function stageChanges(workspace, id, changes) {
   for (const [field, value] of Object.entries(changes)) {
     if (!Object.hasOwn(FIELD_LABELS, field)) throw new Error('Campo no editable.');
     if (field === 'title' && (typeof value!=='string' || !value.trim() || value.length>255)) throw new Error('Indica un título válido.');
+    if (workspace.sources && field === 'assignedTo' && value && !sourceFor(workspace,item).members.some(m=>identityKey(m)===value)) throw new Error('La persona debe pertenecer al equipo del proyecto de la tarea.');
+    if (workspace.sources && field === 'iterationPath') remoteFields(workspace,item,{iterationPath:value});
     if (field === 'assignedTo' && (typeof value !== 'string' || (value !== '' && !workspace.members.some(m => identityKey(m) === value) && value !== item.assignedTo))) throw new Error('Elige una persona del equipo.');
     if (field === 'iterationPath' && ![workspace.settings.backlogIteration.path, ...workspace.iterations.map(i => i.path), item.iterationPath].includes(value)) throw new Error('Elige una iteración del equipo.');
     if (field === 'priority' && (!item.canPrioritize || !Number.isInteger(value) || value < 1 || value > 4)) throw new Error('La prioridad debe estar entre 1 y 4.');
     if (field === 'remainingWork' && (!item.canEstimateHours || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido.');
     // The only state change is closing a task or bug with its type's completed state.
-    if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !workspace.completedStates?.[item.type] || value !== workspace.completedStates[item.type])))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
+    if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !completedState(item,workspace) || value !== completedState(item,workspace))))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
     if (same(item[field], value)) delete draft[field]; else draft[field] = value;
   }
+  if(workspace.sources) workspace.allocationIterations=[...new Set([...(workspace.allocationIterations ?? []),...workspace.iterations.filter(i=>i.path===item.iterationPath || i.path===draft.iterationPath).map(i=>i.id)])];
   if (item.localOnly) draft.title=changes.title ?? draft.title ?? item.title;
   if (Object.keys(draft).length) workspace.drafts[id] = draft; else delete workspace.drafts[id];
   delete workspace.conflicts[id];
@@ -215,6 +221,7 @@ export function stageCapacity(workspace, iterationId, change) {
   if (!workspace) throw new Error('Importa una planificación primero.');
   const iteration = workspace.iterations.find(i => i.id === iterationId);
   if (!iteration) throw new Error('Elige una iteración del equipo.');
+  if(workspace.sources) workspace.allocationIterations=[...new Set([...(workspace.allocationIterations ?? []),iterationId])];
   const key = change?.key;
   if (key !== 'team' && !workspace.members.some(m => m.id === key)) throw new Error('Elige una persona del equipo.');
   if (!change || (change.activities === undefined && change.daysOff === undefined)) throw new Error('Indica algún cambio de capacidad.');
@@ -250,6 +257,7 @@ export function discardCapacity(workspace, iterationId, key) {
   clearCapacityConflict(workspace, iterationId, key);
 }
 export function capacityChanges(workspace) {
+  if (workspace?.sources) return projectCapacityPlans(workspace).filter(p=>!sameCapacity(p.original,p.entry));
   return Object.entries(workspace?.capacityDrafts ?? {}).flatMap(([iterationId, drafts]) => Object.entries(drafts).map(([key, entry]) => ({ iterationId, key, entry })));
 }
 export function effectiveCapacity(workspace, iterationId) {
@@ -301,9 +309,37 @@ export function resolveCapacityConflict(workspace, iterationId, key, choice) {
   if (choice === 'local' && mine) stageCapacity(workspace, iterationId, { key, ...mine });
 }
 
+// Allocate the single availability budget by estimated work, including zeroing
+// old project allocations when the person no longer has tasks there.
+export function projectCapacityPlans(workspace) {
+  if (!workspace.sources) return [];
+  const plans=[];
+  for (const iteration of workspace.iterations.filter(i=>(workspace.allocationIterations ?? []).includes(i.id) || effectiveItems(workspace).some(t=>isExecutable(t) && t.assignedTo && t.iterationPath===i.path))) for (const member of workspace.members) {
+    const capacity=effectiveCapacity(workspace,iteration.id), global=capacityEntry(capacity,member.id);
+    const tasks=effectiveItems(workspace).filter(i=>isExecutable(i) && !i.contextOnly && i.assignedTo===identityKey(member) && i.iterationPath===iteration.path);
+    const total=tasks.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);
+    const available=workingCapacity(iteration,capacity,member.id,workspace.settings.workingDays) ?? 0;
+    const destinations=workspace.sources.filter(s=>iteration.sourceIterations[s.id] && s.members.some(m=>m.id===member.id));
+    for (const source of destinations) {
+      const remoteIterationId=iteration.sourceIterations[source.id], remoteIteration=source.iterations.find(i=>i.id===remoteIterationId);
+      const hours=tasks.filter(i=>i.sourceId===source.id).reduce((sum,i)=>sum+(i.remainingWork ?? 0),0), ratio=total ? hours/total : 0;
+      const original=capacityEntry(source.capacities?.[remoteIterationId],member.id);
+      const offDates=new Set();
+      for(const range of [...global.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) offDates.add(date.toISOString().slice(0,10));
+      const daysOff=[...offDates].sort().map(date=>({start:date,end:date}));
+      const unit={daysOff:source.capacities?.[remoteIterationId]?.daysOff ?? [],teamMembers:[{teamMember:member,activities:[{name:'',capacityPerDay:1}],daysOff}]};
+      const days=workingCapacity(remoteIteration,unit,member.id,source.settings.workingDays) ?? 0;
+      const globalDaily=global.activities.reduce((sum,a)=>sum+a.capacityPerDay,0);
+      const entry={daysOff,activities:global.activities.map(a=>({name:a.name,capacityPerDay:Math.round((days && globalDaily ? available*ratio/days*a.capacityPerDay/globalDaily : 0)*100)/100}))};
+      plans.push({iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && (!days || !available)});
+    }
+  }
+  return plans;
+}
+
 export function planningWorkspace(workspace) {
   const capacities = Object.fromEntries(workspace.iterations.map(i => [i.id, effectiveCapacity(workspace, i.id)]));
-  return {...workspace,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
+  return {...workspace,projectAllocations:projectCapacityPlans(workspace),effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 export function confirmPerson(workspace, member, iterationId) {
   if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
@@ -326,7 +362,13 @@ export function invalidateConfirmations(workspace) {
 
 // The person planning decides which state closes each type of task. Tasks
 // already marked with a previous choice move to the new one.
-export function setCompletedState(workspace, type, state) {
+export function setCompletedState(workspace, type, state, sourceId) {
+  if(workspace?.sources) {
+    const source=workspace.sources.find(s=>s.id===sourceId);
+    if(!source) throw new Error('Elige el proyecto cuyo estado completado quieres configurar.');
+    const scoped={...workspace,sources:undefined,items:workspace.items.filter(i=>i.sourceId===sourceId),completedStates:source.completedStates};
+    setCompletedState(scoped,type,state);source.completedStates=scoped.completedStates;return;
+  }
   if (!workspace?.items.some(i => i.type === type && isExecutable(i))) throw new Error('Elige un tipo de tarea o bug de esta planificación.');
   const name = typeof state === 'string' ? state.trim() : '';
   if (!name || name.length > 128) throw new Error('Indica el estado que se considera completado.');
@@ -341,13 +383,22 @@ export function setCompletedState(workspace, type, state) {
 export function completeTask(workspace, id) {
   const item = workspace && effectiveItems(workspace).find(i => i.id === id);
   if (!item || !isExecutable(item)) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
-  if (!workspace.completedStates?.[item.type]) throw new Error(`Indica primero qué estado de «${item.type}» se considera completado.`);
-  stageChanges(workspace, id, { state: workspace.completedStates[item.type] });
+  if (!completedState(item,workspace)) throw new Error(`Indica primero qué estado de «${item.type}» se considera completado.`);
+  stageChanges(workspace, id, { state: completedState(item,workspace) });
 }
 
 export class Planner {
   constructor(store, azure) { this.store = store; this.azure = azure; this.review = null; }
   workspace() { return this.store.data[this.store.data.mode]; }
+  async readItems(workspace,ids) {
+    if (!workspace.sources) return this.azure.getItems(workspace.config,ids);
+    const result=[];
+    for (const source of workspace.sources) {
+      const own=ids.filter(id=>sourceFor(workspace,workspace.items.find(i=>i.id===id)).id===source.id);
+      if(own.length) result.push(...(await this.azure.getItems(source.config,own)).map(i=>planningItem(workspace,i,source)));
+    }
+    return result;
+  }
   async planBatch(member, ids, iterationId) {
     const data=structuredClone(this.store.data), workspace=data[data.mode];
     const before=structuredClone({drafts:workspace?.drafts,conflicts:workspace?.conflicts});
@@ -373,23 +424,41 @@ export class Planner {
     if (!workspace) throw new Error('Importa una planificación primero.');
     const ids = Object.keys(workspace.drafts).map(Number);
     const creations=effectiveItems(workspace).filter(i=>i.localOnly).sort((a,b)=>b.id-a.id);
-    const capacityIterations = [...new Set(capacityChanges(workspace).map(change => change.iterationId))];
+    const capacityIterations = [...new Set([...capacityChanges(workspace).map(change => change.iterationId),...Object.keys(workspace.capacityDrafts ?? {})])];
     if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
-    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.azure.getItems(workspace.config, ids.filter(id=>id>0));
+    const allocationItems=workspace.sources ? workspace.items.filter(i=>i.id>0 && isExecutable(i) && (i.assignedTo || workspace.drafts[i.id]?.assignedTo) && workspace.iterations.some(iteration=>iteration.path===i.iterationPath || iteration.path===workspace.drafts[i.id]?.iterationPath)) : [];
+    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, [...new Set([...ids.filter(id=>id>0),...allocationItems.map(i=>i.id)])]);
+    if(allocationItems.some(item=>!workspace.drafts[item.id] && remoteItems.find(i=>i.id===item.id)?.rev!==item.rev)) throw new Error('Hay tareas que han cambiado en Azure y afectan al reparto de capacidad. Actualiza los proyectos antes de calcularlo.');
     const plans = planReview(workspace, remoteItems);
     const parentIds=[...new Set(creations.map(i=>i.parent).filter(id=>id>0))];
-    const parents=workspace.mode==='demo' ? workspace.items.filter(i=>parentIds.includes(i.id)) : await this.azure.getItems(workspace.config,parentIds);
+    const parents=workspace.mode==='demo' ? workspace.items.filter(i=>parentIds.includes(i.id)) : await this.readItems(workspace,parentIds);
     if(parentIds.some(id=>!parents.find(i=>i.id===id))) throw new Error('No se pudo comprobar el padre. No se enviará ningún cambio.');
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const remoteCapacities = {};
-    for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId);
-    const capacityPlans = planCapacityReview(workspace, remoteCapacities);
+    let capacityPlans;
+    if (workspace.sources) {
+      const allocations=projectCapacityPlans(workspace);
+      if (allocations.some(p=>p.missingEstimate || p.unavailable)) throw new Error('Estima todas las tareas y define capacidad disponible antes de repartirla entre proyectos.');
+      capacityPlans=[];
+      for (const plan of allocations.filter(p=>!sameCapacity(p.original,p.entry))) {
+        const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
+        remoteCapacities[cacheKey] ??= await this.azure.capacity(plan.config,plan.remoteIterationId);
+        const teamDaysOff=capacityEntry(remoteCapacities[cacheKey],'team');
+        const source=workspace.sources.find(s=>s.id===plan.sourceId);
+        if(!sameCapacity(teamDaysOff,capacityEntry(source.capacities?.[plan.remoteIterationId],'team'))) throw new Error(`Los días libres de «${plan.config.project}» han cambiado. Actualiza los proyectos antes de repartir la capacidad.`);
+        const remote=capacityEntry(remoteCapacities[cacheKey],plan.key);
+        capacityPlans.push({...plan,teamDaysOff,remote,after:plan.entry,conflict:!sameCapacity(remote,plan.original) && !sameCapacity(remote,plan.entry),applied:sameCapacity(remote,plan.entry)});
+      }
+    } else {
+      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId);
+      capacityPlans = planCapacityReview(workspace, remoteCapacities);
+    }
     const data = structuredClone(this.store.data);
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, capacityPlans };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, allocationItems:allocationItems.map(i=>remoteItems.find(r=>r.id===i.id)), capacityPlans };
     return { ...this.review, token: plans.some(p => p.conflicts.length) || capacityPlans.some(p => p.conflict) ? null : this.review.token };
   }
   async sync(token) {
@@ -400,8 +469,8 @@ export class Planner {
     const workspace = this.workspace();
     if (workspace.mode === 'azure') {
       await this.azure.open(workspace.config);
-      const current = await this.azure.getItems(workspace.config, [...new Set([...review.plans.filter(p=>!p.creation).map(p=>p.id),...(review.parents || []).map(p=>p.id)])]);
-      if (review.plans.filter(p=>!p.creation).some(p => current.find(i => i.id === p.id)?.rev !== p.remote.rev) || (review.parents || []).some(p=>current.find(i=>i.id===p.id)?.rev!==p.rev)) throw new Error('Azure DevOps ha cambiado desde la revisión. Revisa de nuevo antes de sincronizar.');
+      const current = await this.readItems(workspace, [...new Set([...review.plans.filter(p=>!p.creation).map(p=>p.id),...(review.parents || []).map(p=>p.id),...(review.allocationItems || []).map(p=>p.id)])]);
+      if (review.plans.filter(p=>!p.creation).some(p => current.find(i => i.id === p.id)?.rev !== p.remote.rev) || [...(review.parents || []),...(review.allocationItems || [])].some(p=>current.find(i=>i.id===p.id)?.rev!==p.rev)) throw new Error('Azure DevOps ha cambiado desde la revisión. Revisa de nuevo antes de sincronizar.');
     }
     const successes = [], failures = [];
     const remapped=new Map();
@@ -409,18 +478,21 @@ export class Planner {
       if(plan.creation) {
         try {
           const item={...plan.item,parent:remapped.get(plan.item.parent) || plan.item.parent};
+          const origin=sourceFor(workspace,item), config=origin.config;
+          const remoteItem={...item,...remoteFields(workspace,item,{iterationPath:item.iterationPath})};
           if(item.parent<0) throw new Error('El padre sigue pendiente de creación.');
           let updated;
           if(workspace.mode==='demo') updated={...item,id:Math.max(0,...this.workspace().items.map(i=>i.id))+1,rev:1};
           else {
-            updated=await this.azure.findCreation(workspace.config,item.creationKey);
+            updated=await this.azure.findCreation(config,item.creationKey);
             if(!updated) {
               if(this.workspace().creationAttempts?.[plan.id]) throw new Error('Resultado de creación incierto. No se reenvía para evitar duplicados; vuelve a revisar para recuperar el elemento si aparece en Azure.');
-              await this.azure.create(workspace.config,item,true);
+              await this.azure.create(config,remoteItem,true);
               const attempt=structuredClone(this.store.data);attempt[attempt.mode].creationAttempts ??= {};attempt[attempt.mode].creationAttempts[plan.id]=item;await this.store.save(attempt);
-              updated=await this.azure.create(workspace.config,item,false);
+              updated=await this.azure.create(config,remoteItem,false);
             }
           }
+          if(updated) updated=planningItem(workspace,updated,origin);
           if(!updated || updated.id<1 || ['title','type','parent','assignedTo','iterationPath','priority','areaPath'].some(field=>!same(updated[field],item[field])) || (item.remainingWork!==null && !same(updated.remainingWork,item.remainingWork))) throw new Error('La creación remota difiere del borrador. Se conserva para revisar sin sobrescribir Azure.');
           delete updated.localOnly;delete updated.creationKey;delete updated.modified;
           const data=structuredClone(this.store.data),next=data[data.mode];
@@ -434,7 +506,7 @@ export class Planner {
       let updated;
       try {
         updated = workspace.mode === 'demo' ? { ...plan.remote, ...plan.fields, rev: plan.remote.rev + 1 }
-          : Object.keys(plan.updates).length ? await this.azure.update(workspace.config, plan.id, plan.remote.rev, plan.updates) : plan.remote;
+          : Object.keys(plan.updates).length ? planningItem(workspace, await this.azure.update(sourceFor(workspace,plan.remote).config, plan.id, plan.remote.rev, remoteFields(workspace,plan.remote,plan.updates)), sourceFor(workspace,plan.remote)) : plan.remote;
         if (updated.id !== plan.id || Object.entries(plan.fields).some(([field, value]) => !same(updated[field], value))) throw new Error('La respuesta no confirma todos los cambios. Vuelve a revisar esta tarea.');
       } catch (error) { failures.push({ id: plan.id, error: error.message }); continue; }
       const data = structuredClone(this.store.data), next = data[data.mode];
@@ -446,7 +518,7 @@ export class Planner {
       await this.store.save(data);
       successes.push(plan.id);
     }
-    const capacity = await this.syncCapacity(review, workspace);
+    const capacity = failures.length && workspace.sources ? {successes:[],failures:[{label:'Reparto por proyecto',error:'Hay tareas sin sincronizar. Revisa sus resultados antes de enviar el reparto de capacidad.'}]} : await this.syncCapacity(review, workspace);
     return { successes, failures, capacity, demo: workspace.mode === 'demo' };
   }
   // Capacity has no revision number, so the value read during the review acts as
@@ -454,25 +526,35 @@ export class Planner {
   async syncCapacity(review, workspace) {
     const successes = [], failures = [];
     const byIteration = new Map();
-    for (const plan of review.capacityPlans ?? []) byIteration.set(plan.iterationId, [...(byIteration.get(plan.iterationId) ?? []), plan]);
-    for (const [iterationId, plans] of byIteration) {
+    for (const plan of review.capacityPlans ?? []) byIteration.set(JSON.stringify([plan.sourceId,plan.iterationId]), [...(byIteration.get(JSON.stringify([plan.sourceId,plan.iterationId])) ?? []), plan]);
+    for (const [, plans] of byIteration) {
+      const iterationId=plans[0].remoteIterationId ?? plans[0].iterationId, config=plans[0].config ?? workspace.config;
       let current;
-      try { current = workspace.mode === 'demo' ? this.workspace().capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId); }
+      try { current = workspace.mode === 'demo' ? this.workspace().capacities?.[iterationId] : await this.azure.capacity(config, iterationId); }
       catch (error) { for (const plan of plans) failures.push({ label: `${plan.iteration} · ${plan.label}`, error: error.message }); continue; }
       for (const plan of plans) {
         try {
+          if(plan.sourceId && !sameCapacity(capacityEntry(current,'team'),plan.teamDaysOff)) throw new Error('Los días libres del proyecto han cambiado desde la revisión. Revisa el reparto de nuevo.');
           if (!sameCapacity(capacityEntry(current, plan.key), plan.remote)) throw new Error('La capacidad ha cambiado en Azure DevOps desde la revisión. Revisa de nuevo antes de sincronizar.');
           const confirmed = workspace.mode === 'demo' || plan.applied ? plan.after
-            : plan.key === 'team' ? await this.azure.updateTeamDaysOff(workspace.config, iterationId, plan.after.daysOff)
-            : await this.azure.updateMemberCapacity(workspace.config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
+            : plan.key === 'team' ? await this.azure.updateTeamDaysOff(config, iterationId, plan.after.daysOff)
+            : await this.azure.updateMemberCapacity(config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
           if (!sameCapacity(confirmed, plan.after)) throw new Error('La respuesta no confirma la capacidad enviada. Vuelve a revisarla.');
           const data = structuredClone(this.store.data), next = data[data.mode];
-          applyCapacity(next, iterationId, plan.key, plan.after);
+          if (plan.sourceId) {
+            const source=next.sources.find(s=>s.id===plan.sourceId);
+            applyCapacity(source,iterationId,plan.key,plan.after);
+          } else applyCapacity(next, iterationId, plan.key, plan.after);
           next.lastSyncedAt = new Date().toISOString();
           await this.store.save(data);
           successes.push(`${plan.iteration} · ${plan.label}`);
         } catch (error) { failures.push({ label: `${plan.iteration} · ${plan.label}`, error: error.message }); }
       }
+    }
+    if (workspace.sources && !failures.length) {
+      const data=structuredClone(this.store.data), next=data[data.mode];
+      for (const iteration of next.iterations) next.capacities[iteration.id]=effectiveCapacity(next,iteration.id);
+      next.capacityDrafts={}; next.capacityConflicts={}; await this.store.save(data);
     }
     return { successes, failures };
   }

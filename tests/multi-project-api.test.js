@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {once} from 'node:events';
+test('HTTP adds projects without replacing the first, refreshes all atomically and protects local drafts',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'neo-projects-'));
+ const patch=`import {AzureGateway} from ${JSON.stringify(new URL('../server/azure.js',import.meta.url).href)};
+ let runs=0;
+ AzureGateway.prototype.import=async function(config,report){
+  runs++;report({phase:'items',message:'Leyendo '+config.project,counts:{imported:1}});
+  if(runs===6) throw new Error('Segundo proyecto no disponible');
+  return {mode:'azure',config,settings:{backlogIteration:{path:config.project},workingDays:[1,2,3,4,5]},iterations:[],members:[],capacities:{},items:[{id:config.project==='A'?1:2,rev:runs,title:config.project,type:'Epic',state:'Active',iterationPath:config.project}],drafts:{},conflicts:{},participants:{},warnings:[]};
+ };`;
+ const child=spawn(process.execPath,['--import',`data:text/javascript,${encodeURIComponent(patch)}`,'server/index.js'],{env:{...process.env,NEO_TEAM_PORT:'14368',NEO_TEAM_DATA_DIR:directory},stdio:['ignore','pipe','pipe']});
+ t.after(async()=>{if(child.exitCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});});
+ await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('No server')),10000);child.stdout.on('data',c=>{if(String(c).includes('Neo Team:')){clearTimeout(timeout);resolve();}});child.once('exit',()=>{clearTimeout(timeout);reject(new Error('Exited'));});});
+ const base='http://127.0.0.1:14368';let state=await (await fetch(base+'/api/state')).json();
+ const post=async(path,input={})=>{const response=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json','X-Neo-CSRF':state.csrf},body:JSON.stringify({...input,version:state.version})});const data=await response.json();if(response.ok)state=data.state ?? data;return {response,data};};
+ const config=project=>({organization:'org',project,team:'Team'});
+ await post('/api/config',{config:config('A')});await post('/api/import');
+ await post('/api/config',{config:config('B')});assert.deepEqual(state.workspace.items.map(i=>i.id),[1]);
+ await post('/api/import');assert.deepEqual(state.workspace.items.map(i=>i.id),[1,2]);assert.equal(state.workspace.sources.length,2);
+ await post('/api/import',{refreshAll:true});assert.deepEqual(state.workspace.items.map(i=>i.rev),[3,4]);
+ const saved=structuredClone(state.workspace);
+ const failure=await post('/api/import',{refreshAll:true});assert.equal(failure.response.status,400);
+ state=await (await fetch(base+'/api/state')).json();assert.deepEqual(state.workspace,saved,'partial refresh never replaces the saved plan');
+ await post('/api/stage',{edits:[{id:1,changes:{title:'Draft'}}]});
+ const blocked=await post('/api/import');assert.equal(blocked.response.status,400);assert.match(blocked.data.error,/pendientes/);
+});

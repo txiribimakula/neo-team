@@ -82,7 +82,26 @@ server.tool('neo_security_read', 'Read project groups, memberships, ACLs and res
   project: z.string().min(1).max(200).optional(), descriptor: z.string().max(2000).optional(),
   namespaceId: z.string().uuid().optional(), descriptors: z.array(z.string().max(2000)).max(20).optional(),
   kind: z.string().max(40).optional(), resourceId: z.string().max(200).optional(),
-}, async args => ({ content: [{ type: 'text', text: JSON.stringify(await readSecurity(args)) }] }));
+}, async args => {
+  try { return { content: [{ type: 'text', text: JSON.stringify(await readSecurity(args)) }] }; }
+  catch (error) {
+    if (!['AZURE_SECURITY_SOURCE_DENIED', 'AZURE_AUTHENTICATION_REQUIRED', 'AZURE_SECURITY_ERROR'].includes(error.code)) throw error;
+    return { content: [{ type: 'text', text: JSON.stringify({ securityError: { code: error.code, message: error.message, diagnostics: error.diagnostics } }) }] };
+  }
+});
+
+server.tool('neo_work_item_types', 'List project work item types before selecting open workflow states.', {
+  project: z.string().min(1),
+}, async ({project}) => {
+  const api=await (await connectionProvider()).getWorkItemTrackingApi();
+  return {content:[{type:'text',text:JSON.stringify((await api.getWorkItemTypes(project)).filter(t=>!t.isDisabled).map(t=>({name:t.name})))}]};
+});
+server.tool('neo_work_items_batch', 'Read complete work item fields in batches of up to 200.', {
+  project:z.string().min(1), ids:z.array(z.number().int().positive()).max(200),
+}, async ({project,ids}) => {
+  const api=await (await connectionProvider()).getWorkItemTrackingApi();
+  return {content:[{type:'text',text:JSON.stringify(ids.length ? await api.getWorkItemsBatch({ids,fields:['System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.IterationPath', 'System.AreaPath', 'System.Parent', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Scheduling.RemainingWork', 'Microsoft.VSTS.Scheduling.StoryPoints', 'Microsoft.VSTS.Scheduling.Effort', 'Microsoft.VSTS.Scheduling.Size']},project) : [])}]};
+});
 
 server.tool('neo_work_item_states', 'Read workflow state categories for a work item type, including custom states.', {
   project: z.string().min(1), type: z.string().min(1),
@@ -141,7 +160,11 @@ server.tool('neo_query_work_items', 'Run a WIQL query and return the requested f
   emit('info', `La consulta encontró ${ids.length > top ? `más de ${top}` : ids.length} elementos. Leyendo sus campos…`);
   const chunks = [];
   for (let start = 0; start < selected.length; start += 200) chunks.push(selected.slice(start, start + 200));
-  const batches = await Promise.all(chunks.map(chunk => api.getWorkItemsBatch({ ids: chunk, fields }, project)));
+  const batches = [];
+  for(let offset=0;offset<chunks.length;offset+=4) {
+    batches.push(...await Promise.all(chunks.slice(offset,offset+4).map(chunk=>api.getWorkItemsBatch({ids:chunk,fields},project))));
+    emit('info', `${Math.min((offset+4)*200,selected.length)} / ${selected.length} elementos leídos.`);
+  }
   return { content: [{ type: 'text', text: JSON.stringify({ ids: selected, limited: ids.length > top, workItems: batches.flat() }) }] };
 });
 // Atomic creation includes the parent link and a recovery tag in the same request.

@@ -126,7 +126,7 @@ test('failed login during renewal is sanitized and remains recoverable as an aut
     assert.ok(!e.message.includes('private')); return true;
   });
 });
-test('security rejection is contrasted with a project read using exactly the same renewed credential', async () => {
+test('source-specific rejection is checked with the same credential before triggering login', async () => {
   const requests = [];
   const reader = securityReader('organization', async options => options?.forceRefresh ? 'fresh' : 'original', async (url, options) => {
     requests.push({ path: url.pathname, token: options.headers.Authorization });
@@ -137,9 +137,9 @@ test('security rejection is contrasted with a project read using exactly the sam
     assert.match(e.message, /vssps.dev.azure.com/);
     assert.ok(!e.message.includes('fresh')); return true;
   });
-  assert.equal(requests.length, 3);
-  assert.equal(requests[1].token, requests[2].token);
-  assert.equal(requests[2].path, '/organization/_apis/projects/Project');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].token, requests[1].token);
+  assert.equal(requests[1].path, '/organization/_apis/projects/Project');
 });
 
 test('initial catalog reads project and scoped identities without any Graph or organization query', async () => {
@@ -258,4 +258,20 @@ test('empty catalog records received and discarded counts instead of implying no
   const html=permissionsView({catalog:result},{project:'Project'});
   assert.ok(html.includes('Copiar diagnóstico'));
   assert.ok(html.includes('No se han podido identificar grupos'));
+});
+test('environment 401 with a working project session preserves the rest of the group report without another login', async () => {
+  let refreshes=0;
+  const reader=securityReader('organization',async options=>{if(options?.forceRefresh)refreshes++;return 'token';},async url=>{
+    if(url.pathname.includes('/distributedtask/environments'))return new Response('',{status:401});
+    if(url.pathname.includes('/projects/'))return new Response(JSON.stringify({id:projectId,name:'Project'}));
+    assert.fail('Unexpected request: '+url.pathname);
+  });
+  const report=await auditGroup(async args=>args.action==='resources' && args.kind==='environments' ? reader(args) : mockCall(args),catalog,'graph-root');
+  assert.ok(report.completedAt);
+  assert.ok(report.rows.some(r=>r.configured));
+  assert.ok(report.coverage.some(c=>c.name==='Entornos' && c.status==='error' && /401/.test(c.message)));
+  assert.equal(report.coverage.find(c=>c.name==='Entornos').diagnostics.documentedScope,'vso.environment_manage');
+  assert.ok(permissionsView({catalog,report},{project:'Project'}).includes('Diagnóstico de la petición'));
+  assert.ok(report.coverage.some(c=>c.name==='Conexiones de servicio' && c.status==='ok'));
+  assert.equal(refreshes,0);
 });

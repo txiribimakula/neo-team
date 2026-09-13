@@ -1,7 +1,8 @@
 // Shared pure model: the browser and local API apply the same selection rules.
 export const memberKey = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
 export const isExecutable = item => !item.contextOnly && ['task', 'bug', 'tarea'].includes(item.type.toLowerCase());
-export const isCompleted = (item, workspace) => !!workspace.completedStates?.[item.type] && item.state === workspace.completedStates[item.type];
+export const completedState = (item, workspace) => (workspace.sources ? workspace.sources.find(s=>s.id===item.sourceId)?.completedStates : workspace.completedStates)?.[item.type];
+export const isCompleted = (item, workspace) => !!completedState(item,workspace) && item.state === completedState(item,workspace);
 // The iteration that starts right before the given one. Dates decide when they
 // exist; undated iterations keep the order in which Azure DevOps listed them.
 export function previousIteration(iterations, iterationId) {

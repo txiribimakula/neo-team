@@ -1,3 +1,4 @@
+import { IMPORT_FIELDS, importWiql, stateAction } from './import-query.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +65,7 @@ export class AzureGateway {
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -88,6 +89,7 @@ export class AzureGateway {
     this.report('call', `Esperando respuesta: ${label}`);
     try {
       const result = parseToolResult(await this.client.callTool({ name, arguments: args }, undefined, { timeout: 180000 }));
+      if (name === 'neo_security_read' && result?.securityError) throw Object.assign(new Error(result.securityError.message), { code: result.securityError.code, diagnostics: result.securityError.diagnostics });
       this.pendingCall = null;
       this.report('call', `${label} respondió en ${seconds(Date.now() - startedAt)}.`);
       return result;
@@ -117,9 +119,11 @@ export class AzureGateway {
   }
   async getItems(config, ids) {
     const result = [];
-    // get_batch's defaults omit iteration and effort. Individual full reads also
-    // accommodate custom fields and differences between Agile/Scrum/Basic.
-    for (const id of ids) result.push(normalizeItem(await this.call('wit_work_item', { action: 'get', project: config.project, id, expand: 'Fields' })));
+    for (let offset=0;offset<ids.length;offset+=200) {
+      const batch=await this.call('neo_work_items_batch',{project:config.project,ids:ids.slice(offset,offset+200)});
+      if(!Array.isArray(batch)) throw new Error('No se pudieron leer las tareas.');
+      result.push(...batch.map(normalizeItem));
+    }
     return result;
   }
   // Maintenance: every item of the chosen type whose state is not one of the
@@ -152,7 +156,7 @@ export class AzureGateway {
     const raw = await this.call('neo_team_days_off_write', { project: config.project, team: config.team, iterationId, daysOff });
     return { activities: [], daysOff: raw.daysOff ?? [] };
   }
-  async import(config, onProgress = () => {}, stateRules = []) {
+  async import(config, onProgress = () => {}, stateRules = [], options = {}) {
     let counts = {};
     const report = (phase, message, updates = {}) => {
       counts = { ...counts, ...updates };
@@ -161,132 +165,92 @@ export class AzureGateway {
     report('connection', 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.');
     await this.open(config);
     const context = { project: config.project, team: config.team };
+    const snapshot=options.snapshot, section=options.section;
+    if(section==='capacity') {
+      const capacities={};
+      for(const iteration of snapshot.iterations.filter(i=>!i.past)) {
+        report('capacity',`Actualizando capacidad de «${iteration.name}»…`);
+        capacities[iteration.id]=await this.capacity(config,iteration.id);
+      }
+      return {...snapshot,capacities};
+    }
     report('settings', 'Leyendo la configuración del equipo…');
-    const rawSettings = await this.call('work', { action: 'get_team_settings', ...context });
+    const rawSettings = snapshot ? snapshot.settings : await this.call('work', { action: 'get_team_settings', ...context });
     const settings = { ...rawSettings, backlogIteration: normalizeIteration(rawSettings?.backlogIteration, config.project, 'el backlog') };
     if (typeof settings.defaultIteration?.path === 'string') settings.defaultIteration = normalizeIteration(settings.defaultIteration, config.project, 'la iteración predeterminada');
     report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
-    const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
+    const rawIterations = section==='tasks' ? snapshot.iterations : await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const today = new Date().toISOString().slice(0, 10);
-    // Past iterations are skipped except the latest one, whose open work is
-    // reviewed before planning the next iteration. Azure lists them in order.
-    const previous = rawIterations.filter(iteration => isPastIteration(iteration, today)).at(-1);
-    const iterations = rawIterations.filter(iteration => iteration === previous || !isPastIteration(iteration, today))
-      .map(iteration => ({ ...normalizeIteration(iteration, config.project, 'una iteración del equipo'), ...(iteration === previous ? { past: true } : {}) }));
+    const pastPaths=rawIterations.filter(i=>isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
+    const iterations=rawIterations.filter(i=>!isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración del equipo'));
+    if(section==='iterations') return {...snapshot,iterations};
+    const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
     report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
-    const members = await this.call('neo_team_members', context);
+    const members = snapshot ? snapshot.members : await this.call('neo_team_members', context);
     if (!Array.isArray(members)) throw new Error('Azure DevOps no devolvió una lista válida de integrantes del equipo.');
     report('backlogs', 'Consultando los niveles de backlog…', { members: members.length });
-    const levels = await this.call('wit_backlog', { action: 'list', ...context });
+    const levels = snapshot?.backlogLevels ?? await this.call('wit_backlog', { action: 'list', ...context });
     if (!Array.isArray(levels)) throw new Error('Azure DevOps no devolvió una lista válida de niveles de backlog del equipo.');
-    const ids = new Set();
-    const addRelations = data => {
-      for (const item of data.workItems ?? []) if (item.target?.id || item.id) ids.add(item.target?.id || item.id);
-      for (const rel of data.workItemRelations ?? []) if (rel.target?.id) ids.add(rel.target.id);
-    };
-    report('backlogs', 'Leyendo los elementos del backlog…', { backlogs: 0, backlogTotal: levels.length, discovered: 0 });
-    for (const level of levels) {
-      report('backlogs', `Leyendo el backlog «${level.name || level.id}»…`);
-      addRelations(await this.call('wit_backlog', { action: 'list_work_items', ...context, backlogId: level.id }));
-      report('backlogs', `Backlog «${level.name || level.id}» obtenido.`, { backlogs: counts.backlogs + 1, discovered: ids.size });
-    }
-    const capacities = {}, warnings = [];
-    report('capacity', 'Consultando tareas y capacidad de las iteraciones…', { capacities: 0, iterationsRead: 0 });
-    for (const iteration of iterations) {
-      report('capacity', `Leyendo tareas de «${iteration.name}»…`);
-      addRelations(await this.call('wit_work_item', { action: 'list_for_iteration', ...context, iterationId: iteration.id }));
-      // The previous iteration is only reviewed, so its capacity is not needed.
-      if (!iteration.past) {
-        report('capacity', `Obteniendo capacidad y días libres de «${iteration.name}»…`, { discovered: ids.size });
-        try {
-          capacities[iteration.id] = await this.capacity(config, iteration.id);
-        } catch { warnings.push(`No se pudo consultar la capacidad completa de «${iteration.name}». Se mostrará como desconocida.`); }
-      }
-      report('capacity', `Iteración «${iteration.name}» consultada.`, { iterationsRead: counts.iterationsRead + 1, capacities: Object.keys(capacities).length, warnings: warnings.length });
-    }
-    // Follow hierarchy links through MCP so unscheduled child tasks are included.
-    const items = [], fetched = new Map();
-    const stateCategories = new Map(), excluded = new Set();
-    const stateKey = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
-    const loadStates = async (project, type) => {
-      const typeKey = JSON.stringify([project, type]);
-      if (!stateCategories.has(typeKey)) {
-        const states = await this.call('neo_work_item_states', { project, type });
-        if (!Array.isArray(states)) throw new Error(`Estados de «${type}» no válidos.`);
-        stateCategories.set(typeKey, workflowStates(states));
-      }
-      return stateCategories.get(typeKey);
-    };
-    const isOpen = async raw => {
-      const type = raw.fields?.['System.WorkItemType'], state = raw.fields?.['System.State'];
-      const project = raw.fields?.['System.TeamProject'] || config.project;
-      const typeKey = JSON.stringify([project, type]);
-      if (!type || !state) throw new Error(`No se pudo comprobar si el elemento #${raw.id} sigue abierto: falta su tipo o estado.`);
-      const rule = stateRules.find(rule => stateKey(rule.organization) === stateKey(config.organization) && stateKey(rule.project) === stateKey(project) && stateKey(rule.type) === stateKey(type) && stateKey(rule.state) === stateKey(state));
-      if (rule) { if (rule.action === 'exclude') excluded.add(raw.id); return rule.action === 'include'; }
-      if (stateKey(state) === 'discarded') { excluded.add(raw.id); return false; }
-      const needsDecision = (message, states = []) => Object.assign(new Error(message), {
-        stateReview: { organization: config.organization, project, type, state, item: { id: raw.id, fields: raw.fields }, states },
-      });
-      if (!stateCategories.has(typeKey)) {
-        try { await loadStates(project, type); }
-        catch { throw needsDecision(`No se pudieron consultar los estados de «${type}». Indica cómo tratar «${state}».`); }
-      }
-      const stateName = stateKey(state);
-      // Explicit workflow categories take precedence over conventional names.
-      // Some responses omit categories for standard terminal states.
-      const category = stateCategories.get(typeKey).find(s => stateKey(s.name) === stateName)?.category || ({ closed: 'completed', done: 'completed', removed: 'removed' })[stateName];
-      if (['completed', 'removed'].includes(category)) { excluded.add(raw.id); return false; }
-      if (['proposed', 'inprogress', 'resolved'].includes(category)) return true;
-      throw needsDecision(`No se pudo determinar la categoría del estado «${state}» de «${type}». Indica si debe importarse.`, stateCategories.get(typeKey));
-    };
-    const queue = [...ids];
-    report('items', 'Leyendo los detalles y las tareas hijas abiertas…', { read: 0, imported: 0, excluded: 0 });
-    for (let i = 0; i < queue.length; i++) {
-      report('items', `Leyendo el elemento #${queue[i]} (${i + 1} de ${queue.length} detectados)…`, { read: i, discovered: queue.length, imported: items.length, excluded: excluded.size });
-      const raw = await this.call('wit_work_item', { action: 'get', project: config.project, id: queue[i], expand: 'All' });
-      fetched.set(raw.id,raw);
-      const fields = raw.fields ?? {};
-      if (String(fields['System.TeamProject'] ?? '').toLowerCase() !== config.project.toLowerCase()) continue;
-      const areas = settings.areaPaths ?? [];
-      if (areas.length && !areas.some(a => fields['System.AreaPath'] === a.value || (a.includeChildren && fields['System.AreaPath']?.startsWith(a.value + '\\')))) continue;
-      // Traverse closed parents too: they can still have open child tasks.
-      for (const relation of raw.relations ?? []) {
-        if (relation.rel !== 'System.LinkTypes.Hierarchy-Forward') continue;
-        const id = Number(relation.url?.match(/\/workItems\/(\d+)$/i)?.[1]);
-        if (id && !ids.has(id)) { ids.add(id); queue.push(id); }
-      }
-      if (await isOpen(raw)) items.push(normalizeItem(raw));
-    }
-    // A portfolio parent may live outside the team's area or visible backlog
-    // levels. Fetch ancestors as context without importing sibling team tasks.
-    report('parents', 'Completando los padres abiertos de la jerarquía…', { read: queue.length, discovered: queue.length, imported: items.length, parents: 0, excluded: excluded.size });
-    const included = new Set(items.map(i=>i.id)), attempted = new Set();
-    let parentCount = 0;
-    for (let index=0; index<items.length; index++) {
-      const parent = Number(items[index].parent);
-      if (!parent || included.has(parent) || attempted.has(parent)) continue;
-      attempted.add(parent);
-      report('parents', `Leyendo el padre #${parent}…`);
-      try {
-        const raw = fetched.get(parent) || await this.call('wit_work_item',{action:'get',project:config.project,id:parent,expand:'All'});
-        if (await isOpen(raw)) {
-          const item = normalizeItem(raw);
-          item.contextOnly = true; items.push(item); included.add(item.id); parentCount++;
+    report('states','Comprobando los estados antes de descargar tareas…');
+    const catalog=await this.call('neo_work_item_types',{project:config.project});
+    if(!Array.isArray(catalog)) throw new Error('Azure no devolvió los tipos del proyecto.');
+    const relevant=new Set(['Task','Bug',...levels.flatMap(l=>(l.workItemTypes ?? []).map(t=>typeof t==='string' ? t : t.name))]);
+    if(relevant.size===2) for(const type of ['Epic','Feature','User Story','Product Backlog Item','Requirement','Issue']) relevant.add(type);
+    const types=catalog.filter(t=>relevant.has(t.name)), workflows=[], completedStates={};
+    // Classification is complete before the large queries run. Unknown custom
+    // states request a decision, with one example item rather than the backlog.
+    for(const {name:type} of types) {
+      report('states',`Comprobando estados de «${type}»…`);
+      const states=await this.workItemStates(config,type), open=[];
+      if(!states.length) throw new Error(`No se pudieron clasificar los estados de «${type}». Azure no devolvió su flujo de trabajo.`);
+      for(const state of states) {
+        const action=stateAction(config,type,state,stateRules);
+        if(action==='include') open.push(state.name);
+        else if(!action) {
+          const sample=await this.call('neo_query_work_items',{project:config.project,wiql:importWiql(config,querySettings,pastPaths,type,[state.name]),fields:IMPORT_FIELDS,top:1});
+          if(sample.workItems?.length) throw Object.assign(new Error(`Indica si «${state.name}» de «${type}» sigue abierto.`),{stateReview:{organization:config.organization,project:config.project,type,state:state.name,states,item:sample.workItems[0]}});
         }
-      } catch (error) { if (error.stateReview) throw error; warnings.push(`No se pudo leer el padre #${parent}. Sus tareas seguirán visibles sin ese nivel de la jerarquía.`); }
-      report('parents', 'Completando la jerarquía…', { parents: parentCount, imported: items.length, warnings: warnings.length, excluded: excluded.size });
+      }
+      const completed=states.find(s=>s.category==='completed');
+      if(completed) completedStates[type]=completed.name;
+      workflows.push({type,open});
     }
-    // Tasks and bugs can be closed with the first completed state of their
-    // workflow. Without one, they can only be carried over to the next iteration.
-    const completedStates = {};
-    for (const type of new Set(items.filter(isExecutable).map(item => item.type))) {
-      const completed = (await loadStates(config.project, type).catch(() => [])).find(s => s.category === 'completed');
-      if (completed) completedStates[type] = completed.name;
+    const items=[], warnings=[], capacities={};
+    const query=async(type,open,ids=null)=>{
+      if(!open.length) return [];
+      let after=0;const found=[];
+      for(;;) {
+        const result=await this.call('neo_query_work_items',{project:config.project,wiql:importWiql(config,querySettings,pastPaths,type,open,after,ids),fields:IMPORT_FIELDS,top:5000});
+        if(!Array.isArray(result.workItems)) throw new Error('Azure no devolvió una lista válida de elementos abiertos.');
+        found.push(...result.workItems.filter(raw=>open.some(state=>state.trim().toLowerCase()===String(raw.fields?.['System.State'] ?? '').trim().toLowerCase())).map(normalizeItem));
+        report('items',`«${type}»: ${found.length} elementos abiertos leídos por lotes.`,{read:items.length+found.length});
+        if(!result.limited) return found;
+        const next=Math.max(...result.workItems.map(i=>i.id));
+        if(!(next>after)) throw new Error('La consulta paginada no avanza. No se guardará una importación incompleta.');
+        after=next;
+      }
+    };
+    for(const {type,open} of workflows) items.push(...await query(type,open));
+    const included=new Set(items.map(i=>i.id)),attempted=new Set();
+    for(;;) {
+      const parents=[...new Set(items.map(i=>i.parent).filter(id=>id && !included.has(id) && !attempted.has(id)))];
+      if(!parents.length) break;
+      parents.forEach(id=>attempted.add(id));
+      report('parents','Completando los padres abiertos, sin descargar los cerrados…');
+      for(let offset=0;offset<parents.length;offset+=200) for(const {type,open} of workflows) {
+        const found=await query(type,open,parents.slice(offset,offset+200));
+        for(const item of found) if(!included.has(item.id)) {items.push({...item,contextOnly:true});included.add(item.id);}
+      }
+    }
+    for(const iteration of section==='tasks' ? [] : iterations) {
+      report('capacity',`Consultando capacidad de «${iteration.name}»…`,{imported:items.length});
+      try {capacities[iteration.id]=await this.capacity(config,iteration.id);}
+      catch {warnings.push(`No se pudo consultar la capacidad de «${iteration.name}».`);}
+      report('capacity',`Capacidad consultada: «${iteration.name}».`,{capacities:Object.keys(capacities).length});
     }
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
-    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities, items, completedStates, warnings, drafts: {}, conflicts: {}, participants: {} };
+    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   async findCreation(config, creationKey) {
     if(!/^[a-f0-9-]{36}$/.test(creationKey)) throw new Error('Identificador de creación no válido.');
