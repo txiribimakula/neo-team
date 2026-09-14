@@ -452,10 +452,12 @@ export class Planner {
     if(parentIds.some(id=>!parents.find(i=>i.id===id))) throw new Error('No se pudo comprobar el padre. No se enviará ningún cambio.');
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const remoteCapacities = {};
-    let capacityPlans;
+    let capacityPlans, incompleteAllocations=[];
     if (workspace.sources) {
       const allocations=projectCapacityPlans(workspace);
-      if (allocations.some(p=>p.missingEstimate || p.unavailable)) throw new Error('Estima todas las tareas y define capacidad disponible antes de repartirla entre proyectos.');
+      // Incomplete estimates or capacity do not block the sync: unestimated work counts
+      // as 0 h and the split is corrected in a later sync once it is defined.
+      incompleteAllocations=allocations.filter(p=>p.missingEstimate || p.unavailable).map(p=>({label:p.label,iteration:p.iteration,missingEstimate:p.missingEstimate,unavailable:p.unavailable}));
       capacityPlans=[];
       for (const plan of allocations.filter(p=>!sameCapacity(p.original,p.entry))) {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
@@ -474,7 +476,7 @@ export class Planner {
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, allocationItems:allocationItems.map(i=>remoteItems.find(r=>r.id===i.id)), capacityPlans };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, allocationItems:allocationItems.map(i=>remoteItems.find(r=>r.id===i.id)), capacityPlans, incompleteAllocations };
     return { ...this.review, token: plans.some(p => p.conflicts.length) || capacityPlans.some(p => p.conflict) ? null : this.review.token };
   }
   async sync(token) {

@@ -37,14 +37,16 @@ test('prevents ID collisions across organizations, ambiguous team capacity and i
  const twice=project('B',2);twice.iterations.push({...twice.iterations[0],id:'iteration-B2',name:'Sprint B bis',path:'B\\Sprint bis'});assert.throws(()=>mergeProjects(a,twice),{message:'«B» tiene dos iteraciones con las mismas fechas (2026-09-14 → 2026-09-18): «Sprint B» y «Sprint B bis». Corrige el calendario del equipo antes de unirlo.'});
  const other=project('A',2);other.config.team='another';assert.throws(()=>mergeProjects(a,other),/otro equipo/);
 });
-test('unassigned tasks release their project allocation and unknown estimates stop the review',async()=>{
+test('unassigned tasks release their project allocation and unknown estimates are reviewed without blocking',async()=>{
  const ws=mergeProjects(project('A',1,30),project('B',2,10));
  stageChanges(ws,2,{assignedTo:''});
  assert.deepEqual(projectCapacityPlans(ws).map(p=>p.allocated),[40,0]);
  stageChanges(ws,1,{assignedTo:''});assert.deepEqual(projectCapacityPlans(ws).map(p=>p.allocated),[0,0]);
  ws.items[0].remainingWork=null;stageChanges(ws,1,{assignedTo:member.uniqueName});
- const store=storeFor(ws), planner=new Planner(store,{open:async()=>{},getItems:async(c,ids)=>ids.map(id=>({...ws.items.find(i=>i.id===id),iterationPath:c.project+'\\Sprint'}))});
- await assert.rejects(()=>planner.prepareReview(),/Estima todas/);
+ const store=storeFor(ws), planner=new Planner(store,{open:async()=>{},getItems:async(c,ids)=>ids.map(id=>({...ws.items.find(i=>i.id===id),iterationPath:c.project+'\\Sprint'})),capacity:async(c,id)=>structuredClone(project(c.project,1).capacities[id])});
+ const review=await planner.prepareReview();
+ assert.deepEqual(review.incompleteAllocations.map(p=>[p.iteration,p.missingEstimate]),[['A · Sprint A',true],['B · Sprint B',true]]);
+ assert.ok(Array.isArray(review.capacityPlans));
 });
 test('review and synchronization route tasks and capacities to each project; repeat review has no pending writes',async()=>{
  const ws=mergeProjects(project('A',1,30),project('B',2,10)), store=storeFor(ws), calls=[];
