@@ -47,9 +47,12 @@ function workflowStates(states) {
   return states.filter(s => s && normalize(s.name)).map(s => ({ name: s.name, category: normalize(s.category || s.stateCategory).replace(/\s/g, '') }));
 }
 
+const isTransient = error => [-32001, -32000].includes(error?.code) || /Connection closed|Conecta Azure DevOps|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed out|\b(408|429|500|502|503|504)\b/i.test(String(error?.message ?? ''));
+
 export class AzureGateway {
   async open(config) {
-    const key = JSON.stringify([config.organization, config.authentication, config.tenant || '']);
+    this.lastConfig = config;
+    const key =JSON.stringify([config.organization, config.authentication, config.tenant || '']);
     if (this.key === key && this.client) return;
     await this.close();
     const client = new Client({ name: 'neo-team', version: '0.1.0' });
@@ -76,26 +79,53 @@ export class AzureGateway {
     } catch (error) { if (this.openingClient === client) this.openingClient = null; await client.close().catch(() => {}); throw error; }
   }
   async close() {
+    this.generation = (this.generation ?? 0) + 1;
     const clients = [this.client, this.openingClient].filter(Boolean);
     this.client = null; this.openingClient = null; this.key = null;
     await Promise.all(clients.map(client => client.close().catch(() => {})));
   }
   // Activity listeners see each step, with the call still waiting (if any).
-  report(kind, message) { this.onActivity?.({ at: Date.now(), kind, message, pending: this.pendingCall ?? null }); }
+  report(kind, message) {
+    if (kind === 'auth' && this.pendingCall) this.pendingCall.waitedForAuth = true;
+    this.onActivity?.({ at: Date.now(), kind, message, pending: this.pendingCall ?? null });
+  }
+  // Transient failures (timeouts, a closed MCP process, throttling or server errors)
+  // are retried after reconnecting. Creations are never replayed here: the planner
+  // recovers them by their marker to avoid duplicates. A cancellation stops retries.
   async call(name, args) {
+    const timeout = /_write$|^neo_create_item$/.test(name) ? 600000 : 180000;
+    let generation = this.generation;
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.callOnce(name, args, timeout); }
+      catch (error) {
+        if (attempt >= 3 || name === 'neo_create_item' || !this.lastConfig || this.generation !== generation || !isTransient(error)) throw error;
+        this.report('info', `Reintentando ${describeCall(name, args)} (intento ${attempt + 1} de 3)…`);
+        await new Promise(resolve => setTimeout(resolve, attempt * (this.retryDelay ?? 2000)));
+        if (this.generation !== generation) throw error;
+        if (!this.client) { await this.open(this.lastConfig); generation = this.generation; }
+      }
+    }
+  }
+  async callOnce(name, args, timeout) {
     if (!this.client) throw new Error('Conecta Azure DevOps para continuar.');
     const label = describeCall(name, args), startedAt = Date.now();
     this.pendingCall = { label, startedAt };
     this.report('call', `Esperando respuesta: ${label}`);
     try {
-      const result = parseToolResult(await this.client.callTool({ name, arguments: args }, undefined, { timeout: 180000 }));
+      const result = parseToolResult(await this.client.callTool({ name, arguments: args }, undefined, { timeout }));
       if (name === 'neo_security_read' && result?.securityError) throw Object.assign(new Error(result.securityError.message), { code: result.securityError.code, diagnostics: result.securityError.diagnostics });
       this.pendingCall = null;
       this.report('call', `${label} respondió en ${seconds(Date.now() - startedAt)}.`);
       return result;
     } catch (error) {
+      const waitedForAuth = !!this.pendingCall?.waitedForAuth;
       this.pendingCall = null;
       this.report('error', `${label} falló tras ${seconds(Date.now() - startedAt)}: ${String(error?.message ?? error).slice(0, 500)}`);
+      // MCP RequestTimeout: say which call did not answer, and whether a write may have been applied.
+      if (error?.code === -32001) {
+        const write = /_write$|^neo_create_item$/.test(name);
+        throw Object.assign(new Error(`Azure DevOps no respondió en ${seconds(Date.now() - startedAt)} a ${label}.${waitedForAuth ? ' Estaba esperando el inicio de sesión de Microsoft: complétalo y vuelve a intentarlo.' : ''}${write ? ' Puede que el cambio se aplicara: vuelve a revisar los cambios; lo que ya esté aplicado no se reenvía.' : ''}`), { code: error.code, cause: error });
+      }
       throw error;
     }
   }
@@ -272,7 +302,8 @@ export class AzureGateway {
     const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', state: 'System.State' };
     return normalizeItem(await this.call('wit_work_item_write', {
       action: 'update', project: config.project, id,
-      updates: [{ op: 'test', path: '/rev', value: revision }, ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],
+      // Without a revision the local value overwrites whatever Azure has.
+      updates: [...(revision === null || revision === undefined ? [] : [{ op: 'test', path: '/rev', value: revision }]), ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],
     }));
   }
 }

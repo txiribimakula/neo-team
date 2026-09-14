@@ -19,8 +19,8 @@ async function fixture(t, mode = 'azure') {
     open: async()=>{}, getItems:async(_c,ids)=>ids.map(id=>structuredClone(remote.get(id))),
     update:async(_c,id,rev,changes)=>{
       calls.push({id,rev,changes});
-      assert.equal(remote.get(id).rev,rev,'revision test');
-      const updated={...remote.get(id),...changes,rev:rev+1};remote.set(id,updated);return structuredClone(updated);
+      if (rev !== null) assert.equal(remote.get(id).rev,rev,'revision test');
+      const updated={...remote.get(id),...changes,rev:remote.get(id).rev+1};remote.set(id,updated);return structuredClone(updated);
     },
   };
   const planner = new Planner(store,azure);
@@ -50,19 +50,23 @@ test('unrelated remote changes are merged; synchronization sends only edited fie
   f.remote.set(1042,{...f.remote.get(1042),title:'New remote title',priority:1,rev:7});
   const review=await f.planner.prepareReview();assert.ok(review.token);
   const result=await f.planner.sync(review.token);
-  assert.deepEqual(result.successes,[1042]);assert.deepEqual(f.calls[0],{id:1042,rev:7,changes:{remainingWork:18}});
+  assert.deepEqual(result.successes,[1042]);assert.deepEqual(f.calls[0],{id:1042,rev:null,changes:{remainingWork:18}});
   assert.equal(f.workspace().items.find(i=>i.id===1042).title,'New remote title');
   assert.equal(f.workspace().drafts[1042],undefined);
   const persisted=JSON.parse(await readFile(f.store.file,'utf8'));assert.equal(persisted.azure.items.find(i=>i.id===1042).remainingWork,18);
 });
-test('conflicts block writes and an explicit local resolution rebases the draft',async t=>{
+test('conflicts are informative and synchronizing keeps the local version',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});
   f.remote.set(1042,{...f.remote.get(1042),remainingWork:6,rev:2});
-  const review=await f.planner.prepareReview();assert.equal(review.token,null);assert.deepEqual(review.plans[0].conflicts,['remainingWork']);
-  await assert.rejects(()=>f.planner.sync(null));assert.equal(f.calls.length,0);
+  const review=await f.planner.prepareReview();assert.ok(review.token);assert.deepEqual(review.plans[0].conflicts,['remainingWork']);
+  const result=await f.planner.sync(review.token);assert.deepEqual(result.successes,[1042]);
+  assert.equal(f.remote.get(1042).remainingWork,18);assert.equal(f.workspace().drafts[1042],undefined);
+});
+test('an explicit local resolution rebases the draft on the Azure version',async t=>{
+  const f=await fixture(t);await f.stage(1042,{remainingWork:18});
+  f.remote.set(1042,{...f.remote.get(1042),remainingWork:6,rev:2});await f.planner.prepareReview();
   const data=structuredClone(f.store.data);resolveConflict(data.azure,1042,'local');await f.store.save(data);
   assert.equal(f.workspace().items.find(i=>i.id===1042).remainingWork,6);assert.equal(f.workspace().drafts[1042].remainingWork,18);
-  const next=await f.planner.prepareReview();assert.ok(next.token);await f.planner.sync(next.token);assert.equal(f.remote.get(1042).remainingWork,18);
 });
 test('choosing the remote version clears only that task draft',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});
@@ -80,14 +84,15 @@ test('a local edit invalidates a review token',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});const review=await f.planner.prepareReview();
   await f.stage(1042,{remainingWork:20});await assert.rejects(()=>f.planner.sync(review.token),/caducado/);assert.equal(f.calls.length,0);
 });
-test('a remote revision change after review prevents the whole batch before writes',async t=>{
+test('a remote revision change after review does not stop the local version',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});const review=await f.planner.prepareReview();
-  f.remote.set(1045,{...f.remote.get(1045),rev:9});await assert.rejects(()=>f.planner.sync(review.token),/ha cambiado/);assert.equal(f.calls.length,0);
+  f.remote.set(1045,{...f.remote.get(1045),rev:9});const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.successes,[1042,1045]);assert.deepEqual(f.calls.map(c=>[c.id,c.rev]),[[1042,null],[1045,null]]);
 });
-test('per-item revision test handles a race after preflight without overwriting',async t=>{
+test('a race after the review is overwritten with the local version',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});const review=await f.planner.prepareReview();
   const update=f.azure.update;f.azure.update=async(...args)=>{f.remote.set(1042,{...f.remote.get(1042),remainingWork:99,rev:5});return update(...args);};
-  const result=await f.planner.sync(review.token);assert.equal(result.failures.length,1);assert.equal(f.remote.get(1042).remainingWork,99);assert.equal(f.workspace().drafts[1042].remainingWork,18);
+  const result=await f.planner.sync(review.token);assert.deepEqual(result.failures,[]);assert.equal(f.remote.get(1042).remainingWork,18);assert.equal(f.workspace().drafts[1042],undefined);
 });
 test('partial sync persists successes and retries only pending tasks',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});
@@ -106,8 +111,12 @@ test('demo simulation never contacts Azure DevOps',async t=>{
   const f=await fixture(t,'demo');for(const name of ['open','getItems','update'])f.azure[name]=async()=>{throw new Error('Must not contact Azure');};
   await f.stage(1042,{remainingWork:18});const review=await f.planner.prepareReview();const result=await f.planner.sync(review.token);assert.equal(result.demo,true);assert.deepEqual(result.successes,[1042]);
 });
-test('missing remote items fail closed',()=>{
-  const ws=createDemo();stageChanges(ws,1042,{remainingWork:18});assert.throws(()=>planReview(ws,[]),/No se pudo leer/);
+test('a task that cannot be read is reported alone and does not stop the rest',async t=>{
+  const ws=createDemo();stageChanges(ws,1042,{remainingWork:18});assert.equal(planReview(ws,[])[0].missing,true);
+  const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});
+  const getItems=f.azure.getItems;f.azure.getItems=async(c,ids)=>getItems(c,ids.filter(id=>id!==1045));
+  const review=await f.planner.prepareReview();const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.successes,[1042]);assert.equal(result.failures[0].id,1045);assert.match(result.failures[0].error,/No se pudo leer/);
 });
 
 test('undoing a planned batch restores its previous drafts while retaining unrelated edits and sharing',async t=>{
@@ -143,26 +152,37 @@ test('new hierarchy stays local, sync creates parents first, remaps links and cl
   const created=saved.items.filter(i=>i.title.startsWith('New '));assert.ok(created.every(i=>i.id>0 && !i.localOnly));
   assert.equal(created.find(i=>i.title==='New task').parent,created.find(i=>i.title==='New story').id);
 });
-test('ambiguous creation is recovered without duplicate writes and cannot be discarded or edited meanwhile',async t=>{
+test('an uncertain creation is searched again and sent again only if Azure still does not have it',async t=>{
   const {createLocalItem,discardLocal}=await import('../server/planner.js');
-  const f=await fixture(t);const data=structuredClone(f.store.data);
+  const f=await fixture(t);f.planner.retryDelay=1;const data=structuredClone(f.store.data);
   const id=createLocalItem(data.azure,{type:'Task',title:'Recover me',parent:1001,remainingWork:3});await f.store.save(data);
-  let remoteCreated,creates=0,visible=false;
-  f.azure.findCreation=async()=>visible ? remoteCreated : null;
-  f.azure.create=async(_config,item,validate)=>{if(validate)return {};creates++;remoteCreated={...item,id:8000,rev:1};throw new Error('Connection lost');};
+  let creates=0,lose=true,checks=0;
+  f.azure.findCreation=async()=>{checks++;return null;};
+  f.azure.create=async(_config,item,validate)=>{if(validate)return {};creates++;if(lose){lose=false;throw new Error('Connection lost');}return {...item,id:8000+creates,rev:1};};
   let review=await f.planner.prepareReview();let result=await f.planner.sync(review.token);assert.equal(result.failures.length,1);assert.equal(creates,1);
   assert.ok(f.workspace().drafts[id]);assert.throws(()=>discardLocal(f.workspace(),id),/sin confirmar/);
   assert.throws(()=>stageChanges(f.workspace(),id,{title:'Changed'}),/Recupera/);
-  review=await f.planner.prepareReview();result=await f.planner.sync(review.token);assert.equal(result.failures.length,1);assert.equal(creates,1);
-  visible=true;review=await f.planner.prepareReview();result=await f.planner.sync(review.token);
-  assert.deepEqual(result.failures,[]);assert.equal(creates,1);assert.ok(f.workspace().items.some(i=>i.id===8000));assert.equal(f.workspace().drafts[id],undefined);
+  review=await f.planner.prepareReview();checks=0;result=await f.planner.sync(review.token);
+  assert.deepEqual(result.failures,[]);assert.equal(checks,4,'searched again before sending');assert.equal(creates,2);
+  assert.ok(f.workspace().items.some(i=>i.id===8002));assert.equal(f.workspace().drafts[id],undefined);
 });
-test('parent revision changes stop creation before any remote write',async t=>{
+test('an uncertain creation that appears in Azure is recovered without sending it again',async t=>{
+  const {createLocalItem}=await import('../server/planner.js');
+  const f=await fixture(t);f.planner.retryDelay=1;const data=structuredClone(f.store.data);
+  createLocalItem(data.azure,{type:'Task',title:'Recover me',parent:1001,remainingWork:3});await f.store.save(data);
+  let creates=0,remoteCreated=null;
+  f.azure.findCreation=async()=>remoteCreated;
+  f.azure.create=async(_config,item,validate)=>{if(validate)return {};creates++;remoteCreated={...item,id:8000,rev:1};throw new Error('Connection lost');};
+  let review=await f.planner.prepareReview();await f.planner.sync(review.token);
+  review=await f.planner.prepareReview();const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.failures,[]);assert.equal(creates,1);assert.ok(f.workspace().items.some(i=>i.id===8000));
+});
+test('a parent changed in Azure does not stop creating its child',async t=>{
   const {createLocalItem}=await import('../server/planner.js');const f=await fixture(t),data=structuredClone(f.store.data);
   createLocalItem(data.azure,{type:'Task',title:'Child',parent:1001});await f.store.save(data);
   const review=await f.planner.prepareReview();f.remote.get(1001).rev++;
-  f.azure.create=async()=>assert.fail('must not create');
-  await assert.rejects(()=>f.planner.sync(review.token),/ha cambiado/);assert.equal(Object.keys(f.workspace().drafts).length,1);
+  f.azure.findCreation=async()=>null;f.azure.create=async(_c,item,validate)=>validate ? {} : {...item,id:9000,rev:1};
+  const result=await f.planner.sync(review.token);assert.deepEqual(result.failures,[]);assert.ok(f.workspace().items.some(i=>i.id===9000));
 });
 test('invalid hierarchy and creation fields are rejected; local creation can be discarded before sending',async t=>{
   const {createLocalItem,discardLocal}=await import('../server/planner.js');const f=await fixture(t,'demo');

@@ -61,12 +61,12 @@ test('review and synchronization route tasks and capacities to each project; rep
  assert.deepEqual(projectCapacityPlans(store.data.azure).map(p=>p.original.activities),projectCapacityPlans(store.data.azure).map(p=>p.entry.activities));
  await assert.rejects(()=>planner.prepareReview(),/No hay cambios/);
 });
-test('a failed task write prevents publishing a capacity split based on unapplied tasks',async()=>{
+test('a failed task write does not stop publishing the local capacity split',async()=>{
  const ws=mergeProjects(project('A',1,30),project('B',2,10)),store=storeFor(ws);let capacityWrites=0;
  stageChanges(ws,2,{remainingWork:20});
  const planner=new Planner(store,{open:async()=>{},getItems:async(c,ids)=>ids.map(id=>({...ws.items.find(i=>i.id===id),iterationPath:c.project+'\\Sprint'})),capacity:async(c,id)=>project(c.project,1).capacities[id],update:async()=>{throw new Error('Denied');},updateMemberCapacity:async()=>{capacityWrites++;}});
  const review=await planner.prepareReview(),result=await planner.sync(review.token);
- assert.equal(result.failures.length,1);assert.equal(capacityWrites,0);assert.equal(result.capacity.failures.length,1);
+ assert.equal(result.failures.length,1);assert.equal(capacityWrites,2);assert.deepEqual(result.capacity.failures,[]);
 });
 test('creation requires a project, inherits parent origin and validates membership and calendar',()=>{
  const a=project('A',1), b=project('B',2);b.members=[];const ws=mergeProjects(a,b);
@@ -76,15 +76,12 @@ test('creation requires a project, inherits parent origin and validates membersh
  assert.throws(()=>stageChanges(ws,2,{assignedTo:member.uniqueName}),/pertenecer al equipo/);
  const remote=planningItem(ws,{id:99,iterationPath:'B\\NotImported'},ws.sources[1]);assert.equal(remote.iterationPath,'B\\NotImported');
 });
-test('remote changes to untouched tasks or project holidays cannot produce a stale allocation',async()=>{
- const ws=mergeProjects(project('A',1,30),project('B',2,10)),store=storeFor(ws);
- let taskChanged=true,daysChanged=false;
- const azure={open:async()=>{},getItems:async(c,ids)=>ids.map(id=>({...project(c.project,id,10).items[0],rev:taskChanged ? 2 : 1})),capacity:async(c,id)=>({...project(c.project,1).capacities[id],daysOff:daysChanged ? [{start:'2026-09-14',end:'2026-09-14'}] : []})};
- const planner=new Planner(store,azure);
- await assert.rejects(()=>planner.prepareReview(),/tareas que han cambiado/);
- taskChanged=false;daysChanged=true;await assert.rejects(()=>planner.prepareReview(),/días libres/);
- daysChanged=false;const review=await planner.prepareReview();taskChanged=true;
- await assert.rejects(()=>planner.sync(review.token),/ha cambiado desde la revisión/);
+test('remote changes to untouched tasks or project holidays do not block the local allocation',async()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10)),store=storeFor(ws),writes=[];
+ const azure={open:async()=>{},getItems:async(c,ids)=>ids.map(id=>({...project(c.project,id,10).items[0],rev:2})),capacity:async(c,id)=>({...project(c.project,1).capacities[id],daysOff:[{start:'2026-09-14',end:'2026-09-14'}]}),updateMemberCapacity:async(c,id,key,activities,daysOff)=>{writes.push([c.project,key]);return {activities,daysOff};}};
+ const planner=new Planner(store,azure),review=await planner.prepareReview();
+ assert.ok(review.token);const result=await planner.sync(review.token);
+ assert.deepEqual(result.capacity.failures,[]);assert.deepEqual(writes,[['A','ana'],['B','ana']]);
 });
 test('personal and global holidays overlap safely and source working days preserve the total budget',()=>{
  const a=project('A',1,30), b=project('B',2,10);b.settings.workingDays=[1,2,3,4];

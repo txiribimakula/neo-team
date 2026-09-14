@@ -141,3 +141,25 @@ test('capacity failures keep the reason, project and iteration for diagnosis',as
   assert.deepEqual(imported.warnings,['No se pudo consultar la capacidad de «Sprint 1» en Project: HTTP 404 al leer los días libres']);
   await assert.rejects(()=>failing('HTTP 403').import(config,()=>{},[],{section:'capacity',snapshot:imported}),/Capacidad de «Sprint 1» en Project: HTTP 403/);
 });
+test('an MCP timeout names the call, a pending sign-in and whether a write may have been applied',async()=>{
+  const gateway=new AzureGateway();
+  const timeout=()=>Object.assign(new Error('MCP error -32001: Request timed out'),{code:-32001});
+  gateway.client={callTool:async({name})=>{if(name==='wit_work_item_write')gateway.report('auth','Esperando el inicio de sesión…');throw timeout();}};
+  await assert.rejects(()=>gateway.call('wit_work_item_write',{action:'update',id:7}),error=>{
+    assert.match(error.message,/^Azure DevOps no respondió en \d+,\d s a escritura de elementos \(wit_work_item_write · update · #7\)\. Estaba esperando el inicio de sesión de Microsoft/);
+    assert.match(error.message,/Puede que el cambio se aplicara/);assert.equal(error.code,-32001);return true;
+  });
+  await assert.rejects(()=>gateway.call('neo_work_items_batch',{ids:[1,2]}),error=>!/inicio de sesión|Puede que el cambio/.test(error.message) && /no respondió .* a neo_work_items_batch/.test(error.message));
+  assert.equal(gateway.pendingCall,null);
+});
+test('transient MCP failures are retried after reconnecting, but creations and real errors are not',async()=>{
+  const gateway=new AzureGateway();gateway.retryDelay=1;gateway.lastConfig={organization:'org'};
+  let attempts=0,opens=0;
+  const client={callTool:async({name})=>{attempts++;if(attempts===1){gateway.client=null;throw Object.assign(new Error('MCP error -32000: Connection closed'),{code:-32000});}if(name==='neo_create_item')throw Object.assign(new Error('MCP error -32001: Request timed out'),{code:-32001});return {content:[{type:'text',text:'{"ok":true}'}]};}};
+  gateway.open=async()=>{opens++;gateway.client=client;};gateway.client=client;
+  assert.deepEqual(await gateway.call('wit_work_item_write',{action:'update',id:7}),{ok:true});
+  assert.equal(attempts,2);assert.equal(opens,1);
+  await assert.rejects(()=>gateway.call('neo_create_item',{}),/no respondió/);assert.equal(attempts,3,'a creation is never replayed');
+  let denied=0;gateway.client={callTool:async()=>{denied++;return {isError:true,content:[{type:'text',text:'TF401320: Invalid field'}]};}};
+  await assert.rejects(()=>gateway.call('wit_work_item_write',{}),/TF401320/);assert.equal(denied,1,'a real error is not retried');
+});

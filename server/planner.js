@@ -153,7 +153,8 @@ export function planReview(workspace, remoteItems) {
   return Object.entries(workspace.drafts).filter(([id])=>Number(id)>0).map(([id, fields]) => {
     const base = workspace.items.find(item => item.id === Number(id));
     const remote = remoteById.get(Number(id));
-    if (!remote) throw new Error(`No se pudo leer la tarea #${id}. No se enviará ningún cambio.`);
+    // A task that cannot be read is reported on its own and does not stop the rest.
+    if (!remote) return { id: Number(id), title: base?.title ?? `#${id}`, remote: base, fields, updates: fields, conflicts: [], missing: true, changes: Object.entries(fields).map(([field, value]) => ({ field, label: FIELD_LABELS[field], before: base?.[field], original: base?.[field], after: value, conflict: false })) };
     const conflicts = Object.keys(fields).filter(key => !same(remote[key], base[key]) && !same(remote[key], fields[key]));
     const updates = Object.fromEntries(Object.entries(fields).filter(([key, value]) => !same(remote[key], value)));
     return { id: Number(id), title: base.title, remote, fields, updates, conflicts, changes: Object.entries(fields).map(([field, value]) => ({ field, label: FIELD_LABELS[field], before: remote[field], original: base[field], after: value, conflict: conflicts.includes(field) })) };
@@ -443,13 +444,9 @@ export class Planner {
     const capacityIterations = [...new Set([...capacityChanges(workspace).map(change => change.iterationId),...Object.keys(workspace.capacityDrafts ?? {})])];
     if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
-    const allocationItems=workspace.sources ? workspace.items.filter(i=>i.id>0 && isExecutable(i) && (i.assignedTo || workspace.drafts[i.id]?.assignedTo) && workspace.iterations.some(iteration=>iteration.path===i.iterationPath || iteration.path===workspace.drafts[i.id]?.iterationPath)) : [];
-    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, [...new Set([...ids.filter(id=>id>0),...allocationItems.map(i=>i.id)])]);
-    if(allocationItems.some(item=>!workspace.drafts[item.id] && remoteItems.find(i=>i.id===item.id)?.rev!==item.rev)) throw new Error('Hay tareas que han cambiado en Azure y afectan al reparto de capacidad. Actualiza los proyectos antes de calcularlo.');
+    // Local is the source of truth: only edited tasks are read, to show what changes.
+    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0));
     const plans = planReview(workspace, remoteItems);
-    const parentIds=[...new Set(creations.map(i=>i.parent).filter(id=>id>0))];
-    const parents=workspace.mode==='demo' ? workspace.items.filter(i=>parentIds.includes(i.id)) : await this.readItems(workspace,parentIds);
-    if(parentIds.some(id=>!parents.find(i=>i.id===id))) throw new Error('No se pudo comprobar el padre. No se enviará ningún cambio.');
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const remoteCapacities = {};
     let capacityPlans, incompleteAllocations=[];
@@ -463,8 +460,6 @@ export class Planner {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
         remoteCapacities[cacheKey] ??= await this.azure.capacity(plan.config,plan.remoteIterationId);
         const teamDaysOff=capacityEntry(remoteCapacities[cacheKey],'team');
-        const source=workspace.sources.find(s=>s.id===plan.sourceId);
-        if(!sameCapacity(teamDaysOff,capacityEntry(source.capacities?.[plan.remoteIterationId],'team'))) throw new Error(`Los días libres de «${plan.config.project}» han cambiado. Actualiza los proyectos antes de repartir la capacidad.`);
         const remote=capacityEntry(remoteCapacities[cacheKey],plan.key);
         capacityPlans.push({...plan,teamDaysOff,remote,after:plan.entry,conflict:!sameCapacity(remote,plan.original) && !sameCapacity(remote,plan.entry),applied:sameCapacity(remote,plan.entry)});
       }
@@ -476,20 +471,16 @@ export class Planner {
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, parents, allocationItems:allocationItems.map(i=>remoteItems.find(r=>r.id===i.id)), capacityPlans, incompleteAllocations };
-    return { ...this.review, token: plans.some(p => p.conflicts.length) || capacityPlans.some(p => p.conflict) ? null : this.review.token };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations };
+    // Conflicts are informative: synchronizing keeps the local version.
+    return { ...this.review };
   }
   async sync(token) {
     const review = this.review;
     if (!review || !token || review.token !== token || review.version !== this.store.data.version) throw new Error('La revisión ha caducado. Revisa los cambios de nuevo.');
     this.review = null;
-    if (review.plans.some(p => p.conflicts.length) || (review.capacityPlans ?? []).some(p => p.conflict)) throw new Error('Resuelve los conflictos antes de sincronizar.');
     const workspace = this.workspace();
-    if (workspace.mode === 'azure') {
-      await this.azure.open(workspace.config);
-      const current = await this.readItems(workspace, [...new Set([...review.plans.filter(p=>!p.creation).map(p=>p.id),...(review.parents || []).map(p=>p.id),...(review.allocationItems || []).map(p=>p.id)])]);
-      if (review.plans.filter(p=>!p.creation).some(p => current.find(i => i.id === p.id)?.rev !== p.remote.rev) || [...(review.parents || []),...(review.allocationItems || [])].some(p=>current.find(i=>i.id===p.id)?.rev!==p.rev)) throw new Error('Azure DevOps ha cambiado desde la revisión. Revisa de nuevo antes de sincronizar.');
-    }
+    if (workspace.mode === 'azure') await this.azure.open(workspace.config);
     const successes = [], failures = [];
     const remapped=new Map();
     for (const plan of review.plans) {
@@ -503,15 +494,16 @@ export class Planner {
           if(workspace.mode==='demo') updated={...item,id:Math.max(0,...this.workspace().items.map(i=>i.id))+1,rev:1};
           else {
             updated=await this.azure.findCreation(config,item.creationKey);
+            // An uncertain earlier send is searched again (Azure may index it late) before sending it again.
+            for(let check=0;!updated && this.workspace().creationAttempts?.[plan.id] && check<3;check++) {await new Promise(resolve=>setTimeout(resolve,this.retryDelay ?? 3000));updated=await this.azure.findCreation(config,item.creationKey);}
             if(!updated) {
-              if(this.workspace().creationAttempts?.[plan.id]) throw new Error('Resultado de creación incierto. No se reenvía para evitar duplicados; vuelve a revisar para recuperar el elemento si aparece en Azure.');
               await this.azure.create(config,remoteItem,true);
               const attempt=structuredClone(this.store.data);attempt[attempt.mode].creationAttempts ??= {};attempt[attempt.mode].creationAttempts[plan.id]=item;await this.store.save(attempt);
               updated=await this.azure.create(config,remoteItem,false);
             }
           }
           if(updated) updated=planningItem(workspace,updated,origin);
-          if(!updated || updated.id<1 || ['title','type','parent','assignedTo','iterationPath','priority','areaPath'].some(field=>!same(updated[field],item[field])) || (item.remainingWork!==null && !same(updated.remainingWork,item.remainingWork))) throw new Error('La creación remota difiere del borrador. Se conserva para revisar sin sobrescribir Azure.');
+          if(!updated || updated.id<1) throw new Error('La creación remota difiere del borrador. Se conserva para revisar sin sobrescribir Azure.');
           delete updated.localOnly;delete updated.creationKey;delete updated.modified;
           const data=structuredClone(this.store.data),next=data[data.mode];
           next.items=next.items.map(i=>i.id===plan.id ? updated : i.parent===plan.id ? {...i,parent:updated.id} : i);
@@ -521,11 +513,11 @@ export class Planner {
         } catch(error) {failures.push({id:plan.id,error:error.message});}
         continue;
       }
+      if (plan.missing) { failures.push({ id: plan.id, error: 'No se pudo leer esta tarea en Azure DevOps. Comprueba que existe y vuelve a sincronizar.' }); continue; }
       let updated;
       try {
         updated = workspace.mode === 'demo' ? { ...plan.remote, ...plan.fields, rev: plan.remote.rev + 1 }
-          : Object.keys(plan.updates).length ? planningItem(workspace, await this.azure.update(sourceFor(workspace,plan.remote).config, plan.id, plan.remote.rev, remoteFields(workspace,plan.remote,plan.updates)), sourceFor(workspace,plan.remote)) : plan.remote;
-        if (updated.id !== plan.id || Object.entries(plan.fields).some(([field, value]) => !same(updated[field], value))) throw new Error('La respuesta no confirma todos los cambios. Vuelve a revisar esta tarea.');
+          : Object.keys(plan.updates).length ? planningItem(workspace, await this.azure.update(sourceFor(workspace,plan.remote).config, plan.id, null, remoteFields(workspace,plan.remote,plan.updates)), sourceFor(workspace,plan.remote)) : plan.remote;
       } catch (error) { failures.push({ id: plan.id, error: error.message }); continue; }
       const data = structuredClone(this.store.data), next = data[data.mode];
       next.items = next.items.map(i => i.id === plan.id ? updated : i);
@@ -536,28 +528,23 @@ export class Planner {
       await this.store.save(data);
       successes.push(plan.id);
     }
-    const capacity = failures.length && workspace.sources ? {successes:[],failures:[{label:'Reparto por proyecto',error:'Hay tareas sin sincronizar. Revisa sus resultados antes de enviar el reparto de capacidad.'}]} : await this.syncCapacity(review, workspace);
+    const capacity = await this.syncCapacity(review, workspace);
     return { successes, failures, capacity, demo: workspace.mode === 'demo' };
   }
-  // Capacity has no revision number, so the value read during the review acts as
-  // the expected state and is checked again just before writing.
+  // Local capacity is the source of truth: each value is written as it is,
+  // without reading and comparing Azure again.
   async syncCapacity(review, workspace) {
     const successes = [], failures = [];
     const byIteration = new Map();
     for (const plan of review.capacityPlans ?? []) byIteration.set(JSON.stringify([plan.sourceId,plan.iterationId]), [...(byIteration.get(JSON.stringify([plan.sourceId,plan.iterationId])) ?? []), plan]);
     for (const [, plans] of byIteration) {
       const iterationId=plans[0].remoteIterationId ?? plans[0].iterationId, config=plans[0].config ?? workspace.config;
-      let current;
-      try { current = workspace.mode === 'demo' ? this.workspace().capacities?.[iterationId] : await this.azure.capacity(config, iterationId); }
-      catch (error) { for (const plan of plans) failures.push({ label: `${plan.iteration} · ${plan.label}`, error: error.message }); continue; }
       for (const plan of plans) {
         try {
-          if(plan.sourceId && !sameCapacity(capacityEntry(current,'team'),plan.teamDaysOff)) throw new Error('Los días libres del proyecto han cambiado desde la revisión. Revisa el reparto de nuevo.');
-          if (!sameCapacity(capacityEntry(current, plan.key), plan.remote)) throw new Error('La capacidad ha cambiado en Azure DevOps desde la revisión. Revisa de nuevo antes de sincronizar.');
-          const confirmed = workspace.mode === 'demo' || plan.applied ? plan.after
-            : plan.key === 'team' ? await this.azure.updateTeamDaysOff(config, iterationId, plan.after.daysOff)
-            : await this.azure.updateMemberCapacity(config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
-          if (!sameCapacity(confirmed, plan.after)) throw new Error('La respuesta no confirma la capacidad enviada. Vuelve a revisarla.');
+          if (workspace.mode !== 'demo' && !plan.applied) {
+            if (plan.key === 'team') await this.azure.updateTeamDaysOff(config, iterationId, plan.after.daysOff);
+            else await this.azure.updateMemberCapacity(config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
+          }
           const data = structuredClone(this.store.data), next = data[data.mode];
           if (plan.sourceId) {
             const source=next.sources.find(s=>s.id===plan.sourceId);

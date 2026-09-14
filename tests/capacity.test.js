@@ -108,16 +108,15 @@ test('capacity changes reach Azure DevOps through the review and update the loca
   assert.equal(store.data.azure.lastSyncedAt!==undefined,true);
 });
 
-test('a capacity changed in Azure since the import is reported as a conflict and can be resolved',async t=>{
+test('a capacity changed in Azure since the import is shown as a conflict and synchronizing keeps the local value',async t=>{
   const { planner, remote, calls, workspace, stage } = await fixture(t,'azure');
   const iteration = workspace().iterations[0];
   await stage({key:'ana',activities:[{name:'Development',capacityPerDay:7}]});
   remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities=[{name:'Development',capacityPerDay:3}];
   const review = await planner.prepareReview();
-  assert.equal(review.token,null,'a conflict blocks the synchronization');
+  assert.ok(review.token,'a conflict does not block the synchronization');
   assert.equal(review.capacityPlans[0].conflict,true);
   assert.deepEqual(workspace().capacityConflicts[iteration.id].ana.activities,[{name:'Development',capacityPerDay:3}]);
-  await assert.rejects(()=>planner.sync(review.token),/caducado|conflictos/);
   const kept = structuredClone(workspace());
   resolveCapacityConflict(kept,iteration.id,'ana','local');
   assert.deepEqual(capacityEntry(kept.capacities[iteration.id],'ana').activities,[{name:'Development',capacityPerDay:3}],'the Azure value becomes the new base');
@@ -125,8 +124,11 @@ test('a capacity changed in Azure since the import is reported as a conflict and
   const discarded = structuredClone(workspace());
   resolveCapacityConflict(discarded,iteration.id,'ana','remote');
   assert.deepEqual(discarded.capacityDrafts,{});
-  assert.equal(calls.length,0,'nothing is written to Azure while the conflict is open');
   assert.throws(()=>resolveCapacityConflict(discarded,iteration.id,'ana','remote'),/Revisa/);
+  assert.equal(calls.length,0,'nothing is written before synchronizing');
+  const result = await planner.sync(review.token);
+  assert.deepEqual(result.capacity.failures,[]);
+  assert.equal(remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities[0].capacityPerDay,7,'the local value is written');
 });
 
 test('the demo mode simulates capacity synchronization without contacting Azure',async t=>{

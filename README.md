@@ -109,7 +109,7 @@ Usa **+ Crear** o el **+** de una rama para crear épicas, features, historias, 
 
 Cada creación incluye una etiqueta técnica única `neo-create-…` que permite recuperar su resultado sin duplicar elementos si se pierde la respuesta. Se valida en Azure antes de enviar. Una creación enviada con resultado incierto no se reenvía ni se descarta automáticamente: la siguiente revisión y sincronización intentan localizarla. Si sigue sin aparecer o difiere del borrador, se conserva bloqueada para comprobarla en Azure. No elimines esta etiqueta mientras se recupera una creación incierta.
 
-Los cambios existentes comparan los valores originales, locales y remotos. Un conflicto requiere elegir una versión; las escrituras comprueban además `/rev` de forma atómica. Un cambio remoto después de revisar detiene la sincronización. Los fallos parciales conservan los elementos pendientes. El reparto compartido de ramas y las confirmaciones personales son locales; las asignaciones de responsable sí se envían a Azure.
+Los cambios existentes comparan los valores originales, locales y remotos. La revisión muestra los conflictos, pero no bloquea: al sincronizar se envía la versión local, que sobrescribe lo que haya en Azure. Las llamadas que agotan el tiempo, pierden la conexión o reciben un error temporal se reintentan hasta tres veces. Los fallos parciales conservan los elementos pendientes. El reparto compartido de ramas y las confirmaciones personales son locales; las asignaciones de responsable sí se envían a Azure.
 
 La creación real depende de los tipos y campos habilitados en el proceso del proyecto. Se han probado los contratos MCP y escenarios de error con datos controlados; no se ha creado ningún elemento en una organización real durante el desarrollo.
 
