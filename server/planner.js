@@ -445,7 +445,8 @@ export class Planner {
     if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
     // Local is the source of truth: only edited tasks are read, to show what changes.
-    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0));
+    // If Azure cannot be read, the local copy stands in so every draft is still written.
+    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0)).catch(() => workspace.items.filter(i => ids.includes(i.id)));
     const plans = planReview(workspace, remoteItems);
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const remoteCapacities = {};
@@ -458,13 +459,14 @@ export class Planner {
       capacityPlans=[];
       for (const plan of allocations.filter(p=>!sameCapacity(p.original,p.entry))) {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
-        remoteCapacities[cacheKey] ??= await this.azure.capacity(plan.config,plan.remoteIterationId);
+        // A capacity that cannot be read does not stop the sync: the local copy stands in.
+        if (!(cacheKey in remoteCapacities)) remoteCapacities[cacheKey] = await this.azure.capacity(plan.config,plan.remoteIterationId).catch(() => null);
         const teamDaysOff=capacityEntry(remoteCapacities[cacheKey],'team');
-        const remote=capacityEntry(remoteCapacities[cacheKey],plan.key);
+        const remote=remoteCapacities[cacheKey] ? capacityEntry(remoteCapacities[cacheKey],plan.key) : plan.original;
         capacityPlans.push({...plan,teamDaysOff,remote,after:plan.entry,conflict:!sameCapacity(remote,plan.original) && !sameCapacity(remote,plan.entry),applied:sameCapacity(remote,plan.entry)});
       }
     } else {
-      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId);
+      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId).catch(() => workspace.capacities?.[iterationId]);
       capacityPlans = planCapacityReview(workspace, remoteCapacities);
     }
     const data = structuredClone(this.store.data);

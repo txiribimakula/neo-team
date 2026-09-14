@@ -163,3 +163,10 @@ test('transient MCP failures are retried after reconnecting, but creations and r
   let denied=0;gateway.client={callTool:async()=>{denied++;return {isError:true,content:[{type:'text',text:'TF401320: Invalid field'}]};}};
   await assert.rejects(()=>gateway.call('wit_work_item_write',{}),/TF401320/);assert.equal(denied,1,'a real error is not retried');
 });
+test('a team without capacity in the iteration reads as empty instead of failing',async()=>{
+  const gateway=new AzureGateway();
+  gateway.call=async name=>{if(name==='work')throw new Error('No team capacity assigned to the team');return {daysOff:[{start:'2026-09-14',end:'2026-09-14'}]};};
+  assert.deepEqual(await gateway.capacity({project:'P',team:'T'},'s1'),{teamMembers:[],daysOff:[{start:'2026-09-14',end:'2026-09-14'}]});
+  gateway.call=async()=>{throw new Error('HTTP 403');};
+  await assert.rejects(()=>gateway.capacity({project:'P',team:'T'},'s1'),/403/);
+});

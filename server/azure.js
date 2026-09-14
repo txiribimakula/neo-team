@@ -174,7 +174,10 @@ export class AzureGateway {
   }
   async capacity(config, iterationId) {
     const context = { project: config.project, team: config.team };
-    const capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId });
+    let capacity;
+    // The official tool answers with an error when nobody has capacity in the iteration.
+    try { capacity = await this.call('work', { action: 'get_team_capacity', ...context, iterationId }); }
+    catch (error) { if (!/No team capacity assigned/i.test(String(error?.message))) throw error; capacity = { teamMembers: [] }; }
     const daysOff = await this.call('neo_team_days_off', { ...context, iterationId });
     if (!daysOff || typeof daysOff !== 'object') throw new Error(`Azure DevOps no devolvió los días libres de la iteración ${iterationId} (equipo «${config.team}»).`);
     return { ...capacity, daysOff: daysOff.daysOff ?? [] };

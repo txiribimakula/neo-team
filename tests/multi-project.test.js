@@ -114,3 +114,15 @@ test('an item moved between projects stays only where Azure has it now, and real
  const twice=project('B',2);twice.items.push({...twice.items[0]});
  assert.throws(()=>mergeProjects(project('A',1),twice),{message:'Hay elementos duplicados entre los proyectos importados: #2 «Task B» (B y B).'});
 });
+test('capacity or task reads that fail do not stop writing the local changes',async()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10)),store=storeFor(ws),writes=[];
+ stageChanges(ws,1,{remainingWork:25});
+ const fail=async()=>{throw new Error('No team capacity assigned to the team');};
+ const azure={open:async()=>{},getItems:fail,capacity:fail,
+  update:async(c,id,rev,fields)=>{writes.push(['task',c.project,id,rev]);return {...ws.items.find(i=>i.id===id),...fields,iterationPath:c.project+'\\Sprint',rev:2};},
+  updateMemberCapacity:async(c,id,key,activities,daysOff)=>{writes.push(['capacity',c.project,key]);return {activities,daysOff};}};
+ const planner=new Planner(store,azure),review=await planner.prepareReview();
+ assert.ok(review.token);const result=await planner.sync(review.token);
+ assert.deepEqual(result.failures,[]);assert.deepEqual(result.capacity.failures,[]);
+ assert.deepEqual(writes,[['task','A',1,null],['capacity','A','ana'],['capacity','B','ana']]);
+});
