@@ -592,7 +592,7 @@ function treeView({ availableOnly = false, search = query } = {}) {
     }
     const effort=node.remainingWork !== null ? `${number(node.remainingWork)} h` : node.points !== null ? `${number(node.points)} pts` : 'Sin estimar';
     const status=iterationName(node.iterationPath);
-    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>`;
+    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${duplicateButton(node)}`;
     const leaf=`<div class="hierarchy-leaf" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
@@ -915,6 +915,7 @@ function updatePlanningView() {
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
+const duplicateButton = item => `<button type="button" class="icon-button" data-action="duplicate" data-task="${item.id}" title="Duplicar con su mismo padre" aria-label="Duplicar #${item.id}">⧉</button>`;
 // Hour fields are edited on the card itself, with the names they have in Azure DevOps.
 function taskEstimates(item) {
   const fields=estimateFields(state.workspace,item);
@@ -926,7 +927,7 @@ function taskCard(item, inBacklog = false) {
   const estimates = taskEstimates(item);
   const effort = estimates ? '' : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
   return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="true" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
-    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div>
+    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}${duplicateButton(item)}</div>
     <p class="task-title">${item.project ? `<small class="pill">${escape(item.project)}</small> ` : ''}${escape(item.title)}</p>
     <div class="task-footer"><div class="task-tags">${item.tags.slice(0,2).map(t=>`<span class="tag">${escape(t)}</span>`).join('')}${item.priority === 1 ? '<span class="tag" style="background:#fceee3;color:#a6743e">P1</span>' : ''}</div>${effort ? `<span class="effort">${effort}</span>` : ''}</div>
     ${estimates}
@@ -945,7 +946,7 @@ function lane(member, allItems, index, iteration) {
 }
 // The left panel alternates between the available backlog and the sprint's
 // unassigned tasks; people take one row each on the right.
-let leftPanel='backlog';
+let leftPanel='backlog', laneOrder=null;
 function unassignedTasks(iteration=selected()) {
   return state.workspace.effectiveItems.filter(i=>isExecutable(i) && iteration && i.iterationPath===iteration.path && !i.assignedTo);
 }
@@ -968,11 +969,17 @@ function board(iteration, planned) {
   const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
   const excluded=planned.filter(i=>i.assignedTo && ws.members.some(m=>key(m)===i.assignedTo) && !activeKeys.has(i.assignedTo));
   const considered=planned.length-excluded.length;
+  // People whose hours are all assigned go last. The order holds while assigning and
+  // is refreshed on entering the step or closing someone, so rows never jump.
+  const full=member=>{const capacity=ws.capacityHours[iteration.id]?.[member.id] ?? null, hours=planned.filter(i=>i.assignedTo===key(member)).reduce((sum,i)=>sum+(i.remainingWork || 0),0);return capacity!==null && capacity>0 && hours>=capacity-0.005;};
+  const orderKey=`${iteration.id}|${members.map(key).join(',')}`;
+  if (laneOrder?.key!==orderKey) laneOrder={key:orderKey,ids:members.map((m,index)=>({id:key(m),index,full:full(m)})).sort((a,b)=>Number(a.full)-Number(b.full) || a.index-b.index).map(m=>m.id)};
+  const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop=""${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i)).join('')}</div></section>` : '';
-  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><div class="members-grid">${members.map((m,index)=>lane(m,planned,index,iteration)).join('')}${extra('Fuera del reparto','Tareas asignadas a personas con capacidad 0',excluded,'zero-capacity')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
+  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Fuera del reparto','Tareas asignadas a personas con capacidad 0',excluded,'zero-capacity')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
 function render() {
@@ -1278,6 +1285,7 @@ const actions = {
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
   'download-hierarchy':downloadHierarchy,
+  duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
   'upload-capacity':uploadCapacity,
   'download-choice':async el=>{
@@ -1292,7 +1300,7 @@ const actions = {
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;tab='capacity';render();window.scrollTo({top:0});},
-  'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
+  'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
   'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);previousGroupOrder=null;updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
@@ -1304,10 +1312,10 @@ const actions = {
     chooseCompletedState(type,taskId,result.states,sourceId);
   },
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
-  'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member))expandedLanes.delete(member);else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
+  'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
-  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;if(tab==='planning')previousGroupOrder=null;changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
+  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousGroupOrder=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
   review: reviewChanges, sync:synchronize,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},

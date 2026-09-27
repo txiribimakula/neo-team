@@ -227,3 +227,27 @@ test('a task that could not be read during the review is written only if Azure s
   assert.equal(f.remote.get(1045).priority,3,'the change made in Azure is not overwritten');
   assert.deepEqual(f.workspace().drafts[1045],{priority:1},'the local change stays pending');
 });
+
+test('a task is duplicated as a new local item with its parent, owner, iteration, hours, priority and tags',async()=>{
+  const {duplicateItem,effectiveItems,stageChanges}=await import('../server/planner.js');
+  const ws=createDemo();
+  stageChanges(ws,1042,{originalEstimate:14,priority:1});
+  const original=effectiveItems(ws).find(i=>i.id===1042);
+  const id=duplicateItem(ws,1042), copy=effectiveItems(ws).find(i=>i.id===id);
+  assert.ok(id<0 && copy.localOnly);
+  for (const field of ['title','type','parent','assignedTo','iterationPath','remainingWork','originalEstimate','priority','areaPath']) assert.deepEqual(copy[field],original[field],field);
+  assert.deepEqual(copy.tags,original.tags);
+  const orphan=ws.items.find(i=>i.id===1059);orphan.parent=null;
+  const orphanCopy=duplicateItem(ws,1059);
+  assert.equal(effectiveItems(ws).find(i=>i.id===orphanCopy).parent,null,'a task without parent is duplicated without one');
+  assert.throws(()=>duplicateItem(ws,1001),/tareas y bugs/);
+});
+test('a duplicate is created in Azure with its estimate and tags',async()=>{
+  const {AzureGateway}=await import('../server/azure.js');
+  const gateway=new AzureGateway();let call;
+  gateway.call=async(name,args)=>{call={name,args};return {id:77,rev:1,fields:{'System.Title':'Copia','System.WorkItemType':'Task'}};};
+  await gateway.create({project:'P'},{title:'Copia',type:'Task',creationKey:'k',areaPath:'P',iterationPath:'P',priority:1,assignedTo:'',remainingWork:3,originalEstimate:8,tags:['Frontend'],parent:5});
+  assert.equal(call.args.fields['Microsoft.VSTS.Scheduling.OriginalEstimate'],8);
+  assert.equal(call.args.fields['System.Tags'],'neo-create-k; Frontend');
+  assert.equal(call.args.parent,5);
+});

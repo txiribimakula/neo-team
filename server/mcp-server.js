@@ -185,7 +185,7 @@ server.tool('neo_create_item', 'Create or validate one work item with its parent
   fields:z.record(z.union([z.string(),z.number()])), parent:z.number().int().positive().nullable(), validateOnly:z.boolean(),
 }, async ({project,type,fields,parent,validateOnly})=>{
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
-  const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Common.Priority'];
+  const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Common.Priority'];
   if(Object.keys(fields).some(k=>!allowed.includes(k))) throw new Error('Campo no permitido.');
   const document=Object.entries(fields).map(([name,value])=>({op:'add',path:`/fields/${name}`,value}));
   if(parent) document.push({op:'add',path:'/relations/-',value:{rel:'System.LinkTypes.Hierarchy-Reverse',url:`https://dev.azure.com/${organization}/_apis/wit/workItems/${parent}`}});

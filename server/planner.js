@@ -27,21 +27,36 @@ export function normalizeItem(raw) {
 }
 export const same = (a, b) => (a ?? null) === (b ?? null);
 export const effectiveItems = workspace => workspace.items.map(item => ({ ...item, ...workspace.drafts[item.id], modified: !!workspace.drafts[item.id] || !!item.localOnly }));
-export function createLocalItem(workspace, input) {
+export function createLocalItem(workspace, input, { duplicate = false } = {}) {
   if (!workspace) throw new Error('Importa una planificación primero.');
   const types=['Epic','Feature','User Story','Task','Bug'];
   if (!types.includes(input.type) || typeof input.title!=='string' || !input.title.trim() || input.title.trim().length>255) throw new Error('Indica un tipo y un título válido (máximo 255 caracteres).');
   const parent=input.parent ? workspace.items.find(i=>i.id===input.parent) : null;
   const allowed={Epic:[],Feature:['Epic'],'User Story':['Feature'],Task:['User Story','Product Backlog Item','Requirement'],Bug:['User Story','Product Backlog Item','Requirement']};
-  if (input.parent && (!parent || !allowed[input.type].includes(parent.type))) throw new Error('El padre no corresponde a este nivel de jerarquía.');
-  if (input.type!=='Epic' && !parent) throw new Error('Elige un padre para mantener la jerarquía.');
+  // A duplicate keeps exactly the parent of its original, whatever it is.
+  if (input.parent && (!parent || !duplicate && !allowed[input.type].includes(parent.type))) throw new Error('El padre no corresponde a este nivel de jerarquía.');
+  if (input.type!=='Epic' && !parent && !duplicate) throw new Error('Elige un padre para mantener la jerarquía.');
   const id=Math.min(0,...workspace.items.map(i=>i.id),workspace.nextLocalId || 0)-1;
   const origin=workspace.sources ? (parent ? sourceFor(workspace,parent) : workspace.sources.find(s=>s.id===input.sourceId)) : null;
   if(workspace.sources && !origin) throw new Error('Elige el proyecto del nuevo elemento.');
-  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true};
+  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true,...(duplicate ? {areaPath:input.areaPath ?? parent?.areaPath,tags:[...(input.tags ?? [])]} : {})};
   workspace.items.push(item);workspace.nextLocalId=id;
   stageChanges(workspace,id,{title:item.title,...(input.assignedTo ? {assignedTo:input.assignedTo} : {}),...(input.iterationPath ? {iterationPath:input.iterationPath} : {}),...(input.remainingWork!==undefined ? {remainingWork:input.remainingWork} : {})});
   return id;
+}
+// Duplicates a task or bug as a new local item: same parent, project, area, owner,
+// iteration, hours, priority and tags. It is created in Azure when synchronized.
+export function duplicateItem(workspace, id) {
+  const item = workspace && effectiveItems(workspace).find(i => i.id === id);
+  if (!item || !isExecutable(item) || item.contextOnly) throw new Error('Solo se pueden duplicar tareas y bugs.');
+  const member = item.assignedTo && workspace.members.some(m => identityKey(m) === item.assignedTo) ? item.assignedTo : undefined;
+  const copy = createLocalItem(workspace, { type: item.type, title: item.title, parent: item.parent, sourceId: item.sourceId, areaPath: item.areaPath, tags: item.tags,
+    ...(member ? { assignedTo: member } : {}), iterationPath: item.iterationPath, ...(item.remainingWork != null ? { remainingWork: item.remainingWork } : {}) }, { duplicate: true });
+  const extra = {};
+  if (item.canPrioritize && item.priority != null && item.priority !== 2) extra.priority = item.priority;
+  if (item.originalEstimate != null && estimateFields(workspace, item).originalEstimate) extra.originalEstimate = item.originalEstimate;
+  if (Object.keys(extra).length) stageChanges(workspace, copy, extra);
+  return copy;
 }
 export function discardLocal(workspace,id) {
   const ids=id===undefined ? workspace.items.filter(i=>i.localOnly).map(i=>i.id) : [id];
@@ -390,7 +405,7 @@ export class Planner {
     const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0)).catch(error => { unreadable.push(`Tareas: ${error.message}`); return workspace.items.filter(i => ids.includes(i.id)); });
     const plans = planReview(workspace, remoteItems);
     if (unreadable.length) for (const plan of plans) if (!plan.missing) plan.unverified = true;
-    for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
+    for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','originalEstimate','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const { capacityPlans, incompleteAllocations } = await this.reviewCapacity(workspace, unreadable);
     const data = structuredClone(this.store.data);
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));

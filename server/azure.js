@@ -336,9 +336,10 @@ export class AzureGateway {
     return result.workItems.length ? (await this.getItems(config,[result.workItems[0].id]))[0] : null;
   }
   async create(config,item,validateOnly=false) {
-    const fields={'System.Title':item.title,'System.Tags':`neo-create-${item.creationKey}`,'System.AreaPath':item.areaPath,'System.IterationPath':item.iterationPath,'Microsoft.VSTS.Common.Priority':item.priority};
+    const fields={'System.Title':item.title,'System.Tags':[`neo-create-${item.creationKey}`,...(item.tags ?? [])].join('; '),'System.AreaPath':item.areaPath,'System.IterationPath':item.iterationPath,'Microsoft.VSTS.Common.Priority':item.priority};
     if(item.assignedTo) fields['System.AssignedTo']=item.assignedTo;
     if(item.remainingWork!==null) fields['Microsoft.VSTS.Scheduling.RemainingWork']=item.remainingWork;
+    if(item.originalEstimate!=null) fields['Microsoft.VSTS.Scheduling.OriginalEstimate']=item.originalEstimate;
     const raw=await this.call('neo_create_item',{project:config.project,type:item.type,fields,parent:item.parent,validateOnly});
     return validateOnly ? raw : normalizeItem(raw);
   }
