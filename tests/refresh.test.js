@@ -21,21 +21,21 @@ test('iteration refresh reads only iteration metadata, preserving tasks, members
  const ws=fixture(),before=structuredClone(ws),{azure,calls}=gateway(ws);
  const next=await refreshSection(ws,'iterations',azure,[]);
  assert.ok(next.iterations[0].name.endsWith('actualizada'));
- for(const field of ['items','members','capacities','settings','participants'])assert.deepEqual(next[field],ws[field]);
+ for(const field of ['items','members','capacities','settings'])assert.deepEqual(next[field],ws[field]);
  assert.deepEqual(calls.map(([name,args])=>[name,args.action]),[['work','list_team_iterations']]);assert.deepEqual(ws,before);
 });
 test('capacity refresh reads only capacity and holidays and keeps pending task edits',async()=>{
  const ws=fixture();ws.drafts={[ws.items[0].id]:{title:'Local'}};
  const {azure,calls}=gateway(ws),next=await refreshSection(ws,'capacity',azure,[]);
  assert.equal(next.capacities[ws.iterations[0].id].teamMembers[0].activities[0].capacityPerDay,3);
- for(const field of ['items','drafts','iterations','members','participants'])assert.deepEqual(next[field],ws[field]);
+ for(const field of ['items','drafts','iterations','members'])assert.deepEqual(next[field],ws[field]);
  assert.ok(calls.every(([name,args])=>name==='neo_team_days_off' || name==='work' && args.action==='get_team_capacity'));
 });
 test('task refresh does not request iterations, settings, members or capacities; capacity drafts survive',async()=>{
  const ws=fixture();ws.capacityDrafts={[ws.iterations[0].id]:{ana:{activities:[{name:'',capacityPerDay:4}],daysOff:[]}}};
  const {azure,calls}=gateway(ws),next=await refreshSection(ws,'tasks',azure,[]);
  assert.deepEqual(next.items,[]);
- for(const field of ['capacities','capacityDrafts','iterations','members','settings','participants'])assert.deepEqual(next[field],ws[field]);
+ for(const field of ['capacities','capacityDrafts','iterations','members','settings'])assert.deepEqual(next[field],ws[field]);
  assert.ok(calls.every(([name])=>['neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)));
 });
 test('only drafts affected by the refresh block it; failure leaves the workspace intact',async()=>{

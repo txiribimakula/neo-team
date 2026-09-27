@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createDemo} from '../server/demo.js';
-import {confirmPerson,invalidateConfirmations,planningWorkspace,stageChanges,planTasks,toggleParticipation} from '../server/planner.js';
+import {confirmPerson,invalidateConfirmations,planningWorkspace,stageChanges,planTasks} from '../server/planner.js';
 import {personPlanningStatus,orderedPlanningMembers,eligibleTasks} from '../dist/hierarchy.js';
 const ana='ana@example.test',iteration='sprint-24';
 function coveredWorkspace() {
@@ -44,7 +44,6 @@ test('people with zero capacity are omitted from every planning action',()=>{
   assert.ok(!orderedPlanningMembers(view,iteration).some(row=>row.member.id===person.id));
   assert.deepEqual(eligibleTasks(view,ana,iteration),[]);
   assert.throws(()=>planTasks(ws,ana,[1042],iteration),/capacidad 0/);
-  assert.throws(()=>toggleParticipation(ws,900,ana,true,iteration),/capacidad 0/);
   assert.throws(()=>stageChanges(ws,1053,{assignedTo:ana,iterationPath:ws.iterations.find(i=>i.id===iteration).path}),/capacidad 0/);
   assert.doesNotThrow(()=>stageChanges(ws,1042,{title:'Editar sin tocar su reparto',assignedTo:ana,iterationPath:ws.iterations.find(i=>i.id===iteration).path}));
 });

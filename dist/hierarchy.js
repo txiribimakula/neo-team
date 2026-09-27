@@ -57,19 +57,6 @@ export function ancestors(id, tree) {
   while (current !== undefined) { result.unshift(tree.nodes.get(current)); current=tree.parents.get(current); }
   return result;
 }
-export function participantSources(item, workspace, tree = hierarchy(workspace.effectiveItems || workspace.items)) {
-  const sources = new Map(), blocked=new Set();
-  for (const node of [...ancestors(item.id,tree),item]) {
-    for (const member of workspace.participantExclusions?.[node.id] || []) {sources.delete(member);blocked.add(member);}
-    const direct=workspace.participants?.[node.id] || [];
-    for (const member of direct) blocked.delete(member);
-    for (const member of new Set([...direct, ...(node.assignedTo && !blocked.has(node.assignedTo) ? [node.assignedTo] : [])])) {
-      if (!sources.has(member)) sources.set(member,[]);
-      sources.get(member).push({id:node.id,title:node.title,inherited:node.id !== item.id,assigned:node.assignedTo === member});
-    }
-  }
-  return sources;
-}
 
 export function capacityStatus(summary) {
   const {plannedHours:hours,capacity,unknownPlanned:unknown}=summary;

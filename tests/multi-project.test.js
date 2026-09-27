@@ -20,14 +20,12 @@ test('projects share a calendar and a single member budget, while paths stay rou
  stageCapacity(ws,ws.iterations[0].id,{key:'ana',activities:[{name:'Development',capacityPerDay:6}]});
  assert.deepEqual(projectCapacityPlans(ws).map(p=>p.allocated),[22.5,7.5]);
 });
-test('refresh retains the global budget, project origins and locally defined participation',()=>{
+test('refresh retains the global budget and project origins',()=>{
  let ws=mergeProjects(project('A',1,30),project('B',2,10));
  ws.capacities[ws.iterations[0].id].teamMembers[0].activities[0].capacityPerDay=7;
- ws.participants={1:['ana@example.test']};
  ws=mergeProjects(ws,project('A',1,20));
  assert.deepEqual(ws.items.map(i=>i.id).sort(),[1,2]);assert.equal(ws.members.length,1);
  assert.equal(planningWorkspace(ws).capacityHours[ws.iterations[0].id].ana,35);
- assert.deepEqual(ws.participants,{1:['ana@example.test']});
  assert.equal(ws.sources.find(s=>s.config.project==='A').capacities['iteration-A'].teamMembers[0].activities[0].capacityPerDay,8);
 });
 test('prevents ID collisions across organizations, ambiguous team capacity and incompatible calendars',()=>{

@@ -1,6 +1,6 @@
 import { sourcesOf, sourceFor, planningItem, remoteFields } from './multi-project.js';
 import { randomUUID } from 'node:crypto';
-import { eligibleTasks, isExecutable, completedState, hierarchy, ancestors, participantSources, personPlanningStatus } from '../dist/hierarchy.js';
+import { eligibleTasks, isExecutable, completedState, personPlanningStatus } from '../dist/hierarchy.js';
 
 export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', remainingWork: 'Horas pendientes', state: 'Estado' };
 export function identityKey(identity) {
@@ -53,19 +53,6 @@ export function discardLocal(workspace,id) {
     for(const plan of projectCapacityPlans(workspace).filter(allocationPending)) markAllocationDiscarded(workspace,plan);
   }
   else {delete workspace.drafts[id];delete workspace.conflicts[id];}
-  for(const localId of ids) if(localId<0){delete workspace.participants?.[localId];delete workspace.participantExclusions?.[localId];}
-}
-export function setParticipants(workspace, assignments, iterationId) {
-  if (!workspace || !Array.isArray(assignments) || !assignments.length || assignments.length > 200) throw new Error('Reparto no válido.');
-  const next = { ...workspace.participants };
-  for (const assignment of assignments) {
-    if (!workspace.items.some(i=>i.id === assignment.id)) throw new Error('El elemento no pertenece a este backlog.');
-    if (!Array.isArray(assignment.members) || assignment.members.some(key=>!workspace.members.some(m=>identityKey(m) === key))) throw new Error('Elige integrantes de este equipo.');
-    if (iterationId && assignment.members.some(member=>!memberHasCapacity(workspace,member,iterationId))) throw new Error('Las personas con capacidad 0 quedan fuera del reparto de esta iteración.');
-    const keys = [...new Set(assignment.members)];
-    if (keys.length) next[assignment.id] = keys; else delete next[assignment.id];
-  }
-  workspace.participants = next;
 }
 export function planTasks(workspace, member, ids, iterationId) {
   if (!workspace || !workspace.members.some(m=>identityKey(m) === member)) throw new Error('Elige una persona del equipo.');
@@ -87,39 +74,10 @@ export function selectTasks(workspace, member, ids, iterationId, selected) {
   if (!workspace || !workspace.members.some(m=>identityKey(m)===member)) throw new Error('Elige una persona del equipo.');
   const iteration=workspace.iterations.find(i=>i.id===iterationId);
   if (!iteration || !Array.isArray(ids) || !ids.length || ids.length>200 || new Set(ids).size!==ids.length) throw new Error('Selección no válida.');
-  const items=effectiveItems(workspace),tree=hierarchy(items);
+  const items=effectiveItems(workspace);
   const tasks=ids.map(id=>items.find(i=>i.id===id));
   for (const item of tasks) if (!item || !isExecutable(item) || item.assignedTo!==member || item.iterationPath!==iteration.path) throw new Error('Solo puedes desmarcar tareas de esta persona en esta iteración.');
-  for (const item of tasks) {
-    // Retain eligibility for a task that was available only through AssignedTo,
-    // so unchecking it does not make it disappear from the person's choices.
-    const unassigned={...item,assignedTo:''};
-    if (!participantSources(unassigned,workspace,tree).has(member)) {
-      workspace.participants ??= {};
-      workspace.participants[item.id]=[...new Set([...(workspace.participants[item.id] || []),member])];
-      if(workspace.participantExclusions?.[item.id]) workspace.participantExclusions[item.id]=workspace.participantExclusions[item.id].filter(m=>m!==member);
-    }
-    stageChanges(workspace,item.id,{assignedTo:'',iterationPath:workspace.settings.backlogIteration.path});
-  }
-}
-export function toggleParticipation(workspace,id,member,selected,iterationId) {
-  if (!workspace || !workspace.items.some(i=>i.id===id) || !workspace.members.some(m=>identityKey(m)===member) || typeof selected!=='boolean') throw new Error('Reparto no válido.');
-  const iteration=workspace.iterations.find(i=>i.id===iterationId);
-  if (iterationId && !iteration) throw new Error('Iteración no válida.');
-  if(selected && iterationId && !memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
-  workspace.participants ??= {}; workspace.participantExclusions ??= {};
-  if(selected) {
-    workspace.participants[id]=[...new Set([...(workspace.participants[id] || []),member])];
-    workspace.participantExclusions[id]=(workspace.participantExclusions[id] || []).filter(m=>m!==member);
-    return;
-  }
-  const items=effectiveItems(workspace),tree=hierarchy(items);
-  const branch=items.filter(item=>item.id===id || ancestors(item.id,tree).some(p=>p.id===id));
-  for (const item of branch) {
-    if(workspace.participants[item.id]) workspace.participants[item.id]=workspace.participants[item.id].filter(m=>m!==member);
-    if(iteration && isExecutable(item) && item.assignedTo===member && item.iterationPath===iteration.path) stageChanges(workspace,item.id,{assignedTo:'',iterationPath:workspace.settings.backlogIteration.path});
-  }
-  workspace.participantExclusions[id]=[...new Set([...(workspace.participantExclusions[id] || []),member])];
+  for (const item of tasks) stageChanges(workspace,item.id,{assignedTo:'',iterationPath:workspace.settings.backlogIteration.path});
 }
 export function stageChanges(workspace, id, changes) {
   const item = workspace.items.find(i => i.id === id);
@@ -464,26 +422,6 @@ export class Planner {
     }
     return result;
   }
-  async planBatch(member, ids, iterationId) {
-    const data=structuredClone(this.store.data), workspace=data[data.mode];
-    const before=structuredClone({drafts:workspace?.drafts,conflicts:workspace?.conflicts});
-    planTasks(workspace,member,ids,iterationId);
-    await this.store.save(data); this.review=null;
-    this.lastBatch={token:randomUUID(),version:this.store.data.version,mode:data.mode,ids,before};
-    return {token:this.lastBatch.token,version:this.lastBatch.version,count:ids.length};
-  }
-  async undoPlan(token) {
-    const batch=this.lastBatch;
-    if (!batch || batch.token!==token || batch.version!==this.store.data.version || batch.mode!==this.store.data.mode) throw new Error('El plan ha cambiado. Ya no se puede deshacer este lote automáticamente.');
-    const data=structuredClone(this.store.data), workspace=data[data.mode];
-    for (const id of batch.ids) {
-      for (const field of ['drafts','conflicts']) {
-        if (Object.hasOwn(batch.before[field],id)) workspace[field][id]=batch.before[field][id];
-        else delete workspace[field][id];
-      }
-    }
-    await this.store.save(data); this.lastBatch=null; this.review=null;
-  }
   async prepareReview() {
     const workspace = this.workspace();
     if (!workspace) throw new Error('Importa una planificación primero.');
@@ -568,7 +506,6 @@ export class Planner {
           delete updated.localOnly;delete updated.creationKey;delete updated.modified;
           const data=structuredClone(this.store.data),next=data[data.mode];
           next.items=next.items.map(i=>i.id===plan.id ? updated : i.parent===plan.id ? {...i,parent:updated.id} : i);
-          for(const field of ['participants','participantExclusions']) if(next[field]?.[plan.id]){next[field][updated.id]=next[field][plan.id];delete next[field][plan.id];}
           delete next.drafts[plan.id];delete next.conflicts[plan.id];delete next.creationAttempts?.[plan.id];next.lastSyncedAt=new Date().toISOString();
           await this.store.save(data);remapped.set(plan.id,updated.id);successes.push(updated.id);
         } catch(error) {failures.push({id:plan.id,error:error.message});}

@@ -119,24 +119,6 @@ test('a task that cannot be read is reported alone and does not stop the rest',a
   assert.deepEqual(result.successes,[1042]);assert.equal(result.failures[0].id,1045);assert.match(result.failures[0].error,/No se pudo leer/);
 });
 
-test('undoing a planned batch restores its previous drafts while retaining unrelated edits and sharing',async t=>{
-  const f=await fixture(t,'demo');await f.stage(1053,{priority:1,iterationPath:f.workspace().iterations[1].path});await f.stage(1042,{remainingWork:26});
-  const previous=structuredClone(f.workspace());
-  const undo=await f.planner.planBatch('ana@example.test',[1053],'sprint-24');
-  assert.equal(f.workspace().drafts[1053].assignedTo,'ana@example.test');assert.equal(f.workspace().drafts[1053].priority,1);
-  await f.planner.undoPlan(undo.token);
-  assert.deepEqual(f.workspace().drafts,previous.drafts);assert.deepEqual(f.workspace().participants,previous.participants);assert.deepEqual(f.workspace().conflicts,previous.conflicts);
-  assert.equal(f.calls.length,0);
-  await assert.rejects(()=>f.planner.undoPlan(undo.token),/ha cambiado/);
-});
-
-test('undo token expires after a subsequent local modification and never overwrites it',async t=>{
-  const f=await fixture(t,'demo');const undo=await f.planner.planBatch('ana@example.test',[1053],'sprint-24');
-  await f.stage(1053,{remainingWork:28});
-  await assert.rejects(()=>f.planner.undoPlan(undo.token),/ha cambiado/);
-  assert.equal(f.workspace().drafts[1053].remainingWork,28);assert.equal(f.workspace().drafts[1053].assignedTo,'ana@example.test');
-});
-
 // Creation tests exercise parent remapping and ambiguous network acknowledgements.
 test('new hierarchy stays local, sync creates parents first, remaps links and clears pending drafts',async t=>{
   const {createLocalItem,effectiveItems}=await import('../server/planner.js');

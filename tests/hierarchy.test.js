@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hierarchy, ancestors, eligibleTasks, participantSources, filterHierarchy } from '../dist/hierarchy.js';
+import { hierarchy, ancestors, eligibleTasks, filterHierarchy } from '../dist/hierarchy.js';
 import { createDemo, upgradeDemoHierarchy } from '../server/demo.js';
-import { setParticipants, planTasks, stageChanges, planReview } from '../server/planner.js';
+import { planTasks, stageChanges, planReview } from '../server/planner.js';
 const ana='ana@example.test', marcos='marcos@example.test';
 
 test('hierarchy follows real parents through Epic, Feature, Story and Task/Bug',()=>{
@@ -27,18 +27,10 @@ test('the same open leaf is eligible for several people; completed work is not',
   assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1053));
 });
 
-test('invalid participant batches cannot partially alter the local sharing map',()=>{
-  const ws=createDemo(),before=structuredClone(ws.participants);
-  assert.throws(()=>setParticipants(ws,[{id:900,members:[ana]},{id:910,members:['foreign@example.test']}]),/integrantes/);
-  assert.deepEqual(ws.participants,before);
-});
-
 test('batch planning only accepts open tasks and writes a unique owner',()=>{
   const ws=createDemo();
-  const sharing=structuredClone(ws.participants);
   planTasks(ws,ana,[1053,1057],'sprint-24');
   assert.deepEqual(ws.drafts[1053],{assignedTo:ana,iterationPath:ws.iterations[0].path});
-  assert.deepEqual(ws.participants,sharing);
   assert.equal(planReview(ws,ws.items).length,2);
   const before=structuredClone(ws.drafts);
   assert.throws(()=>planTasks(ws,ana,[1054,1038],'sprint-24'),/otro responsable/);
@@ -56,7 +48,7 @@ test('ancestor context cannot be planned or sent to Azure',()=>{
 });
 
 test('demo migration enriches the old example without discarding local work',()=>{
-  const ws=createDemo();delete ws.demoHierarchyVersion;delete ws.participants;
+  const ws=createDemo();delete ws.demoHierarchyVersion;
   ws.items=ws.items.filter(i=>i.id>=1038);ws.items.forEach(i=>i.parent=null);
   ws.drafts={1042:{remainingWork:99}};
   assert.equal(upgradeDemoHierarchy(ws),true);

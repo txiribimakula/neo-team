@@ -104,7 +104,6 @@ export function upgradeDemoHierarchy(workspace) {
   }
   const parents={1042:1001,1045:1001,1038:1002,1047:1004,1040:1003,1049:1003,1044:1004,1053:1001,1054:1004,1056:910,1057:1002,1059:1004,1061:1003};
   for (const item of workspace.items) if (!item.parent && parents[item.id]) item.parent=parents[item.id];
-  workspace.participants ??= {1001:['ana@example.test','marcos@example.test'],1002:['marcos@example.test'],1003:['lucia@example.test'],1004:['david@example.test','marcos@example.test']};
   workspace.demoHierarchyVersion=1;
   return true;
 }

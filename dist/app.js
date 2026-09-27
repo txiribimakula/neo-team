@@ -1,7 +1,7 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance } from './maintenance.js';
 import { reviewsView, publishConfirmation } from './reviews.js';
-import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, hasPlanningCapacity, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
+import { hierarchy, ancestors, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, hasPlanningCapacity, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -14,10 +14,10 @@ let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: n
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 // The last step lists the pending changes in the page: its review load, sync and messages.
 let changesUi = { loading: false, syncing: false, error: '', notice: '', confirmAll: false };
-let focusedMember='', pickerMember='', pickerQuery='', backlogQuery='', onlyAvailable=true, backlogFilter='all';
-let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
-const peoplePopover=$('#people-popover');
+let focusedMember='', pickerMember='', pickerQuery='', backlogQuery='', onlyAvailable=true;
 const collapsed = new Set();
+// People in the team plan start collapsed: only their load bar until opened.
+const expandedLanes = new Set();
 const modal = $('#modal');
 // Measure real row heights so wrapped parent titles never overlap.
 let stickyFrame;
@@ -718,37 +718,6 @@ async function decidePrevious(id, decision) {
   document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
   toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
-function editParticipants(id,anchor) {
-  if(peopleItem===id && peoplePopover.matches(':popover-open')) {peoplePopover.hidePopover();return;}
-  peopleItem=id;peopleQuery='';
-  peopleAnchor=anchor || document.querySelector(`.people-button[data-task="${id}"]`) || $('#connection-button');
-  document.querySelectorAll('[aria-controls="people-popover"]').forEach(el=>el.setAttribute('aria-expanded',String(el===peopleAnchor)));
-  peopleRect=peopleAnchor.getBoundingClientRect();
-  peoplePopover.innerHTML='<input id="people-search" aria-label="Buscar personas" placeholder="Buscar persona…" autocomplete="off"><div id="people-options"></div>';
-  refreshPeople();
-  peoplePopover.showPopover();positionPeople();$('#people-search').focus();
-}
-function positionPeople() {
-  if(!peopleItem)return;
-  const anchor=document.querySelector(`.people-button[data-task="${peopleItem}"]`);
-  if(anchor)peopleRect=anchor.getBoundingClientRect();
-  const width=Math.min(310,window.innerWidth-24), maxHeight=Math.min(350,window.innerHeight-24);
-  peoplePopover.style.width=`${width}px`;peoplePopover.style.maxHeight=`${maxHeight}px`;
-  peoplePopover.style.left=`${Math.max(12,Math.min(peopleRect.right-width,window.innerWidth-width-12))}px`;
-  const height=Math.min(peoplePopover.scrollHeight,maxHeight);
-  peoplePopover.style.top=`${Math.max(12,Math.min(peopleRect.bottom+6,window.innerHeight-height-12))}px`;
-}
-function refreshPeople() {
-  if(!peopleItem)return;
-  const ws=state.workspace,item=ws.effectiveItems.find(i=>i.id===peopleItem);
-  if(!item){peoplePopover.hidePopover();return;}
-  const sources=participantSources(item,ws,planningTree());
-  const members=planningMembers().filter(m=>`${m.displayName} ${key(m)}`.toLowerCase().includes(peopleQuery.toLowerCase()));
-  $('#people-options').innerHTML=members.map(m=>{
-    const inherited=(sources.get(key(m)) || []).find(s=>s.inherited);
-    return `<label class="person-option"><input type="checkbox" data-participant="${escape(key(m))}" ${sources.has(key(m)) ? 'checked' : ''}><span class="avatar">${escape(initials(m.displayName))}</span><span>${escape(m.displayName)}${inherited ? `<small>Heredado de #${inherited.id}</small>` : ''}</span></label>`;
-  }).join('') || '<p class="empty-result">Sin coincidencias</p>';
-}
 function ensureSelection() {
   const members=planningMembers();
   if(!members.some(m=>key(m)===pickerMember))pickerMember=members[0] ? key(members[0]) : '';
@@ -934,14 +903,10 @@ function renderSaved(focusId) {
   if($('#picker-tree'))$('#picker-tree').scrollTop=scroll;
   if($('.planning-people'))$('.planning-people').scrollTop=peopleScroll;
   if(focusId)document.querySelector(`input[name="taskIds"][value="${focusId}"]`)?.focus({preventScroll:true});
-  if(peopleItem){refreshPeople();positionPeople();}
 }
 async function saveTaskSelection(ids,selected) {
   await request('/api/task-selection',{member:pickerMember,iterationId:selectedIteration,ids,selected});
   renderSaved(ids.length===1 ? ids[0] : null);
-}
-async function saveParticipation(id,member,selected) {
-  await request('/api/participation',{id,member,selected,iterationId:selectedIteration || undefined});renderSaved();
 }
 function updatePlanningView() {
   $('#planning-view').innerHTML=stepView();
@@ -963,7 +928,9 @@ function lane(member, allItems, index, iteration) {
   const capacity = state.workspace.capacityHours[iteration.id]?.[member.id] ?? null;
   const unknown = owned.filter(i=>i.canEstimateHours && i.remainingWork === null).length;
   const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
-  return `<section class="member" data-drop="${escape(key(member))}"><div class="member-header"><div class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><div class="person-detail"><h3>${escape(member.displayName)}</h3><p>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</p></div></div><div class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'planificadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></div><div class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas planificadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><div class="capacity-fill" style="--load:${percent}%"></div></div></div><div class="lane-picker"><button class="button small" data-action="pick-tasks" data-member="${escape(key(member))}">+ Elegir sus tareas y bugs</button></div><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></section>`;
+  const open=expandedLanes.has(key(member)), id=`lane-${index}`;
+  const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
+  return `<section class="member ${open ? '' : 'collapsed'}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button><div id="${id}" ${open ? '' : 'hidden'}><div class="lane-picker"><button class="button small" data-action="pick-tasks" data-member="${escape(key(member))}">+ Elegir sus tareas y bugs</button></div><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
 }
 function board(iteration, planned) {
   const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath !== iteration.path);
@@ -1255,7 +1222,6 @@ const actions = {
   import: importData,
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
-  participants: el=>editParticipants(Number(el.dataset.task),el),
   'pick-tasks': el=>pickTasks(el.dataset.member),
   'choose-iteration': el=>{selectedIteration=el.dataset.iteration;tab='previous';render();window.scrollTo({top:0});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
@@ -1271,6 +1237,7 @@ const actions = {
   'choose-person': el=>choosePerson(el.dataset.member),
   'planning-view':el=>{planningMode=el.dataset.view;focusedMember=planningMode==='team' ? '' : pickerMember;query='';render();$(`[data-action="planning-view"][data-view="${planningMode}"]`)?.focus({preventScroll:true});},
   'confirm-person': async el=>{await request('/api/confirm-person',{member:el.dataset.member,iterationId:selectedIteration});renderSaved();},
+  'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member))expandedLanes.delete(member);else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
   tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
@@ -1395,7 +1362,6 @@ document.addEventListener('change',async event=>{
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
     if(el.dataset.range!==undefined){await saveCapacityRange(el);return;}
-    if(el.dataset.participant){const member=el.dataset.participant;await saveParticipation(peopleItem,member,el.checked);[...peoplePopover.querySelectorAll('input[data-participant]')].find(box=>box.dataset.participant===member)?.focus({preventScroll:true});return;}
     if(el.name==='taskIds'){await saveTaskSelection([Number(el.value)],el.checked);return;}
     if(el.id==='toggle-visible'){
       const ids=[...document.querySelectorAll('#picker-tree input[name="taskIds"]:not(:disabled)')].filter(box=>box.checked!==el.checked).map(box=>Number(box.value));
@@ -1411,13 +1377,10 @@ document.addEventListener('input',event=>{
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
   if (event.target.name === 'other' && event.target.closest('#completed-state-form')) $('[data-other-state]').checked = true;
   if(event.target.dataset.editActivity!==undefined){capacityEditor.activities[Number(event.target.dataset.editActivity)].capacityPerDay=Number(event.target.value);refreshCapacityEditor();}
-  if(event.target.id==='people-search'){peopleQuery=event.target.value;refreshPeople();positionPeople();}
   if(event.target.id==='picker-search'){pickerQuery=event.target.value;refreshPicker();}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
 });
-peoplePopover.addEventListener('toggle',event=>{if(event.newState==='closed'){peopleItem=null;document.querySelectorAll('[aria-controls="people-popover"]').forEach(el=>el.setAttribute('aria-expanded','false'));}});
-window.addEventListener('resize',()=>{if(peopleItem)positionPeople();});
 document.addEventListener('toggle',event=>{
   const element=event.target;
   if (!element.matches?.('details[data-node], details[data-project]') || element.closest('#picker-tree')) return;

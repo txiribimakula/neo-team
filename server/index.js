@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, selectTasks, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -109,7 +109,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/discard-allocation', '/api/capacity-download-choice', '/api/confirm-person', '/api/task-selection', '/api/participation', '/api/plan-tasks', '/api/undo-plan', '/api/participants', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/discard-allocation', '/api/capacity-download-choice', '/api/confirm-person', '/api/task-selection', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -400,8 +400,6 @@ const server = http.createServer(async (req, res) => {
             workspace.confirmations = structuredClone(store.data.azure?.confirmations || {});
             // States chosen as completed by the person take precedence over Azure's categories.
             workspace.completedStates = { ...workspace.completedStates, ...(store.data.azure?.completedStates || {}) };
-            workspace.participants = Object.fromEntries(Object.entries(store.data.azure?.participants || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
-            workspace.participantExclusions = Object.fromEntries(Object.entries(store.data.azure?.participantExclusions || {}).filter(([id])=>workspace.items.some(i=>i.id === Number(id))).map(([id,keys])=>[id,keys.filter(key=>workspace.members.some(m=>(m.uniqueName || m.id || m.displayName || '').toLowerCase() === key))]));
             const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
             await store.save(data); planner.review = null;
             operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
@@ -425,20 +423,10 @@ const server = http.createServer(async (req, res) => {
           const data=structuredClone(store.data);
           confirmPerson(data[data.mode],input.member,input.iterationId);
           await store.save(data);planner.review=null;
-        } else if (path === '/api/task-selection' || path === '/api/participation') {
+        } else if (path === '/api/task-selection') {
           const data=structuredClone(store.data),workspace=data[data.mode];
-          if(path==='/api/task-selection') selectTasks(workspace,input.member,input.ids,input.iterationId,input.selected);
-          else toggleParticipation(workspace,input.id,input.member,input.selected,input.iterationId);
+          selectTasks(workspace,input.member,input.ids,input.iterationId,input.selected);
           await store.save(data);planner.review=null;
-        } else if (path === '/api/plan-tasks') {
-          const undo=await planner.planBatch(input.member,input.ids,input.iterationId);
-          return json(res,{state:publicState(),undo});
-        } else if (path === '/api/undo-plan') {
-          await planner.undoPlan(input.token);
-        } else if (path === '/api/participants') {
-          const data = structuredClone(store.data), workspace = data[data.mode];
-          setParticipants(workspace, input.assignments, input.iterationId);
-          await store.save(data); planner.review = null;
         } else if (path === '/api/complete-task' || path === '/api/completed-state') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (path === '/api/complete-task') completeTask(workspace, input.id);

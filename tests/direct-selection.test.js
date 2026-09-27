@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createDemo} from '../server/demo.js';
-import {selectTasks,toggleParticipation,effectiveItems,stageChanges} from '../server/planner.js';
-import {eligibleTasks,participantSources,hierarchy,selectionSummary,capacityStatus} from '../dist/hierarchy.js';
+import {selectTasks,effectiveItems,stageChanges} from '../server/planner.js';
+import {eligibleTasks,selectionSummary,capacityStatus} from '../dist/hierarchy.js';
 const ana='ana@example.test',marcos='marcos@example.test';
 const item=(ws,id)=>effectiveItems(ws).find(i=>i.id===id);
 
@@ -17,8 +17,8 @@ test('checking saves the assignment immediately; unchecking releases it without 
   assert.ok(eligibleTasks(ws,ana).some(i=>i.id===1053),'the unchecked task remains available to recheck');
 });
 
-test('an imported assignment with no shared branch remains selectable after unchecking and reloading',()=>{
-  const ws=createDemo();ws.participants={};
+test('an imported assignment remains selectable after unchecking and reloading',()=>{
+  const ws=createDemo();
   selectTasks(ws,ana,[1042],'sprint-24',false);
   const restored=JSON.parse(JSON.stringify(ws));
   assert.equal(item(restored,1042).assignedTo,'');
@@ -44,15 +44,6 @@ test('every open task in the backlog can be chosen for anyone with capacity, wit
   assert.ok(!eligibleTasks(ws,ana,'sprint-24').some(i=>i.type==='Epic' || i.type==='User Story'),'only tasks and bugs are chosen');
 });
 
-
-test('branch exclusion preserves assignments from other iterations and does not restore selected tasks when re-enabled',()=>{
-  const ws=createDemo();stageChanges(ws,1042,{iterationPath:ws.iterations[1].path});
-  toggleParticipation(ws,1001,ana,false,'sprint-24');
-  assert.equal(item(ws,1042).assignedTo,ana);assert.equal(item(ws,1042).iterationPath,ws.iterations[1].path);
-  assert.equal(item(ws,1045).assignedTo,'');
-  toggleParticipation(ws,1001,ana,true,'sprint-24');
-  assert.equal(item(ws,1045).assignedTo,'');assert.ok(eligibleTasks(ws,ana).some(i=>i.id===1045));
-});
 
 test('capacity indicator distinguishes remaining, full, over, missing estimates and zero capacity',()=>{
   const summary={plannedHours:16,capacity:24,unknownPlanned:0};
