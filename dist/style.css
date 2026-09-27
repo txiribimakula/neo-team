@@ -331,3 +331,4 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .task-field{position:relative}.task-field small{position:absolute;right:8px;bottom:7px;font-size:11px;color:var(--muted);pointer-events:none}
 .task-estimates:has(.task-field:only-child){grid-template-columns:1fr}
 .task-field input::-webkit-inner-spin-button,.task-field input::-webkit-outer-spin-button,.capacity-inline-hours input::-webkit-inner-spin-button,.capacity-inline-hours input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.task-field input,.capacity-inline-hours input{-moz-appearance:textfield;appearance:textfield}
+.backlog-download{width:100%;margin:6px 0 12px}#backlog-progress{margin:0 0 12px}

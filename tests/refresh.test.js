@@ -38,9 +38,19 @@ test('task refresh does not request iterations, settings, members or capacities;
  for(const field of ['capacities','capacityDrafts','iterations','members','settings'])assert.deepEqual(next[field],ws[field]);
  assert.ok(calls.every(([name])=>['neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)));
 });
-test('only drafts affected by the refresh block it; failure leaves the workspace intact',async()=>{
- const ws=fixture();ws.drafts={[ws.items[0].id]:{title:'Pending'}};const {azure}=gateway(ws);
- await assert.rejects(()=>refreshSection(ws,'tasks',azure,[]),/cambios de esta sección/);
+test('downloading tasks keeps local changes on top; capacity drafts still block a capacity refresh',async()=>{
+ const ws=fixture(),edited=ws.items.find(i=>!i.localOnly),untouched=ws.items.find(i=>i.id!==edited.id && !i.localOnly);
+ ws.drafts={[edited.id]:{title:'Pending'}};ws.items.push({...edited,id:-1,localOnly:true,title:'Nuevo en local'});const {azure}=gateway(ws);
+ const next=await refreshSection(ws,'tasks',azure,[]);
+ assert.ok(next.items.some(i=>i.id===-1),'an item not created in Azure yet is kept');
+ assert.deepEqual(next.drafts,{[edited.id]:{title:'Pending'}},'local changes survive the download');
+ assert.ok(next.items.some(i=>i.id===edited.id),'an edited item Azure no longer lists stays to be reviewed');
+ assert.ok(!next.items.some(i=>i.id===untouched.id),'an unedited item follows Azure');
+ // A change Azure already has is no longer pending; other fields stay.
+ azure.call=async(name,args)=>name==='neo_query_work_items' ? {workItems:[{id:edited.id,rev:5,fields:{'System.Title':'Pending','System.WorkItemType':'Task','System.State':'Active','System.IterationPath':edited.iterationPath}}],limited:false} : name==='neo_work_item_types' ? [{name:'Task'}] : name==='neo_work_item_states' ? [{name:'Active',category:'InProgress'},{name:'Closed',category:'Completed'}] : (()=>{throw new Error('Unexpected '+name);})();
+ ws.drafts={[edited.id]:{title:'Pending',priority:1}};
+ const synced=await refreshSection(ws,'tasks',azure,[]);
+ assert.deepEqual(synced.drafts,{[edited.id]:{priority:1}});
  ws.drafts={};ws.capacityDrafts={any:{}};
  await assert.rejects(()=>refreshSection(ws,'capacity',azure,[]),/cambios de esta sección/);
  ws.capacityDrafts={};const before=structuredClone(ws);

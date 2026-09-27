@@ -1,17 +1,28 @@
 import {sourcesOf,sourceFor,planningItem,remoteFields,mergeProjects} from './multi-project.js';
-import {capacityEntry,workingCapacity,effectiveCapacity,sameCapacity} from './planner.js';
+import {capacityEntry,workingCapacity,effectiveCapacity,sameCapacity,same} from './planner.js';
 export async function refreshSection(workspace,section,azure,rules,report=()=>{}) {
   if(!workspace || workspace.mode!=='azure') throw new Error('Importa proyectos de Azure DevOps primero.');
   if(!['iterations','capacity','tasks'].includes(section)) throw new Error('Sección no válida.');
   const taskDrafts=Object.keys(workspace.drafts ?? {}).length;
   const capacityDrafts=Object.keys(workspace.capacityDrafts ?? {}).length;
-  if(section==='tasks' && taskDrafts || section==='capacity' && capacityDrafts || section==='iterations' && (taskDrafts || capacityDrafts)) throw new Error('Sincroniza o descarta los cambios de esta sección antes de actualizarla.');
+  // Tasks can be downloaded with local changes: they are kept on top of what Azure has.
+  if(section==='capacity' && capacityDrafts || section==='iterations' && (taskDrafts || capacityDrafts)) throw new Error('Sincroniza o descarta los cambios de esta sección antes de actualizarla.');
   const next=structuredClone(workspace), originals=sourcesOf(workspace), refreshed=[];
   for(const [index,source] of originals.entries()) {
     refreshed.push(await azure.import(source.config,p=>report({...p,message:`${source.config.project} (${index+1}/${originals.length}) · ${p.message}`}),rules,{section,snapshot:source}));
   }
   if(section==='tasks') {
-    next.items=refreshed.flatMap((data,index)=>data.items.map(item=>planningItem(next,item,originals[index])));
+    const fresh=refreshed.flatMap((data,index)=>data.items.map(item=>planningItem(next,item,originals[index]))), ids=new Set(fresh.map(item=>item.id));
+    // Local work survives the download: items not created yet, and edited items that
+    // Azure no longer lists as open, so their changes can still be reviewed.
+    next.items=[...fresh,...workspace.items.filter(item=>!ids.has(item.id) && (item.localOnly || workspace.drafts?.[item.id]))];
+    // A local change that Azure already has is no longer pending.
+    for(const [id,draft] of Object.entries(next.drafts ?? {})) {
+      const item=next.items.find(i=>i.id===Number(id));
+      if(!item || item.localOnly) continue;
+      for(const field of Object.keys(draft)) if(same(item[field],draft[field])) delete draft[field];
+      if(!Object.keys(draft).length) delete next.drafts[id];
+    }
     next.conflicts={};
     if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
     else {next.backlogLevels=refreshed[0].backlogLevels;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}

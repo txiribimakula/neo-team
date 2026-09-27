@@ -604,7 +604,7 @@ function hierarchyView() {
   return `<section class="hierarchy-surface"><div class="hierarchy-toolbar"><input class="search" id="search" aria-label="Buscar en el backlog" placeholder="Buscar rama o tarea" value="${escape(query)}"><button class="button small" data-action="expand-tree">Expandir</button><button class="button small" data-action="collapse-tree">Plegar</button></div><div id="hierarchy-content">${treeView()}</div></section>`;
 }
 function sectionRefreshButton() {
-  const section=({iteration:'iterations',capacity:'capacity',hierarchy:'tasks',planning:'tasks',previous:'tasks'})[tab];
+  const section=({iteration:'iterations',capacity:'capacity',hierarchy:'tasks'})[tab];
   if(section==='capacity') return capacityControls();
   if(!section || state.workspace?.mode!=='azure') return '';
   const label=({iterations:'iteraciones',capacity:'capacidad',tasks:'tareas y jerarquía'})[section];
@@ -939,7 +939,7 @@ function board(iteration, planned) {
   const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
   const excluded=planned.filter(i=>i.assignedTo && ws.members.some(m=>key(m)===i.assignedTo) && !activeKeys.has(i.assignedTo));
   const considered=planned.length-excluded.length;
-  return `<div class="board"><section class="backlog" data-drop="backlog"><div class="section-heading"><h2>Backlog disponible</h2><span class="count" id="backlog-count">${backlog.length}</span></div><p class="section-meta">Pendientes y tareas de otras iteraciones</p><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar por palabra, #id o rama" aria-label="Filtrar el backlog disponible" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree">${treeView({availableOnly:true,search:backlogQuery})}</div></section><section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><p class="section-meta">Reparte el trabajo según la capacidad del equipo</p><div class="members-grid">${members.map((m,index)=>lane(m,planned,index,iteration)).join('')}<section class="member" data-drop=""><div class="member-header"><div class="section-heading"><h3>Sin asignar</h3><span class="count">${unassigned.length}</span></div><p class="section-meta" style="margin:0">Dentro de esta iteración</p></div><div class="member-items">${filtered(unassigned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Reserva trabajo para esta iteración</div>'}</div></section>${excluded.length ? `<section class="member zero-capacity"><div class="member-header"><h3>Fuera del reparto</h3><p class="section-meta" style="margin:0">Tareas asignadas a personas con capacidad 0</p></div><div class="member-items">${filtered(excluded).map(i=>taskCard(i)).join('')}</div></section>` : ''}${outside.length ? `<section class="member"><div class="member-header"><h3>Otras personas</h3><p class="section-meta" style="margin:0">Responsables que no figuran en este equipo</p></div><div class="member-items">${filtered(outside).map(i=>taskCard(i)).join('')}</div></section>` : ''}</div></section></div><p class="bottom-note">Arrastra tareas para planificar. Pulsa una tarjeta para editar con teclado o en móvil. Las horas y los puntos se mantienen separados.</p>`;
+  return `<div class="board"><section class="backlog" data-drop="backlog"><div class="section-heading"><h2>Backlog disponible</h2><span class="count" id="backlog-count">${backlog.length}</span></div>${ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : ''}<p class="section-meta">Pendientes y tareas de otras iteraciones</p><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar por palabra, #id o rama" aria-label="Filtrar el backlog disponible" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree">${treeView({availableOnly:true,search:backlogQuery})}</div></section><section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><p class="section-meta">Reparte el trabajo según la capacidad del equipo</p><div class="members-grid">${members.map((m,index)=>lane(m,planned,index,iteration)).join('')}<section class="member" data-drop=""><div class="member-header"><div class="section-heading"><h3>Sin asignar</h3><span class="count">${unassigned.length}</span></div><p class="section-meta" style="margin:0">Dentro de esta iteración</p></div><div class="member-items">${filtered(unassigned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Reserva trabajo para esta iteración</div>'}</div></section>${excluded.length ? `<section class="member zero-capacity"><div class="member-header"><h3>Fuera del reparto</h3><p class="section-meta" style="margin:0">Tareas asignadas a personas con capacidad 0</p></div><div class="member-items">${filtered(excluded).map(i=>taskCard(i)).join('')}</div></section>` : ''}${outside.length ? `<section class="member"><div class="member-header"><h3>Otras personas</h3><p class="section-meta" style="margin:0">Responsables que no figuran en este equipo</p></div><div class="member-items">${filtered(outside).map(i=>taskCard(i)).join('')}</div></section>` : ''}</div></section></div><p class="bottom-note">Arrastra tareas para planificar. Pulsa una tarjeta para editar con teclado o en móvil. Las horas y los puntos se mantienen separados.</p>`;
 }
 
 function render() {
@@ -1094,6 +1094,13 @@ async function downloadCapacity() {
   const differences=Object.keys(state.workspace.capacityDownloads?.[iteration.id]?.local ?? {}).length;
   toast(differences ? `Capacidad descargada. ${plural(differences,'diferencia','diferencias')} con tu copia local por validar.` : 'Capacidad descargada. Coincide con tu copia local.');
 }
+// Tasks and hierarchy come from Azure while local changes stay on top of them.
+async function downloadHierarchy() {
+  await importWithProgress($('#backlog-progress'),null,{path:'/api/refresh-section',input:{section:'tasks'},title:'Descargando la jerarquía'});
+  review=null;render();
+  const pending=Object.keys(state.workspace.drafts ?? {}).length;
+  toast(pending ? `Jerarquía descargada. Tus ${plural(pending,'cambio')} local${pending===1 ? '' : 'es'} siguen pendientes de sincronizar.` : 'Jerarquía descargada desde Azure DevOps.');
+}
 async function refreshPlanningSection(section) {
   const title=({iterations:'Actualizar iteraciones',capacity:'Actualizar capacidad',tasks:'Actualizar tareas y jerarquía'})[section];
   showModal(title,'Se conservan los datos y cambios locales de las demás secciones.','<div id="connection-progress"></div>');
@@ -1234,6 +1241,7 @@ const actions = {
   },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
+  'download-hierarchy':downloadHierarchy,
   'upload-capacity':uploadCapacity,
   'download-choice':async el=>{
     const choice=el.dataset.choice;
