@@ -915,12 +915,27 @@ function refreshBacklog() {
   tree.innerHTML=leftPanelContent();
   $('#backlog-count').textContent=leftPanelCount();
 }
+// Each scrolling column fits the part of the window it can use, from wherever the
+// board starts, so its end and its scrollbar are always visible.
+let fitFrame;
+function fitBoardColumns() {
+  cancelAnimationFrame(fitFrame);
+  fitFrame=requestAnimationFrame(()=>{
+    const board=$('.board');
+    if(!board) return;
+    const top=Math.max(12,board.getBoundingClientRect().top);
+    board.style.setProperty('--column-height',`${Math.max(240,window.innerHeight-top-12)}px`);
+  });
+}
+window.addEventListener('scroll',fitBoardColumns,{passive:true});
+window.addEventListener('resize',fitBoardColumns);
 const keptScrolls = () => Object.fromEntries([...document.querySelectorAll('[data-keep-scroll]')].map(el=>[el.dataset.keepScroll,el.scrollTop]));
 function restoreScrolls(scrolls) { for (const el of document.querySelectorAll('[data-keep-scroll]')) if (scrolls[el.dataset.keepScroll]) el.scrollTop=scrolls[el.dataset.keepScroll]; }
 function updatePlanningView() {
   const scrolls=keptScrolls();
   $('#planning-view').innerHTML=stepView();
   restoreScrolls(scrolls);
+  fitBoardColumns();
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
@@ -1018,6 +1033,7 @@ function render() {
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
   restoreScrolls(scrolls);
+  fitBoardColumns();
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 function editTask(id) {
