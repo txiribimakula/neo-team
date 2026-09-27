@@ -330,24 +330,37 @@ export function resolveCapacityConflict(workspace, iterationId, key, choice) {
 export function projectCapacityPlans(workspace) {
   if (!workspace.sources) return [];
   const plans=[];
-  for (const iteration of workspace.iterations.filter(i=>(workspace.allocationIterations ?? []).includes(i.id) || effectiveItems(workspace).some(t=>isExecutable(t) && t.assignedTo && t.iterationPath===i.path))) for (const member of workspace.members) {
-    const capacity=effectiveCapacity(workspace,iteration.id), global=capacityEntry(capacity,member.id);
+  // Assigned tasks are grouped once by iteration and person instead of being
+  // filtered again for every pair: large backlogs stay fast to recalculate.
+  const assigned=new Map();
+  for (const item of effectiveItems(workspace)) {
+    if (!isExecutable(item) || !item.assignedTo) continue;
+    if (!assigned.has(item.iterationPath)) assigned.set(item.iterationPath,new Map());
+    const people=assigned.get(item.iterationPath);
+    if (!people.has(item.assignedTo)) people.set(item.assignedTo,[]);
+    people.get(item.assignedTo).push(item);
+  }
+  for (const iteration of workspace.iterations.filter(i=>(workspace.allocationIterations ?? []).includes(i.id) || assigned.has(i.path))) {
+    const capacity=effectiveCapacity(workspace,iteration.id);
+    for (const member of workspace.members) {
+    const global=capacityEntry(capacity,member.id);
     const available=workingCapacity(iteration,capacity,member.id,workspace.settings.workingDays) ?? 0;
-    const tasks=available===0 ? [] : effectiveItems(workspace).filter(i=>isExecutable(i) && !i.contextOnly && i.assignedTo===identityKey(member) && i.iterationPath===iteration.path);
+    const tasks=available===0 ? [] : assigned.get(iteration.path)?.get(identityKey(member)) ?? [];
     const total=tasks.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);
     const destinations=workspace.sources.filter(s=>iteration.sourceIterations[s.id] && s.members.some(m=>m.id===member.id));
+    const offDates=new Set();
+    for(const range of [...global.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) offDates.add(date.toISOString().slice(0,10));
+    const daysOff=[...offDates].sort().map(date=>({start:date,end:date}));
+    const globalDaily=global.activities.reduce((sum,a)=>sum+a.capacityPerDay,0);
     for (const source of destinations) {
       const remoteIterationId=iteration.sourceIterations[source.id], remoteIteration=source.iterations.find(i=>i.id===remoteIterationId);
       const hours=tasks.filter(i=>i.sourceId===source.id).reduce((sum,i)=>sum+(i.remainingWork ?? 0),0), ratio=total ? hours/total : 0;
       const original=capacityEntry(source.capacities?.[remoteIterationId],member.id);
-      const offDates=new Set();
-      for(const range of [...global.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) offDates.add(date.toISOString().slice(0,10));
-      const daysOff=[...offDates].sort().map(date=>({start:date,end:date}));
       const unit={daysOff:source.capacities?.[remoteIterationId]?.daysOff ?? [],teamMembers:[{teamMember:member,activities:[{name:'',capacityPerDay:1}],daysOff}]};
       const days=workingCapacity(remoteIteration,unit,member.id,source.settings.workingDays) ?? 0;
-      const globalDaily=global.activities.reduce((sum,a)=>sum+a.capacityPerDay,0);
       const entry={daysOff,activities:global.activities.map(a=>({name:a.name,capacityPerDay:Math.round((days && globalDaily ? available*ratio/days*a.capacityPerDay/globalDaily : 0)*100)/100}))};
       plans.push({iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && !days});
+    }
     }
   }
   return plans;
@@ -355,7 +368,10 @@ export function projectCapacityPlans(workspace) {
 
 export function planningWorkspace(workspace) {
   const capacities = Object.fromEntries(workspace.iterations.map(i => [i.id, effectiveCapacity(workspace, i.id)]));
-  return {...workspace,projectAllocations:projectCapacityPlans(workspace),effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
+  const projectAllocations = projectCapacityPlans(workspace);
+  // The same count the review uses, so the interface never offers an empty review.
+  const capacityPending = workspace.sources ? projectAllocations.filter(p => !sameCapacity(p.original, p.entry)).length : Object.values(workspace.capacityDrafts ?? {}).reduce((sum, drafts) => sum + Object.keys(drafts).length, 0);
+  return {...workspace,projectAllocations,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 export function confirmPerson(workspace, member, iterationId) {
   if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
@@ -445,9 +461,13 @@ export class Planner {
     if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
     // Local is the source of truth: only edited tasks are read, to show what changes.
-    // If Azure cannot be read, the local copy stands in so every draft is still written.
-    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0)).catch(() => workspace.items.filter(i => ids.includes(i.id)));
+    // If Azure cannot be read, the local copy stands in, but those writes are
+    // guarded by the imported revision: nothing changed since then is overwritten
+    // without having been shown in a review.
+    const unreadable = [];
+    const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0)).catch(error => { unreadable.push(`Tareas: ${error.message}`); return workspace.items.filter(i => ids.includes(i.id)); });
     const plans = planReview(workspace, remoteItems);
+    if (unreadable.length) for (const plan of plans) if (!plan.missing) plan.unverified = true;
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
     const remoteCapacities = {};
     let capacityPlans, incompleteAllocations=[];
@@ -459,21 +479,28 @@ export class Planner {
       capacityPlans=[];
       for (const plan of allocations.filter(p=>!sameCapacity(p.original,p.entry))) {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
-        // A capacity that cannot be read does not stop the sync: the local copy stands in.
-        if (!(cacheKey in remoteCapacities)) remoteCapacities[cacheKey] = await this.azure.capacity(plan.config,plan.remoteIterationId).catch(() => null);
+        // A capacity that cannot be read does not stop the review: the local copy
+        // stands in and Azure is read again just before writing it.
+        if (!(cacheKey in remoteCapacities)) remoteCapacities[cacheKey] = await this.azure.capacity(plan.config,plan.remoteIterationId).catch(error => { unreadable.push(`Capacidad de ${plan.iteration}: ${error.message}`); return null; });
         const teamDaysOff=capacityEntry(remoteCapacities[cacheKey],'team');
-        const remote=remoteCapacities[cacheKey] ? capacityEntry(remoteCapacities[cacheKey],plan.key) : plan.original;
-        capacityPlans.push({...plan,teamDaysOff,remote,after:plan.entry,conflict:!sameCapacity(remote,plan.original) && !sameCapacity(remote,plan.entry),applied:sameCapacity(remote,plan.entry)});
+        const unverified=!remoteCapacities[cacheKey];
+        const remote=unverified ? plan.original : capacityEntry(remoteCapacities[cacheKey],plan.key);
+        capacityPlans.push({...plan,teamDaysOff,remote,after:plan.entry,unverified,conflict:!sameCapacity(remote,plan.original) && !sameCapacity(remote,plan.entry),applied:!unverified && sameCapacity(remote,plan.entry)});
       }
     } else {
-      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId).catch(() => workspace.capacities?.[iterationId]);
-      capacityPlans = planCapacityReview(workspace, remoteCapacities);
+      const unverified = new Set();
+      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId).catch(error => {
+        unverified.add(iterationId);
+        unreadable.push(`Capacidad de ${workspace.iterations.find(i => i.id === iterationId)?.name ?? iterationId}: ${error.message}`);
+        return workspace.capacities?.[iterationId];
+      });
+      capacityPlans = planCapacityReview(workspace, remoteCapacities).map(plan => unverified.has(plan.iterationId) ? { ...plan, unverified: true, applied: false } : plan);
     }
     const data = structuredClone(this.store.data);
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
     // Conflicts are informative: synchronizing keeps the local version.
     return { ...this.review };
   }
@@ -519,7 +546,9 @@ export class Planner {
       let updated;
       try {
         updated = workspace.mode === 'demo' ? { ...plan.remote, ...plan.fields, rev: plan.remote.rev + 1 }
-          : Object.keys(plan.updates).length ? planningItem(workspace, await this.azure.update(sourceFor(workspace,plan.remote).config, plan.id, null, remoteFields(workspace,plan.remote,plan.updates)), sourceFor(workspace,plan.remote)) : plan.remote;
+          // A reviewed task keeps the local version; one that could not be read is
+          // only written if Azure still has the revision of the local copy.
+          : Object.keys(plan.updates).length ? planningItem(workspace, await this.azure.update(sourceFor(workspace,plan.remote).config, plan.id, plan.unverified ? plan.remote.rev : null, remoteFields(workspace,plan.remote,plan.updates)), sourceFor(workspace,plan.remote)) : plan.remote;
       } catch (error) { failures.push({ id: plan.id, error: error.message }); continue; }
       const data = structuredClone(this.store.data), next = data[data.mode];
       next.items = next.items.map(i => i.id === plan.id ? updated : i);
@@ -533,17 +562,29 @@ export class Planner {
     const capacity = await this.syncCapacity(review, workspace);
     return { successes, failures, capacity, demo: workspace.mode === 'demo' };
   }
-  // Local capacity is the source of truth: each value is written as it is,
-  // without reading and comparing Azure again.
+  // Local capacity is the source of truth: each reviewed value is written as it
+  // is. A value whose Azure version could not be read during the review is read
+  // again first: a change nobody has reviewed is not overwritten. If Azure still
+  // cannot be read, the local value is written as before.
   async syncCapacity(review, workspace) {
     const successes = [], failures = [];
     const byIteration = new Map();
     for (const plan of review.capacityPlans ?? []) byIteration.set(JSON.stringify([plan.sourceId,plan.iterationId]), [...(byIteration.get(JSON.stringify([plan.sourceId,plan.iterationId])) ?? []), plan]);
     for (const [, plans] of byIteration) {
       const iterationId=plans[0].remoteIterationId ?? plans[0].iterationId, config=plans[0].config ?? workspace.config;
+      let current;
       for (const plan of plans) {
         try {
-          if (workspace.mode !== 'demo' && !plan.applied) {
+          let applied = plan.applied;
+          if (workspace.mode !== 'demo' && !applied && plan.unverified) {
+            if (current === undefined) current = await this.azure.capacity(config, iterationId).catch(() => null);
+            if (current) {
+              const now = capacityEntry(current, plan.key);
+              applied = sameCapacity(now, plan.after);
+              if (!applied && !sameCapacity(now, plan.original)) throw new Error('Ha cambiado en Azure DevOps y no se pudo comparar durante la revisión. No se ha modificado: vuelve a revisar los cambios.');
+            }
+          }
+          if (workspace.mode !== 'demo' && !applied) {
             if (plan.key === 'team') await this.azure.updateTeamDaysOff(config, iterationId, plan.after.daysOff);
             else await this.azure.updateMemberCapacity(config, iterationId, plan.key, plan.after.activities, plan.after.daysOff);
           }

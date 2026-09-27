@@ -30,7 +30,7 @@ test('HTTP reports the local step, location and a saved report when merging a pr
  await post('/api/config',{config:config('A')});assert.equal((await post('/api/import')).response.status,200);
  await post('/api/config',{config:config('B')});
  const failure=await post('/api/import');
- assert.equal(failure.response.status,400);
+ assert.equal(failure.response.status,500,'an internal failure is a server error');
  assert.match(failure.data.error,/^Error interno durante «B \(1\/1\) · Uniendo con la planificación existente…» \(multi-project\.js:\d+\): /);
  assert.equal(failure.data.diagnostics,join(directory,'last-error.json'));
  const report=JSON.parse(await readFile(failure.data.diagnostics,'utf8'));

@@ -39,6 +39,9 @@ logger.debug = (message, ...rest) => {
   return debug(message, ...rest);
 };
 let useBrowser = false, waiting;
+// Batch reads omit deleted or inaccessible items instead of failing the whole
+// batch: one missing task must not hide the rest of a review or an import.
+const OMIT_MISSING = 2; // WorkItemErrorPolicy.Omit
 const tokenProvider = createCachedTokenProvider(async options => {
   if (options.interactive === true) useBrowser = true;
   if (!tenant) emit('auth', 'Buscando el directorio de Microsoft de la organización…');
@@ -100,7 +103,8 @@ server.tool('neo_work_items_batch', 'Read complete work item fields in batches o
   project:z.string().min(1), ids:z.array(z.number().int().positive()).max(200),
 }, async ({project,ids}) => {
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
-  return {content:[{type:'text',text:JSON.stringify(ids.length ? await api.getWorkItemsBatch({ids,fields:['System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.IterationPath', 'System.AreaPath', 'System.Parent', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Scheduling.RemainingWork', 'Microsoft.VSTS.Scheduling.StoryPoints', 'Microsoft.VSTS.Scheduling.Effort', 'Microsoft.VSTS.Scheduling.Size']},project) : [])}]};
+  const items=ids.length ? await api.getWorkItemsBatch({ids,errorPolicy:OMIT_MISSING,fields:['System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.IterationPath', 'System.AreaPath', 'System.Parent', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Scheduling.RemainingWork', 'Microsoft.VSTS.Scheduling.StoryPoints', 'Microsoft.VSTS.Scheduling.Effort', 'Microsoft.VSTS.Scheduling.Size']},project) : [];
+  return {content:[{type:'text',text:JSON.stringify((items ?? []).filter(Boolean))}]};
 });
 
 server.tool('neo_work_item_states', 'Read workflow state categories for a work item type, including custom states.', {
@@ -168,10 +172,10 @@ server.tool('neo_query_work_items', 'Run a WIQL query and return the requested f
   for (let start = 0; start < selected.length; start += 200) chunks.push(selected.slice(start, start + 200));
   const batches = [];
   for(let offset=0;offset<chunks.length;offset+=4) {
-    batches.push(...await Promise.all(chunks.slice(offset,offset+4).map(chunk=>api.getWorkItemsBatch({ids:chunk,fields},project))));
+    batches.push(...await Promise.all(chunks.slice(offset,offset+4).map(chunk=>api.getWorkItemsBatch({ids:chunk,fields,errorPolicy:OMIT_MISSING},project))));
     emit('info', `${Math.min((offset+4)*200,selected.length)} / ${selected.length} elementos leídos.`);
   }
-  return { content: [{ type: 'text', text: JSON.stringify({ ids: selected, limited: ids.length > top, workItems: batches.flat() }) }] };
+  return { content: [{ type: 'text', text: JSON.stringify({ ids: selected, limited: ids.length > top, workItems: batches.flat().filter(Boolean) }) }] };
 });
 // Atomic creation includes the parent link and a recovery tag in the same request.
 server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {
@@ -185,5 +189,100 @@ server.tool('neo_create_item', 'Create or validate one work item with its parent
   if(parent) document.push({op:'add',path:'/relations/-',value:{rel:'System.LinkTypes.Hierarchy-Reverse',url:`https://dev.azure.com/${organization}/_apis/wit/workItems/${parent}`}});
   const result=await api.createWorkItem({},document,project,type,validateOnly,false,false);
   return {content:[{type:'text',text:JSON.stringify(result)}]};
+});
+// Pull request review. Reads are limited in size; the only write adds a new
+// comment thread and never edits, resolves, votes on or completes a pull request.
+const PR_STATUS = { 1: 'active', 2: 'abandoned', 3: 'completed' };
+const CHANGE_TYPES = [[16, 'delete'], [1, 'add'], [8, 'rename'], [2, 'edit']];
+const changeType = value => CHANGE_TYPES.find(([bit]) => (Number(value) & bit) !== 0)?.[1] ?? 'edit';
+const person = identity => identity ? { displayName: identity.displayName ?? '', uniqueName: identity.uniqueName ?? '' } : null;
+async function readText(stream, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    size += chunk.length;
+    if (size > limit) { stream.destroy?.(); return { tooLarge: true, size }; }
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+  // A NUL byte in the first bytes marks binary content, which is not reviewed.
+  if (buffer.subarray(0, 8000).includes(0)) return { binary: true, size };
+  return { text: buffer.toString('utf8'), size };
+}
+const pullRequestSummary = pr => ({
+  pullRequestId: pr.pullRequestId, title: pr.title ?? '', description: pr.description ?? '', status: PR_STATUS[pr.status] ?? String(pr.status ?? ''),
+  isDraft: !!pr.isDraft, createdBy: person(pr.createdBy), creationDate: pr.creationDate ?? null,
+  sourceRefName: pr.sourceRefName ?? '', targetRefName: pr.targetRefName ?? '',
+  repository: pr.repository ? { id: pr.repository.id, name: pr.repository.name, project: pr.repository.project?.name ?? '' } : null,
+  lastMergeSourceCommit: pr.lastMergeSourceCommit?.commitId ?? null,
+});
+server.tool('neo_git_repositories', 'List the enabled Git repositories of a project.', {
+  project: z.string().min(1).max(200),
+}, async ({ project }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const repositories = (await git.getRepositories(project) ?? []).filter(r => !r.isDisabled).map(r => ({ id: r.id, name: r.name, defaultBranch: r.defaultBranch ?? '' }));
+  return { content: [{ type: 'text', text: JSON.stringify(repositories.sort((a, b) => a.name.localeCompare(b.name))) }] };
+});
+server.tool('neo_pull_requests', 'List the active pull requests of a repository.', {
+  project: z.string().min(1).max(200), repository: z.string().min(1).max(200), top: z.number().int().min(1).max(200),
+}, async ({ project, repository, top }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const pullRequests = await git.getPullRequests(repository, { status: 1 }, project, undefined, 0, top) ?? [];
+  return { content: [{ type: 'text', text: JSON.stringify(pullRequests.map(pullRequestSummary)) }] };
+});
+server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, optionally, the content of its changed files and existing comments.', {
+  project: z.string().min(1).max(200), repository: z.string().min(1).max(200), pullRequestId: z.number().int().positive(),
+  includeFiles: z.boolean(), maxFiles: z.number().int().min(1).max(500), maxFileBytes: z.number().int().min(1000).max(2000000),
+}, async ({ project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const pr = await git.getPullRequest(repository, pullRequestId, project);
+  if (!pr) throw new Error(`Azure DevOps no encontró el pull request ${pullRequestId} en «${repository}».`);
+  const repositoryId = pr.repository.id;
+  const iterations = await git.getPullRequestIterations(repositoryId, pullRequestId, project) ?? [];
+  const iteration = iterations.at(-1);
+  const result = { pullRequest: pullRequestSummary(pr), iteration: iteration ? { id: iteration.id, sourceCommit: iteration.sourceRefCommit?.commitId ?? null, baseCommit: iteration.commonRefCommit?.commitId ?? iteration.targetRefCommit?.commitId ?? null } : null, files: [], omittedFiles: 0, threads: [] };
+  if (!includeFiles || !iteration) return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  const entries = [];
+  for (let skip = 0; ; skip += 2000) {
+    const page = await git.getPullRequestIterationChanges(repositoryId, pullRequestId, iteration.id, project, 2000, skip, 0);
+    entries.push(...(page?.changeEntries ?? []));
+    if (!page?.nextSkip) break;
+  }
+  const files = entries.filter(entry => entry.item?.path && !entry.item.isFolder && entry.item.gitObjectType !== 'tree');
+  result.omittedFiles = Math.max(0, files.length - maxFiles);
+  emit('info', `El pull request cambia ${files.length} archivos. Leyendo su contenido…`);
+  for (const [index, entry] of files.slice(0, maxFiles).entries()) {
+    const type = changeType(entry.changeType);
+    const read = async sha => sha ? readText(await git.getBlobContent(repositoryId, sha, project, false), maxFileBytes) : { text: '' };
+    const [before, after] = await Promise.all([type === 'add' ? { text: '' } : read(entry.item.originalObjectId), type === 'delete' ? { text: '' } : read(entry.item.objectId)]);
+    result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? entry.sourceServerItem ?? null, changeType: type, before, after });
+    if ((index + 1) % 20 === 0) emit('info', `${index + 1} / ${Math.min(files.length, maxFiles)} archivos leídos.`);
+  }
+  const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];
+  result.threads = threads.filter(t => !t.isDeleted).map(t => ({
+    id: t.id, filePath: t.threadContext?.filePath ?? null, line: t.threadContext?.rightFileStart?.line ?? null,
+    comments: (t.comments ?? []).filter(c => !c.isDeleted && c.commentType !== 3).map(c => ({ author: c.author?.displayName ?? '', content: String(c.content ?? '').slice(0, 2000) })),
+  })).filter(t => t.comments.length).slice(0, 200);
+  return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+});
+server.tool('neo_pull_request_threads', 'List the text of the existing comments of a pull request.', {
+  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(),
+}, async ({ project, repositoryId, pullRequestId }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];
+  return { content: [{ type: 'text', text: JSON.stringify(threads.filter(t => !t.isDeleted).map(t => ({ id: t.id, comments: (t.comments ?? []).filter(c => !c.isDeleted).map(c => String(c.content ?? '')) }))) }] };
+});
+server.tool('neo_pull_request_comment_write', 'Add one new active comment thread to a pull request, optionally anchored to a line of the changed file.', {
+  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(),
+  content: z.string().min(1).max(20000), filePath: z.string().min(1).max(1000).optional(), line: z.number().int().positive().optional(),
+}, async ({ project, repositoryId, pullRequestId, content, filePath, line }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const thread = {
+    comments: [{ parentCommentId: 0, content, commentType: 1 }], status: 1,
+    ...(filePath ? { threadContext: { filePath, ...(line ? { rightFileStart: { line, offset: 1 }, rightFileEnd: { line, offset: 1 } } : {}) } } : {}),
+  };
+  const created = await git.createThread(thread, repositoryId, pullRequestId, project);
+  if (!created?.id) throw new Error('Azure DevOps no confirmó el comentario.');
+  return { content: [{ type: 'text', text: JSON.stringify({ id: created.id }) }] };
 });
 await server.connect(new StdioServerTransport());

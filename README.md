@@ -33,9 +33,31 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
   - **Uso:** se consulta al entrar y con **Actualizar**; el resultado solo se guarda en memoria. Permite buscar y filtrar por estado, y cada título abre el elemento en Azure DevOps.
   - **Límites:** muestra hasta 1000 elementos y avisa si hay más. Es de solo lectura. En el ejemplo se usan datos simulados.
 
+- **Revisión de PRs**: revisa pull requests de Azure DevOps con GitHub Copilot y publica los comentarios que confirmes. Se describe en [Revisión de pull requests](#revisión-de-pull-requests).
+
+## Revisión de pull requests
+
+1. En **Revisión de PRs**, pega la URL de un pull request (`https://dev.azure.com/organización/proyecto/_git/repositorio/pullrequest/123`) o elige un repositorio del proyecto conectado y uno de sus pull requests activos.
+2. **Revisar** lee el pull request en Azure DevOps (sus archivos cambiados y los comentarios existentes) y GitHub Copilot revisa el diff. El progreso se muestra y la revisión se puede cancelar.
+3. El resultado se guarda en local: un resumen, una valoración y los comentarios propuestos por gravedad, cada uno anclado a su línea del pull request cuando esa línea aparece en el diff. Puedes editar el texto de cada comentario y marcar cuáles publicar (las sugerencias vienen desmarcadas).
+4. **Publicar en Azure DevOps** muestra exactamente qué se va a crear y pide confirmación. Solo entonces se añaden hilos nuevos al pull request.
+
+**Seguridad y datos**
+
+- **Azure DevOps:** se accede con el mismo inicio de sesión de Microsoft y a través del MCP local. La única escritura crea hilos de comentario nuevos: no edita, resuelve ni borra comentarios, no vota ni completa el pull request.
+- **Antes de publicar:** se comprueba que el pull request sigue activo y en el mismo commit que se revisó; si ha cambiado no se publica nada y hay que volver a revisarlo.
+- **Sin duplicados:** cada comentario lleva una referencia `neo-review-…`. Una publicación repetida busca primero esa referencia y no reenvía lo que ya llegó a Azure. Los comentarios no se reintentan automáticamente.
+- **GitHub Copilot:** se usa mediante el [Copilot SDK](https://github.com/github/copilot-sdk) oficial (fijado en 1.0.14) con la cuenta de GitHub iniciada en este equipo, y cada revisión consume la asignación de Copilot de esa cuenta (Business o Enterprise). La aplicación no pide ni guarda tokens de GitHub.
+- **Qué recibe Copilot:** solo el diff del pull request, su descripción y los comentarios existentes, tratados como datos no confiables. Se ejecuta sin herramientas (ni terminal, ni archivos, ni MCP), en una carpeta vacía, sin leer la configuración ni las instrucciones personales de Copilot, y la sesión se borra al terminar.
+- **Límites del diff:** los archivos binarios o de más de 400 KB, y los que superan el tamaño total del diff, no se envían; la revisión lo indica para que los revises a mano.
+
+**Iniciar sesión en GitHub.** Una sola vez, con tu cuenta de la empresa: `gh auth login` (GitHub CLI) o `copilot` y después `/login` (Copilot CLI). También puedes definir `COPILOT_GITHUB_TOKEN` con un token *fine-grained* con el permiso «Copilot Requests». **Comprobar** en la sección indica qué cuenta se usará. La organización debe permitir el uso de Copilot CLI/SDK a tu asiento. Para elegir un modelo concreto, define `NEO_TEAM_COPILOT_MODEL`; si no, se usa el predeterminado de tu plan.
+
+En el ejemplo, los pull requests, la revisión y la publicación se simulan: no se contacta con Azure DevOps ni con GitHub.
+
 ## Uso
 
-1. En **Conectar Azure DevOps**, introduce tu organización o su URL.
+1. En **Conectar Azure DevOps**, introduce tu organización o cualquier URL suya copiada del navegador (`https://dev.azure.com/organización/…` o `https://organización.visualstudio.com`).
 2. Elige **Iniciar sesión con Microsoft**. **Buscar proyectos** abre el acceso de Microsoft cuando sea necesario y carga las opciones del campo. Puedes escribir los nombres directamente. **Buscar equipos** carga los equipos del proyecto indicado.
 3. Pulsa **Conectar e importar**. También puedes guardar la configuración sin conectar. El modo **Azure CLI** utiliza una sesión previamente autenticada; el tenant de Entra es opcional.
 4. En **1 · Iteración**, elige la iteración que vas a planificar. Los pasos siguientes trabajan sobre ella; el botón de la cabecera vuelve a este paso para cambiarla.
@@ -88,9 +110,9 @@ La configuración y ambas planificaciones se guardan en `.neo-team/workspace.jso
 
 Los cambios locales tienen una versión para impedir sobrescrituras desde ventanas desactualizadas. La revisión compara cada campo editado con su valor importado y el remoto: conserva cambios remotos ajenos al borrador y señala los conflictos en el mismo campo. Elegir **Conservar versión de Azure** descarta todos los cambios locales de esa tarea; **Mantener mis cambios** los vuelve a preparar sobre la última versión leída. Ambas opciones requieren una nueva revisión.
 
-Antes de escribir se comprueban otra vez todas las revisiones; cada actualización también incluye el `test /rev` atómico. La sincronización no es una transacción entre tareas: cada éxito se guarda por separado, los fallos permanecen pendientes y una revisión posterior reconoce los valores ya aplicados sin repetir escrituras. No hay reintentos automáticos de escrituras inciertas.
+La sincronización no es una transacción entre tareas: cada éxito se guarda por separado, los fallos permanecen pendientes y una revisión posterior reconoce los valores ya aplicados sin repetir escrituras. Las creaciones nunca se reenvían automáticamente; se recuperan por su etiqueta.
 
-El servidor escucha exclusivamente en `127.0.0.1`, valida Host y Origin y requiere un token de sesión para las peticiones de modificación. No se debe exponer a Internet. Para cambiar el puerto o el directorio de datos se pueden usar `NEO_TEAM_PORT` y `NEO_TEAM_DATA_DIR`. Ejecuta una sola instancia por directorio de datos.
+El servidor escucha exclusivamente en `127.0.0.1`, valida Host y Origin, rechaza las peticiones a `/api/` que el navegador marca como de otro sitio (`Sec-Fetch-Site: cross-site`) y requiere un token de sesión para las consultas y modificaciones. Si el servidor se reinicia, la interfaz renueva el token y repite la acción solo si la planificación no ha cambiado entretanto. No se debe exponer a Internet. Para cambiar el puerto o el directorio de datos se pueden usar `NEO_TEAM_PORT` y `NEO_TEAM_DATA_DIR`. Ejecuta una sola instancia por directorio de datos.
 
 ## Verificación
 
@@ -109,7 +131,9 @@ Usa **+ Crear** o el **+** de una rama para crear épicas, features, historias, 
 
 Cada creación incluye una etiqueta técnica única `neo-create-…` que permite recuperar su resultado sin duplicar elementos si se pierde la respuesta. Se valida en Azure antes de enviar. Una creación enviada con resultado incierto no se reenvía ni se descarta automáticamente: la siguiente revisión y sincronización intentan localizarla. Si sigue sin aparecer o difiere del borrador, se conserva bloqueada para comprobarla en Azure. No elimines esta etiqueta mientras se recupera una creación incierta.
 
-Los cambios existentes comparan los valores originales, locales y remotos. La revisión muestra los conflictos, pero no bloquea: al sincronizar se envía la versión local, que sobrescribe lo que haya en Azure. Las llamadas que agotan el tiempo, pierden la conexión o reciben un error temporal se reintentan hasta tres veces. Los fallos parciales conservan los elementos pendientes. El reparto compartido de ramas y las confirmaciones personales son locales; las asignaciones de responsable sí se envían a Azure.
+Los cambios existentes comparan los valores originales, locales y remotos. La revisión muestra los conflictos, pero no bloquea: al sincronizar se envía la versión local, que sobrescribe lo que haya en Azure en los campos editados. En ese caso el botón lo indica (**Sincronizar y sobrescribir N conflictos**). Solo se envían los campos editados; los cambios remotos en otros campos se conservan.
+
+Si durante la revisión no se puede leer Azure, la revisión lo avisa y las escrituras se protegen, porque nadie ha visto la versión remota: una tarea se envía con el `test /rev` de su copia local y solo se aplica si no ha cambiado desde la importación; una capacidad se vuelve a leer justo antes de escribirla y no se sobrescribe si ha cambiado (si Azure sigue sin responder, se envía el valor local). Las lecturas por lotes omiten los elementos eliminados o sin acceso, que se señalan uno a uno sin impedir revisar el resto. Las llamadas que agotan el tiempo, pierden la conexión o reciben un error temporal se reintentan hasta tres veces. Los fallos parciales conservan los elementos pendientes. El reparto compartido de ramas y las confirmaciones personales son locales; las asignaciones de responsable sí se envían a Azure.
 
 La creación real depende de los tipos y campos habilitados en el proceso del proyecto. Se han probado los contratos MCP y escenarios de error con datos controlados; no se ha creado ningún elemento en una organización real durante el desarrollo.
 
@@ -123,4 +147,4 @@ Mantenimiento, grupos de permisos e informe de un grupo mantienen sus botones in
 
 ## Diagnóstico de errores
 
-Cuando una operación falla de forma inesperada, el recuadro de progreso muestra el motivo y el servidor guarda un informe en `.neo-team/last-error.json` (o en `NEO_TEAM_DATA_DIR`). Incluye el paso en el que se detuvo, la actividad reciente y la pila del error; también se escribe en la terminal del servidor. Los errores internos indican el paso y el archivo y la línea donde ocurrieron. Si el servidor se detiene durante una operación, deja el mismo informe antes de salir. El informe no contiene credenciales ni datos de la planificación.
+Cuando una operación falla de forma inesperada, el recuadro de progreso muestra el motivo y el servidor guarda un informe en `.neo-team/last-error.json` (o en `NEO_TEAM_DATA_DIR`). Incluye el paso en el que se detuvo, la actividad reciente y la pila del error; también se escribe en la terminal del servidor. Los errores internos indican el paso y el archivo y la línea donde ocurrieron. Si el servidor se detiene durante una operación, deja el mismo informe antes de salir; un rechazo de promesa no capturado se registra sin detener el servidor. Los errores de validación de los cambios locales solo se muestran en la interfaz y no generan informe. Si el puerto ya está en uso, la terminal lo indica al arrancar. El informe no contiene credenciales ni datos de la planificación.

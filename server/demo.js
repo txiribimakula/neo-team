@@ -108,3 +108,77 @@ export function upgradeDemoHierarchy(workspace) {
   workspace.demoHierarchyVersion=1;
   return true;
 }
+
+// Pull request review in the example: a simulated repository, pull requests and
+// Copilot answer. Nothing contacts Azure DevOps or GitHub.
+const DEMO_REPOSITORY = { id: '00000000-0000-4000-8000-00000000d3e0', name: 'neo-platform-web', defaultBranch: 'refs/heads/main' };
+const exportBefore = `import { query } from '../db.js';
+
+export async function exportReport(req, res) {
+  const rows = await query('SELECT * FROM reports WHERE team = ?', [req.user.team]);
+  res.json(rows);
+}
+`;
+const exportAfter = `import { query } from '../db.js';
+import { toCsv } from '../csv.js';
+
+export async function exportReport(req, res) {
+  const format = req.query.format || 'json';
+  const rows = await query(\`SELECT * FROM reports WHERE team = '\${req.query.team}'\`);
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv');
+    return res.send(toCsv(rows));
+  }
+  res.json(rows);
+}
+`;
+const csvAfter = `export function toCsv(rows) {
+  const columns = Object.keys(rows[0]);
+  return [columns.join(','), ...rows.map(row => columns.map(column => row[column]).join(','))].join('\\n');
+}
+`;
+const DEMO_PULL_REQUESTS = [
+  { pullRequestId: 318, title: 'Exportar informes en CSV', description: 'Añade el formato CSV a la exportación de informes.', status: 'active', isDraft: false, createdBy: { displayName: 'Marcos Ruiz', uniqueName: 'marcos@example.test' }, creationDate: new Date(Date.now() - 2 * 86400000).toISOString(), sourceRefName: 'refs/heads/feature/csv-export', targetRefName: 'refs/heads/main', repository: { id: DEMO_REPOSITORY.id, name: DEMO_REPOSITORY.name, project: 'Neo Platform' }, lastMergeSourceCommit: 'd3e0c5a1' },
+  { pullRequestId: 321, title: 'Ajustar el menú de navegación en móvil', description: '', status: 'active', isDraft: true, createdBy: { displayName: 'Ana García', uniqueName: 'ana@example.test' }, creationDate: new Date(Date.now() - 86400000).toISOString(), sourceRefName: 'refs/heads/fix/mobile-menu', targetRefName: 'refs/heads/main', repository: { id: DEMO_REPOSITORY.id, name: DEMO_REPOSITORY.name, project: 'Neo Platform' }, lastMergeSourceCommit: 'd3e0c5a2' },
+];
+export const demoRepositories = () => [structuredClone(DEMO_REPOSITORY)];
+export const demoPullRequests = () => structuredClone(DEMO_PULL_REQUESTS);
+export function demoPullRequest(id) {
+  const pullRequest = DEMO_PULL_REQUESTS.find(pr => pr.pullRequestId === id);
+  if (!pullRequest) throw Object.assign(new Error(`El ejemplo no tiene el pull request ${id}. Usa 318 o 321.`), { status: 404 });
+  const files = id === 318
+    ? [{ path: '/src/api/export.js', originalPath: null, changeType: 'edit', before: { text: exportBefore }, after: { text: exportAfter } }, { path: '/src/csv.js', originalPath: null, changeType: 'add', before: { text: '' }, after: { text: csvAfter } }]
+    : [{ path: '/src/menu.css', originalPath: null, changeType: 'edit', before: { text: '.menu { display: flex; }\n' }, after: { text: '.menu { display: flex; }\n@media (max-width: 600px) { .menu { flex-direction: column; } }\n' } }];
+  return { pullRequest: structuredClone(pullRequest), iteration: { id: 1, sourceCommit: pullRequest.lastMergeSourceCommit, baseCommit: 'd3e0c500' }, files, omittedFiles: 0, threads: [] };
+}
+export const DEMO_REVIEW_OUTPUT = JSON.stringify({
+  summary: 'Añade la exportación de informes en CSV. El cambio introduce una inyección SQL y deja de filtrar por el equipo del usuario autenticado, por lo que cualquiera podría leer informes de otros equipos. La conversión a CSV no escapa valores ni admite listas vacías.',
+  verdict: 'changes',
+  findings: [
+    { file: '/src/api/export.js', line: 6, severity: 'blocker', title: 'Inyección SQL y acceso a informes de otros equipos', body: 'La consulta concatena `req.query.team` en el SQL y usa un valor que envía el cliente en lugar de `req.user.team`. Cualquiera puede leer informes de otro equipo o ejecutar SQL arbitrario.\n\nUsa de nuevo la consulta parametrizada con el equipo del usuario: `query(\'SELECT * FROM reports WHERE team = ?\', [req.user.team])`.' },
+    { file: '/src/csv.js', line: 2, severity: 'major', title: 'Falla con una lista vacía', body: 'Si no hay informes, `rows[0]` es `undefined` y `Object.keys` lanza una excepción. Devuelve una cadena vacía o solo la cabecera cuando `rows` esté vacío.' },
+    { file: '/src/csv.js', line: 3, severity: 'minor', title: 'Los valores no se escapan', body: 'Los valores con comas, comillas o saltos de línea rompen el CSV. Escápalos entre comillas dobles y duplica las comillas internas.' },
+    { file: '/src/api/export.js', line: 5, severity: 'suggestion', title: 'Validar el formato solicitado', body: 'Un formato desconocido devuelve JSON sin avisar. Responde 400 si `format` no es `json` ni `csv`.' },
+  ],
+});
+export class DemoReviewer {
+  async status() { return { isAuthenticated: true, login: 'ejemplo', host: null, authType: 'demo', message: null }; }
+  async review({ onProgress = () => {} }) {
+    onProgress({ message: 'Simulando la revisión de GitHub Copilot…' });
+    return { text: DEMO_REVIEW_OUTPUT, login: 'ejemplo', model: 'simulado', usage: {} };
+  }
+  async abort() {}
+}
+// Publishing in the example keeps the comments in memory of this process.
+export class DemoPullRequestGateway {
+  constructor() { this.threads = new Map(); this.nextId = 1; }
+  async repositories() { return demoRepositories(); }
+  async pullRequests() { return demoPullRequests(); }
+  async pullRequest(_config, _repository, id) { return demoPullRequest(id); }
+  async pullRequestThreads(_config, _repositoryId, id) { return (this.threads.get(id) ?? []).map(t => ({ id: t.id, comments: [t.content] })); }
+  async addPullRequestComment(_config, { pullRequestId, content, filePath, line }) {
+    const thread = { id: this.nextId++, content, filePath, line };
+    this.threads.set(pullRequestId, [...(this.threads.get(pullRequestId) ?? []), thread]);
+    return { id: thread.id };
+  }
+}

@@ -47,6 +47,10 @@ function workflowStates(states) {
   return states.filter(s => s && normalize(s.name)).map(s => ({ name: s.name, category: normalize(s.category || s.stateCategory).replace(/\s/g, '') }));
 }
 
+const REVISION_CHANGED = /TF401289|\b(409|412)\b|Precondition Failed|test operation|\/rev\b/i;
+// Writes that would be duplicated if repeated after an uncertain answer. They are
+// never retried here: their callers look for the result before sending again.
+const NOT_REPEATABLE = new Set(['neo_create_item', 'neo_pull_request_comment_write']);
 const isTransient = error => [-32001, -32000].includes(error?.code) || /Connection closed|Conecta Azure DevOps|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed out|\b(408|429|500|502|503|504)\b/i.test(String(error?.message ?? ''));
 
 export class AzureGateway {
@@ -68,7 +72,9 @@ export class AzureGateway {
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch']) {
+      // Every tool used by imports, reviews and writes, so a missing one is reported
+      // on connecting rather than in the middle of a synchronization.
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_git_repositories', 'neo_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -90,15 +96,15 @@ export class AzureGateway {
     this.onActivity?.({ at: Date.now(), kind, message, pending: this.pendingCall ?? null });
   }
   // Transient failures (timeouts, a closed MCP process, throttling or server errors)
-  // are retried after reconnecting. Creations are never replayed here: the planner
-  // recovers them by their marker to avoid duplicates. A cancellation stops retries.
+  // are retried after reconnecting. Creations and comments are never replayed here:
+  // their callers recover them by a marker to avoid duplicates. A cancellation stops retries.
   async call(name, args) {
     const timeout = /_write$|^neo_create_item$/.test(name) ? 600000 : 180000;
     let generation = this.generation;
     for (let attempt = 1; ; attempt++) {
       try { return await this.callOnce(name, args, timeout); }
       catch (error) {
-        if (attempt >= 3 || name === 'neo_create_item' || !this.lastConfig || this.generation !== generation || !isTransient(error)) throw error;
+        if (attempt >= 3 || NOT_REPEATABLE.has(name) || !this.lastConfig || this.generation !== generation || !isTransient(error)) throw error;
         this.report('info', `Reintentando ${describeCall(name, args)} (intento ${attempt + 1} de 3)…`);
         await new Promise(resolve => setTimeout(resolve, attempt * (this.retryDelay ?? 2000)));
         if (this.generation !== generation) throw error;
@@ -152,7 +158,8 @@ export class AzureGateway {
     for (let offset=0;offset<ids.length;offset+=200) {
       const batch=await this.call('neo_work_items_batch',{project:config.project,ids:ids.slice(offset,offset+200)});
       if(!Array.isArray(batch)) throw new Error('No se pudieron leer las tareas.');
-      result.push(...batch.map(normalizeItem));
+      // Deleted or inaccessible items are omitted: each one is reported on its own.
+      result.push(...batch.filter(Boolean).map(normalizeItem));
     }
     return result;
   }
@@ -287,6 +294,33 @@ export class AzureGateway {
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
     return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
+  // Pull request review: repositories, pull requests and their changes are read
+  // through the local MCP; comments are only added after the person confirms them.
+  async repositories(config) {
+    const result = await this.call('neo_git_repositories', { project: config.project });
+    if (!Array.isArray(result)) throw new Error('Azure DevOps no devolvió una lista válida de repositorios.');
+    return result;
+  }
+  async pullRequests(config, repository) {
+    const result = await this.call('neo_pull_requests', { project: config.project, repository, top: 100 });
+    if (!Array.isArray(result)) throw new Error('Azure DevOps no devolvió una lista válida de pull requests.');
+    return result;
+  }
+  async pullRequest(config, repository, pullRequestId, { includeFiles = false, maxFiles = 300, maxFileBytes = 400000 } = {}) {
+    const result = await this.call('neo_pull_request', { project: config.project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes });
+    if (!result?.pullRequest || !Array.isArray(result.files)) throw new Error('Azure DevOps no devolvió un pull request válido.');
+    return result;
+  }
+  async pullRequestThreads(config, repositoryId, pullRequestId) {
+    const result = await this.call('neo_pull_request_threads', { project: config.project, repositoryId, pullRequestId });
+    if (!Array.isArray(result)) throw new Error('Azure DevOps no devolvió los comentarios del pull request.');
+    return result;
+  }
+  async addPullRequestComment(config, { repositoryId, pullRequestId, content, filePath, line }) {
+    const result = await this.call('neo_pull_request_comment_write', { project: config.project, repositoryId, pullRequestId, content, ...(filePath ? { filePath } : {}), ...(filePath && line ? { line } : {}) });
+    if (!Number.isInteger(result?.id)) throw new Error('Azure DevOps no confirmó el comentario.');
+    return result;
+  }
   async findCreation(config, creationKey) {
     if(!/^[a-f0-9-]{36}$/.test(creationKey)) throw new Error('Identificador de creación no válido.');
     const result=await this.call('wit_query',{action:'wiql',project:config.project,top:2,wiql:`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Tags] CONTAINS 'neo-create-${creationKey}'`});
@@ -303,10 +337,17 @@ export class AzureGateway {
   }
   async update(config, id, revision, fields) {
     const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', state: 'System.State' };
-    return normalizeItem(await this.call('wit_work_item_write', {
-      action: 'update', project: config.project, id,
-      // Without a revision the local value overwrites whatever Azure has.
-      updates: [...(revision === null || revision === undefined ? [] : [{ op: 'test', path: '/rev', value: revision }]), ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],
-    }));
+    const guarded = revision !== null && revision !== undefined;
+    try {
+      return normalizeItem(await this.call('wit_work_item_write', {
+        action: 'update', project: config.project, id,
+        // Without a revision the local value overwrites whatever Azure has.
+        updates: [...(guarded ? [{ op: 'test', path: '/rev', value: revision }] : []), ...Object.entries(fields).map(([key, value]) => ({ op: 'add', path: `/fields/${fieldNames[key]}`, value }))],
+      }));
+    } catch (error) {
+      // Azure rejects the whole update when the revision differs: nothing was written.
+      if (guarded && REVISION_CHANGED.test(String(error?.message))) throw Object.assign(new Error(`#${id} ha cambiado en Azure DevOps y no se pudo comparar durante la revisión. No se ha modificado: vuelve a revisar los cambios.`), { cause: error });
+      throw error;
+    }
   }
 }

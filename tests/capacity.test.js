@@ -143,3 +143,28 @@ test('the demo mode simulates capacity synchronization without contacting Azure'
   assert.equal(capacityEntry(workspace().capacities[iteration.id],'ana').activities[0].capacityPerDay,9);
   assert.deepEqual(workspace().capacityDrafts,{});
 });
+
+test('a capacity that could not be read during the review is checked again before writing',async t=>{
+  const { planner, remote, calls, workspace, stage } = await fixture(t,'azure');
+  const iteration = workspace().iterations[0];
+  await stage({key:'ana',activities:[{name:'Development',capacityPerDay:7}]});
+  const read = planner.azure.capacity;
+  planner.azure.capacity = async()=>{throw new Error('HTTP 503');};
+  const review = await planner.prepareReview();
+  assert.equal(review.capacityPlans[0].unverified,true);
+  // Azure answers again at synchronization time and shows a change nobody reviewed.
+  planner.azure.capacity = read;
+  remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities=[{name:'Development',capacityPerDay:3}];
+  const blocked = await planner.sync(review.token);
+  assert.equal(calls.length,0,'the unreviewed Azure value is not overwritten');
+  assert.match(blocked.capacity.failures[0].error,/no se pudo comparar/);
+  assert.ok(workspace().capacityDrafts[iteration.id].ana,'the local change stays pending');
+  // When Azure still has the imported value, the local value is written.
+  remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities=[{name:'Development',capacityPerDay:5}];
+  planner.azure.capacity = async()=>{throw new Error('HTTP 503');};
+  const retry = await planner.prepareReview();
+  planner.azure.capacity = read;
+  const written = await planner.sync(retry.token);
+  assert.deepEqual(written.capacity.failures,[]);
+  assert.equal(remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities[0].capacityPerDay,7);
+});

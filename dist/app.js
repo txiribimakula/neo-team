@@ -1,6 +1,7 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance } from './maintenance.js';
-import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, hasPlanningCapacity, previousIteration, completedState, isCompleted } from './hierarchy.js';
+import { reviewsView, publishConfirmation } from './reviews.js';
+import { hierarchy, ancestors, participantSources, eligibleTasks, filterHierarchy, isExecutable, typeRank, selectionSummary, capacityStatus, orderedPlanningMembers, hasPlanningCapacity, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -8,6 +9,8 @@ const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
 let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null;
+// Pull request review: what the person is choosing; the reviews themselves come from the server.
+let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let focusedMember='', pickerMember='', pickerQuery='', onlyAvailable=true, backlogFilter='all';
 let peopleItem=null,peopleAnchor=null,peopleRect=null,peopleQuery='';
@@ -44,10 +47,15 @@ new MutationObserver(()=>{
 document.addEventListener('toggle',layoutStickyHierarchy,true);
 window.addEventListener('resize',layoutStickyHierarchy);
 function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sincronizar' : 'Pendiente de sincronizar';}
+// Pending changes are counted by the server, with the same rules as the review.
+const pendingCount = (ws = state?.workspace) => ws?.pendingChanges ?? 0;
+const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 function savedStatus() {
-  const count=Object.keys(state?.workspace?.drafts || {}).length+capacityDraftCount();
-  return count ? `${count} pendiente${count===1 ? '' : 's'} de sincronizar` : 'Sin cambios pendientes';
+  const count=pendingCount();
+  return count ? `${plural(count,'pendiente')} de sincronizar` : 'Sin cambios pendientes';
 }
+// Every snapshot received from the server is read-only in the interface.
+function setState(next) { state = next; markSnapshot(state?.workspace); }
 function createItem(parentId) {
   const ws=state.workspace,parent=ws.effectiveItems.find(i=>i.id===parentId);
   const type=parent ? ({Epic:'Feature',Feature:'User Story','User Story':'Task','Product Backlog Item':'Task',Requirement:'Task'})[parent.type] || 'Task' : 'Epic';
@@ -62,12 +70,27 @@ function updateCreationParents(parentId) {
   $('#create-hours').hidden=!['Task','Bug'].includes(type);
   $('#create-hours input').disabled=$('#create-hours').hidden;
 }
-function toast(text) { clearTimeout(toastTimer); $('#toast').textContent = text; $('#toast').hidden = false; toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 5000); }
+// Errors stay longer on screen and can be dismissed by clicking them.
+function toast(text, kind = 'info') {
+  const element = $('#toast');
+  clearTimeout(toastTimer);
+  element.textContent = text;
+  element.classList.toggle('error', kind === 'error');
+  element.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  element.hidden = false;
+  toastTimer = setTimeout(() => { element.hidden = true; }, kind === 'error' ? 10000 : 5000);
+}
 function errorInModal(error) {
   if (error.stateReview) { showStateReview(error.stateReview); return; }
   const target = $('#modal-error');
   if (modal.open && target) { target.textContent = error.message; target.hidden = false; }
-  else toast(error.message);
+  else toast(error.message, 'error');
+}
+async function send(path, input) {
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) })
+    .catch(() => { throw new Error('Se perdió la conexión con el servidor local de Neo Team antes de recibir la respuesta. Si se ha detenido, revisa la terminal donde se ejecuta y el archivo .neo-team/last-error.json.'); });
+  const data = await response.json().catch(() => { throw new Error(`El servidor local respondió sin datos válidos (HTTP ${response.status}).`); });
+  return { response, data };
 }
 async function request(path, input = {}) {
   if (pending) throw new Error('Espera a que termine la operación en curso.');
@@ -77,14 +100,20 @@ async function request(path, input = {}) {
   enabled.forEach(el => el.disabled = true);
   $('#save-status').textContent = 'Procesando…';
   try {
-    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json', 'X-Neo-CSRF': state.csrf }, body: JSON.stringify({ ...input, version: state.version }) })
-      .catch(() => { throw new Error('Se perdió la conexión con el servidor local de Neo Team antes de recibir la respuesta. Si se ha detenido, revisa la terminal donde se ejecuta y el archivo .neo-team/last-error.json.'); });
-    const data = await response.json().catch(() => { throw new Error(`El servidor local respondió sin datos válidos (HTTP ${response.status}).`); });
+    const version = state.version;
+    let { response, data } = await send(path, input);
+    if (response.status === 403 && data.reason === 'session') {
+      // The server restarted and rejected the request without applying it. Renew
+      // the session and repeat it only if nobody changed the plan in the meantime.
+      await loadState(false);
+      if (state.version !== version) throw new Error('El servidor local se ha reiniciado y la planificación ha cambiado. Revisa los datos y repite la acción.');
+      ({ response, data } = await send(path, input));
+    }
     if (!response.ok) {
       throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { stateReview: data.stateReview, diagnostics: data.diagnostics });
     }
-    if (data.state) state = data.state;
-    else if (data.csrf) state = data;
+    if (data.state) setState(data.state);
+    else if (data.csrf) setState(data);
     return data;
   } catch (error) {
     // Recover a server operation after a reload, another tab, or a lost response.
@@ -101,7 +130,7 @@ async function request(path, input = {}) {
 async function loadState(renderNow = true) {
   const response = await fetch('/api/state');
   if (!response.ok) throw new Error('No se pudo abrir el espacio local.');
-  state = await response.json();
+  setState(await response.json());
   if (renderNow) render();
 }
 function showModal(title, subtitle, body, actions = '') {
@@ -113,8 +142,8 @@ let connectionPickerEvents = new AbortController();
 function connection() {
   connectionPickerEvents.abort();
   connectionPickerEvents = new AbortController();
-  const c = state.config || {};
-  showModal('Importar proyecto', 'Añade un proyecto a la planificación conjunta. Los ya importados se conservan.', `
+  const c = state.config || {}, adding = state.mode === 'azure' && !!state.workspace;
+  showModal(adding ? 'Añadir proyecto' : state.config ? 'Configuración de Azure DevOps' : 'Conectar Azure DevOps', adding ? 'Añade un proyecto a la planificación conjunta. Los ya importados se conservan.' : 'Indica la organización, el proyecto y el equipo que vas a planificar. Solo se leen datos hasta que revises y sincronices.', `
     <form id="connection-form">
       <label class="form-field">Organización<input name="organization" required maxlength="150" placeholder="mi-organizacion o https://dev.azure.com/mi-organizacion" value="${escape(c.organization)}" autocomplete="off"></label>
       <label class="form-field">Acceso<select name="authentication"><option value="interactive">Iniciar sesión con Microsoft</option><option value="azcli" ${c.authentication === 'azcli' ? 'selected' : ''}>Usar mi sesión de Azure CLI</option></select><small>Con Microsoft se abrirá tu navegador para iniciar sesión. La aplicación no solicita tu contraseña.</small></label>
@@ -123,7 +152,7 @@ function connection() {
       <details><summary class="text-muted" style="font-size:14px;cursor:pointer;margin-bottom:14px">Opciones avanzadas</summary><label class="form-field">Tenant de Microsoft Entra (opcional)<input name="tenant" placeholder="Identificador del directorio" value="${escape(c.tenant)}"><small>Déjalo vacío para detectar el directorio de tu organización.</small></label></details>
       <div id="connection-progress" hidden></div>
       <div class="notice">Se importan tareas abiertas e iteraciones actuales y futuras. Los estados personalizados sin categoría se revisan antes de descargar las tareas. Las capacidades se definen una sola vez para todos los proyectos. Podrás preparar cambios en local y revisarlos antes de sincronizarlos.</div>
-    </form>`, '<button class="button" data-action="save-config">Guardar configuración</button><button class="button primary" type="submit" form="connection-form">Conectar e importar ↙</button>');
+    </form>`, `<button class="button" data-action="save-config">Guardar sin importar</button><button class="button primary" type="submit" form="connection-form">${adding ? 'Añadir e importar' : 'Conectar e importar'} ↙</button>`);
   modal.classList.add('connection-modal');
   setupConnectionPickers();
 }
@@ -325,7 +354,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -459,6 +488,7 @@ async function resumeOperation() {
     await loadState();
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
     if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
+    if (current.path.startsWith('/api/pr-')) { if (current.path === '/api/pr-review') prUi.reviewId = state.prReviews?.[0]?.id ?? null; tab = 'reviews'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
   } catch (error) {
@@ -743,7 +773,6 @@ function personMeter(member) {
 // against. Every edit is a local draft until the review writes it to Azure.
 const dayValue = value => String(value ?? '').slice(0,10);
 const nextDay = value => new Date(+new Date(`${value}T00:00:00Z`) + 86400000).toISOString().slice(0,10);
-function capacityDraftCount(ws = state?.workspace) { if(ws?.sources) return Math.max(Object.values(ws.capacityDrafts ?? {}).reduce((n,d)=>n+Object.keys(d).length,0),ws.projectAllocations?.filter(p=>JSON.stringify(p.entry)!==JSON.stringify(p.original)).length ?? 0); return Object.values(ws?.capacityDrafts ?? {}).reduce((sum,drafts)=>sum+Object.keys(drafts).length,0); }
 function capacityOf(iterationId, owner) {
   const capacity=state.workspace.effectiveCapacities?.[iterationId] ?? {};
   const record=owner==='team' ? { daysOff:capacity.daysOff } : (capacity.teamMembers ?? []).find(m=>m.teamMember?.id===owner);
@@ -935,21 +964,22 @@ function render() {
   const ws=state.workspace;
   $('#connection-button').textContent=state.config ? 'Configuración' : 'Conectar Azure DevOps';
   $('#save-status').textContent=ws ? savedStatus() : '';
-  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento' })[tab] || 'Planificación';
+  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   $('#app').setAttribute('aria-label', section);
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
   if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
   if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state, maintenanceSetup); return; }
+  if (tab === 'reviews') { $('#app').innerHTML = reviewsView(state, prUi); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
-    $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div>`;return;
+    $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><p>${state.config ? `Importa ${escape(state.config.project)} / ${escape(state.config.team)} para traer sus iteraciones, capacidad y tareas abiertas. Solo se lee Azure DevOps: nada se modifica hasta que revises y sincronices.` : 'Conecta tu organización de Azure DevOps para traer iteraciones, capacidad y tareas, o prueba antes con un ejemplo que nunca contacta con Azure.'}</p><div class="actions"><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>`;return;
   }
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
-  const changes=Object.keys(ws.drafts).length+capacityDraftCount(ws);
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions"><button class="button small" data-action="import" ${Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length || ws.mode==='demo' ? 'disabled' : ''} title="${ws.mode==='demo' ? 'Conecta Azure DevOps para actualizar datos' : changes ? 'Revisa o descarta los cambios pendientes antes de actualizar' : 'Actualizar desde Azure DevOps'}">Actualizar toda la planificación</button><a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
+  const changes=pendingCount(ws), drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
+  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
   ${stepTabs(changes)}
   <div id="planning-view">${ws.sources && tab==='planning' ? allocationView() : ''}${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
@@ -995,11 +1025,30 @@ function incompleteAllocationsNotice() {
 function capacityReview() {
   const plans=review.capacityPlans ?? [];
   if (!plans.length) return '';
-  return `<h3 class="review-section">Capacidad y días libres</h3>${plans.map(plan=>`<section class="review-item"><h3>${escape(plan.iteration)} · ${escape(plan.label)}</h3>${plan.sourceId ? `<p class="local-note">${number(plan.hours)} h de tareas · ${number(plan.ratio*100)} % de la capacidad · ${number(plan.allocated)} h disponibles en este proyecto</p>` : ''}<div class="change-row"><span class="change-label">${plan.key==='team' ? 'Días libres' : 'Capacidad'}</span><span class="change-old">${escape(capacityText(plan.remote,plan.key))}${plan.conflict ? `<small>Al importar: ${escape(capacityText(plan.original,plan.key))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(capacityText(plan.after,plan.key))}${plan.conflict ? ' ⚠' : ''}</span></div>${plan.conflict ? `<p class="local-note">La capacidad ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, se sobrescribe con tu valor local.</p><div class="conflict-actions">${plan.sourceId ? '' : `<button class="button small" data-action="resolve-capacity-remote" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Conservar la de Azure</button>`}<button class="button small" data-source="${escape(plan.sourceId || '')}" data-action="resolve-capacity-local" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Mantener mis cambios</button></div>` : ''}${plan.applied && !plan.conflict ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`;
+  return `<h3 class="review-section">Capacidad y días libres</h3>${plans.map(plan=>`<section class="review-item"><h3>${escape(plan.iteration)} · ${escape(plan.label)}</h3>${plan.sourceId ? `<p class="local-note">${number(plan.hours)} h de tareas · ${number(plan.ratio*100)} % de la capacidad · ${number(plan.allocated)} h disponibles en este proyecto</p>` : ''}<div class="change-row"><span class="change-label">${plan.key==='team' ? 'Días libres' : 'Capacidad'}</span><span class="change-old">${escape(capacityText(plan.remote,plan.key))}${plan.conflict ? `<small>Al importar: ${escape(capacityText(plan.original,plan.key))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(capacityText(plan.after,plan.key))}${plan.conflict ? ' ⚠' : ''}</span></div>${plan.conflict ? `<p class="local-note">La capacidad ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, se sobrescribe con tu valor local.</p><div class="conflict-actions">${plan.sourceId ? '' : `<button class="button small" data-action="resolve-capacity-remote" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Conservar la de Azure</button>`}<button class="button small" data-source="${escape(plan.sourceId || '')}" data-action="resolve-capacity-local" data-iteration="${escape(plan.iterationId)}" data-owner="${escape(plan.key)}">Mantener mis cambios</button></div>` : ''}${plan.unverified ? '<p class="local-note">No se pudo leer en Azure DevOps. Se volverá a leer justo antes de enviarla: si alguien la ha cambiado, no se sobrescribirá. Si Azure sigue sin responder, se enviará tu valor.</p>' : ''}${plan.applied && !plan.conflict ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}`;
+}
+// The review says exactly what will be written. Conflicts do not block, so the
+// button states when synchronizing will overwrite values changed in Azure DevOps.
+function reviewPlan(p) {
+  const heading=`${p.creation ? 'Nuevo · Crear' : taskId(state.workspace.items.find(i=>i.id===p.id) ?? p)+' · Modificar'} · ${escape(p.title)}`;
+  const rows=p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('');
+  const notes=[
+    p.missing && '<p class="local-note">No se pudo leer esta tarea en Azure DevOps (puede haberse eliminado o no tienes acceso). No se enviará; el resto de cambios sí.</p>',
+    p.unverified && '<p class="local-note">No se pudo leer en Azure DevOps. Solo se enviará si la tarea no ha cambiado desde la importación; si cambió, quedará pendiente para revisarla.</p>',
+    p.conflicts.length && `<p class="local-note warning-text">Alguien la ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, tu versión local sobrescribirá ${p.conflicts.length===1 ? 'ese campo' : 'esos campos'}.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>`,
+    !p.missing && !p.unverified && !Object.keys(p.updates).length && '<p class="local-note">Estos valores ya están aplicados en Azure DevOps. Solo se actualizará la copia local.</p>',
+  ].filter(Boolean).join('');
+  return `<section class="review-item"><h3>${heading}</h3>${rows}${notes}</section>`;
 }
 function renderReview() {
-  const conflicts = review.plans.filter(p=>p.conflicts.length);
-  showModal(state.mode === 'demo' ? 'Simular sincronización' : 'Revisar y sincronizar', `${review.plans.length} tareas${review.capacityPlans?.length ? ` · ${review.capacityPlans.length} ajuste${review.capacityPlans.length===1 ? '' : 's'} de capacidad` : ''} · ${state.mode === 'demo' ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'}`, `<p class="local-note">Las asignaciones de responsable se sincronizan. El reparto de ramas entre varias personas y las confirmaciones son organización local.</p>${conflicts.length || review.capacityPlans?.some(p=>p.conflict) ? '<div class="notice warning" style="margin-bottom:20px">Algo ha cambiado en Azure DevOps. Elige qué versión conservar y vuelve a revisar antes de sincronizar.</div>' : ''}${review.plans.map(p=>`<section class="review-item"><h3>${p.creation ? 'Nuevo · Crear' : taskId(state.workspace.items.find(i=>i.id===p.id) ?? p)+' · Modificar'} · ${escape(p.title)}</h3>${p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('')}${p.missing ? '<p class="local-note">No se pudo leer esta tarea en Azure DevOps. Se enviarán igualmente los demás cambios.</p>' : ''}${p.conflicts.length ? `<p class="local-note">La versión de Azure ha cambiado desde tu importación. Si sincronizas sin elegir, se sobrescribe con tus cambios locales.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>` : ''}${!Object.keys(p.updates).length ? '<p class="local-note">Estos valores ya están aplicados. Se actualizará la copia local.</p>' : ''}</section>`).join('')}${allocationView()}${incompleteAllocationsNotice()}${capacityReview()}`, `<button class="button danger" data-action="discard-all">Descartar cambios</button><button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary" data-action="sync">${state.mode === 'demo' ? 'Confirmar simulación' : 'Sincronizar con Azure DevOps'} ↗</button>` : ''}`);
+  const demo=state.mode==='demo', plans=review.plans, capacity=review.capacityPlans ?? [];
+  const conflicts=plans.reduce((sum,p)=>sum+p.conflicts.length,0)+capacity.filter(p=>p.conflict).length;
+  const summary=[plural(plans.length,'tarea'),...(capacity.length ? [plural(capacity.length,'ajuste de capacidad','ajustes de capacidad')] : []),demo ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'].join(' · ');
+  const unreadable=review.unreadable?.length ? `<div class="notice warning">No se pudo leer parte de Azure DevOps para compararla: ${review.unreadable.map(escape).join('; ')}. Antes de escribirlo se vuelve a comprobar, para no sobrescribir lo que otra persona haya cambiado desde la importación.</div>` : '';
+  const conflictNotice=conflicts ? `<div class="notice warning"><strong>${plural(conflicts,'conflicto')}.</strong> Algo ha cambiado en Azure DevOps desde tu importación. Elige qué versión conservar en cada caso; si sincronizas sin elegir, se enviará tu versión local.</div>` : '';
+  const syncLabel=demo ? 'Confirmar simulación' : conflicts ? `Sincronizar y sobrescribir ${plural(conflicts,'conflicto')}` : 'Sincronizar con Azure DevOps';
+  showModal(demo ? 'Simular sincronización' : 'Revisar y sincronizar', summary, `<p class="local-note">Se envían las asignaciones, iteraciones, prioridades, horas y estados que has cambiado. El reparto de ramas y las confirmaciones son organización local y no se envían.</p>${unreadable}${conflictNotice}${plans.map(reviewPlan).join('')}${allocationView()}${incompleteAllocationsNotice()}${capacityReview()}`,
+    `<button class="button danger" data-action="discard-all">Descartar cambios</button><button class="button" data-action="close">Seguir planificando</button>${review.token ? `<button class="button primary ${conflicts && !demo ? 'danger' : ''}" data-action="sync">${escape(syncLabel)} ↗</button>` : ''}`);
 }
 async function synchronize() {
   const title = state.mode === 'demo' ? 'Simulando sincronización' : 'Sincronizando cambios';
@@ -1008,8 +1057,11 @@ async function synchronize() {
   review = null; render();
   const result = data.result, capacity = result.capacity ?? { successes:[], failures:[] };
   const failed = result.failures.length + capacity.failures.length;
-  const confirmed = [`${result.successes.length} tarea${result.successes.length===1 ? '' : 's'}`, ...(capacity.successes.length ? [`${capacity.successes.length} ajuste${capacity.successes.length===1 ? '' : 's'} de capacidad`] : [])];
-  showModal(failed ? 'Sincronización parcial' : result.demo ? 'Simulación completada' : 'Cambios sincronizados', `Se han confirmado ${confirmed.join(' y ')}${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.`, `${failed ? `<div class="notice warning">Los cambios pendientes se conservan en local. Vuelve a revisarlos para reintentar solo lo que falta.</div>${result.failures.map(f=>`<p class="inline-error" style="margin-top:15px">${taskId(state.workspace?.items.find(i=>i.id===f.id) ?? f)}: ${escape(f.error)}</p>`).join('')}${capacity.failures.map(f=>`<p class="inline-error" style="margin-top:15px">${escape(f.label)}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${result.demo ? 'La simulación solo ha actualizado los datos de ejemplo de este equipo.' : 'La copia local refleja los cambios confirmados por Azure DevOps.'}</div>`}`, `${failed ? '<button class="button primary" data-action="review">Revisar pendientes</button>' : '<button class="button primary" data-action="close">Volver a la planificación</button>'}`);
+  const confirmed = [plural(result.successes.length,'tarea'), ...(capacity.successes.length ? [plural(capacity.successes.length,'ajuste de capacidad','ajustes de capacidad')] : [])];
+  const succeeded = result.successes.length + capacity.successes.length;
+  const heading = failed ? (succeeded ? 'Sincronización parcial' : 'No se pudo sincronizar') : result.demo ? 'Simulación completada' : 'Cambios sincronizados';
+  const subtitle = succeeded ? `Se han confirmado ${confirmed.join(' y ')}${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.` : 'No se ha confirmado ningún cambio.';
+  showModal(heading, subtitle, `${failed ? `<div class="notice warning">Los cambios pendientes se conservan en local. Vuelve a revisarlos para reintentar solo lo que falta.</div>${result.failures.map(f=>`<p class="inline-error" style="margin-top:15px">${taskId(state.workspace?.items.find(i=>i.id===f.id) ?? f)}: ${escape(f.error)}</p>`).join('')}${capacity.failures.map(f=>`<p class="inline-error" style="margin-top:15px">${escape(f.label)}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${result.demo ? 'La simulación solo ha actualizado los datos de ejemplo de este equipo.' : 'La copia local refleja los cambios confirmados por Azure DevOps.'}</div>`}`, `${failed ? '<button class="button primary" data-action="review">Revisar pendientes</button>' : '<button class="button primary" data-action="close">Volver a la planificación</button>'}`);
 }
 async function refreshPlanningSection(section) {
   const title=({iterations:'Actualizar iteraciones',capacity:'Actualizar capacidad',tasks:'Actualizar tareas y jerarquía'})[section];
@@ -1041,13 +1093,15 @@ async function securityQuery(descriptor, reauthenticate = false) {
 }
 // Home: the entry point to every area of the team management.
 function homeView() {
-  const ws=state.workspace, iteration=ws ? selected() : null, changes=ws ? Object.keys(ws.drafts).length+capacityDraftCount(ws) : 0;
+  const ws=state.workspace, iteration=ws ? selected() : null, changes=pendingCount(ws);
   const team=state.config?.team ? `${state.config.project} / ${state.config.team}` : ws ? `${ws.config.project} / ${ws.config.team}` : 'Neo Team';
   const planning=!ws ? 'Sin datos importados' : `${iteration ? `Planificando ${escape(iteration.name)}` : 'Sin iteraciones'}${changes ? ` · ${changes} pendiente${changes===1 ? '' : 's'} de sincronizar` : ''}`;
   const issues=maintenanceSnapshot?.issues;
-  return `<section class="home"><header class="home-heading"><p class="eyebrow">GESTIÓN DEL EQUIPO</p><h1>${escape(team)}</h1><p>Elige por dónde empezar.</p></header><div class="home-sections">
+  const start=!state.config && !ws ? `<div class="home-start"><div><strong>Primer paso: conecta tu organización</strong><p>Neo Team lee tu equipo de Azure DevOps y guarda la planificación en este ordenador. Nada se envía a Azure hasta que revisas y confirmas los cambios. ¿Solo quieres verlo? Prueba con datos de ejemplo.</p></div><div class="actions"><button class="button primary" data-action="connect">Conectar Azure DevOps</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>` : '';
+  return `<section class="home"><header class="home-heading"><p class="eyebrow">GESTIÓN DEL EQUIPO</p><h1>${escape(team)}</h1><p>Elige por dónde empezar.</p></header>${start}<div class="home-sections">
     <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong><span>Iteraciones, capacidad y reparto de tareas del equipo.</span><small>${planning}</small></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong><span>${escape(state.maintenanceSettings?.type || 'Functional Issue')} no cerrados del proyecto.</span><small>${issues ? `${issues.length} no cerrado${issues.length===1 ? '' : 's'} en la última consulta` : state.maintenanceSettings ? 'Se consultan al entrar' : 'Primero eliges qué estados son cerrados'}</small></button>
+    <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong><span>Revisa pull requests con GitHub Copilot y publica los comentarios que confirmes.</span><small>${state.prReviews?.length ? plural(state.prReviews.length,'revisión guardada','revisiones guardadas') : 'Nada se publica sin tu confirmación'}</small></button>
   </div></section>`;
 }
 async function loadMaintenance() {
@@ -1066,6 +1120,31 @@ function exportSecurity() {
   const url = URL.createObjectURL(blob), link = document.createElement('a');
   link.href = url; link.download = 'neo-team-permisos.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+// An operation shown in its own dialog with progress; the dialog closes when it ends.
+async function runOperation(path, input, title, subtitle) {
+  showModal(title, subtitle, '<div id="connection-progress"></div>');
+  const data = await importWithProgress($('#connection-progress'), null, { path, input, title });
+  modal.close();
+  return data;
+}
+async function startReview(input) {
+  const demo = state.mode === 'demo';
+  const data = await runOperation('/api/pr-review', input, 'Revisar con GitHub Copilot', demo ? 'Ejemplo: la revisión se simula y nada sale de este equipo.' : 'Se lee el pull request en Azure DevOps y GitHub Copilot revisa su diff. Todavía no se publica nada.');
+  prUi.reviewId = data.reviewId; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
+  toast('Revisión lista. Ajusta los comentarios y publica los que quieras.');
+}
+async function loadPullRequests(repository) {
+  prUi.repository = repository; prUi.pullRequests = null;
+  if (repository) prUi.pullRequests = (await runOperation('/api/pr-list', { repository }, 'Buscar pull requests', `Pull requests activos de «${repository}».`)).pullRequests;
+  render();
+}
+const currentReview = () => state.prReviews?.find(r => r.id === prUi.reviewId);
+async function saveFinding(el, change) {
+  const focus = capacityFocus(document.activeElement);
+  await request('/api/pr-finding', { id: prUi.reviewId, findingId: el.dataset.prSelect || el.dataset.prBody, ...change });
+  render();
+  if (focus) $(focus)?.focus();
+}
 const actions = {
   permissions: async () => { await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
   'security-back': () => { tab = 'capacity'; render(); },
@@ -1083,6 +1162,36 @@ const actions = {
     if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
   },
   'maintenance-refresh': () => maintenanceQuery(),
+  'open-reviews': () => { prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 }); },
+  'pr-copilot-status': async () => {
+    prUi.copilot = (await runOperation('/api/copilot-status', {}, 'Comprobar GitHub Copilot', 'Se inicia Copilot con la cuenta de GitHub de este equipo. No se envía ningún código.')).copilot;
+    render(); toast(prUi.copilot.isAuthenticated ? `GitHub Copilot está listo con la cuenta ${prUi.copilot.login || 'de GitHub'}.` : 'No hay una sesión de GitHub con Copilot. Revisa las indicaciones.', prUi.copilot.isAuthenticated ? 'info' : 'error');
+  },
+  'pr-load-repositories': async () => {
+    prUi.repositories = (await runOperation('/api/pr-repositories', {}, 'Buscar repositorios', 'Repositorios de Git del proyecto.')).repositories;
+    if (prUi.repositories.length === 1) await loadPullRequests(prUi.repositories[0].name); else render();
+  },
+  'pr-review': el => startReview({ repository: el.dataset.repository, pullRequestId: Number(el.dataset.pullRequest) }),
+  'pr-open': el => { prUi.reviewId = el.dataset.review; render(); window.scrollTo({ top: 0 }); },
+  'pr-back': () => { prUi.reviewId = null; render(); },
+  'pr-delete': el => showModal('Descartar revisión', 'Se borra solo de Neo Team.', '<p>La revisión y sus comentarios sin publicar se eliminan de este equipo. Los comentarios ya publicados en Azure DevOps no se tocan.</p>', `<button class="button" data-action="close">Cancelar</button><button class="button danger" data-action="pr-delete-confirm" data-review="${escape(el.dataset.review)}">Descartar revisión</button>`),
+  'pr-delete-confirm': async el => { await request('/api/pr-review-delete', { id: el.dataset.review }); prUi.reviewId = null; modal.close(); render(); toast('Revisión descartada.'); },
+  'pr-publish': el => {
+    const review = currentReview(), includeSummary = !!$('#pr-include-summary')?.checked && !review?.summaryPublished;
+    if (!review) throw new Error('La revisión ya no está disponible.');
+    const confirmation = publishConfirmation(review, includeSummary);
+    if (!confirmation.count) throw new Error('Marca al menos un comentario o el resumen para publicar.');
+    const demo = review.mode === 'demo';
+    showModal(demo ? 'Simular publicación' : 'Publicar en Azure DevOps', `${plural(confirmation.count, 'comentario')} · pull request !${review.pullRequest.id}`, confirmation.html, `<button class="button" data-action="close">Cancelar</button><button class="button primary" data-action="pr-publish-confirm" data-review="${escape(review.id)}" data-summary="${includeSummary}">${demo ? 'Simular publicación' : `Publicar ${plural(confirmation.count, 'comentario')}`}</button>`);
+  },
+  'pr-publish-confirm': async el => {
+    const demo = state.mode === 'demo';
+    const data = await runOperation('/api/pr-publish', { id: el.dataset.review, includeSummary: el.dataset.summary === 'true' }, demo ? 'Simulando la publicación' : 'Publicando en Azure DevOps', 'Se comprueba el pull request y se añaden los comentarios confirmados.');
+    render();
+    const { published, failures } = data.result;
+    showModal(failures.length ? (published.length ? 'Publicación parcial' : 'No se pudo publicar') : demo ? 'Publicación simulada' : 'Comentarios publicados', published.length ? `${plural(published.length, 'comentario publicado', 'comentarios publicados')}${demo ? ' en el ejemplo' : ' en Azure DevOps'}.` : 'No se ha publicado ningún comentario.',
+      failures.length ? `<div class="notice warning">Los que fallaron siguen pendientes. Al volver a publicar se comprueba primero si llegaron a Azure, para no duplicarlos.</div>${failures.map(f => `<p class="inline-error" style="margin-top:15px">${escape(f.id === 'summary' ? 'Resumen' : currentReview()?.findings.find(x => x.id === f.id)?.title ?? f.id)}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${demo ? 'En el ejemplo no se contacta con Azure DevOps.' : 'Los comentarios ya están en el pull request.'}</div>`);
+  },
   'maintenance-edit-settings': () => { maintenanceSetup = { type: state.maintenanceSettings.type, states: state.maintenanceSettings.states }; render(); },
   'maintenance-cancel-settings': () => { maintenanceSetup = null; render(); },
   'maintenance-load-states': async () => {
@@ -1145,12 +1254,12 @@ const actions = {
 };
 async function resolveCapacity(iterationId,owner,choice,sourceId) {
   await request('/api/resolve-capacity',{iterationId,key:owner,choice,sourceId}); render();
-  if (Object.keys(state.workspace.drafts).length || capacityDraftCount()) await reviewChanges();
+  if (pendingCount()) await reviewChanges();
   else { modal.close(); toast('Se ha conservado la capacidad de Azure DevOps.'); }
 }
 async function resolveTask(id,choice) {
   await request('/api/resolve',{id,choice}); render();
-  if (Object.keys(state.workspace.drafts).length) await reviewChanges();
+  if (pendingCount()) await reviewChanges();
   else { modal.close(); toast('Se ha conservado la versión de Azure DevOps.'); }
 }
 $('#connection-button').onclick = () => { if (state && !pending) connection(); };
@@ -1168,8 +1277,13 @@ document.addEventListener('click', async event => {
 document.addEventListener('keydown', event => {
   const card = event.target.closest('.task-card');
   if (card && !event.target.closest('a[href]') && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
-  const tabButton = event.target.closest('[role="tab"]');
-  if (tabButton && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const tabs=['iteration','previous','capacity','hierarchy','planning']; tab=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length]; render(); $(`[data-tab="${tab}"]`).focus(); }
+  // Arrow keys move between the planning steps; Enter or Space opens one.
+  const step = event.target.closest('.step-tab');
+  if (step && ['ArrowLeft','ArrowRight'].includes(event.key)) {
+    event.preventDefault();
+    const steps = [...document.querySelectorAll('.step-tab:not(:disabled)')], index = steps.indexOf(step);
+    steps[(index + (event.key === 'ArrowRight' ? 1 : steps.length - 1)) % steps.length]?.focus();
+  }
 });
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
@@ -1181,6 +1295,7 @@ document.addEventListener('submit', async event => {
       await maintenanceQuery();
       return;
     }
+    if (event.target.id === 'pr-url-form') { await startReview({ url: new FormData(event.target).get('url') }); return; }
     if (event.target.id === 'completed-state-form') {
       const form=new FormData(event.target), {type,taskId,sourceId}=completedStateChoice;
       const chosen=String(form.get('state') || form.get('other') || '').trim();
@@ -1221,6 +1336,10 @@ document.addEventListener('change',async event=>{
   if (el.dataset.maintenanceFilter) { filterMaintenance(maintenanceSnapshot, el.dataset.maintenanceFilter, el.value); return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
+    if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
+    if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;return;}
+    if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
+    if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
     if(el.dataset.range!==undefined){await saveCapacityRange(el);return;}
     if(el.dataset.participant){const member=el.dataset.participant;await saveParticipation(peopleItem,member,el.checked);[...peoplePopover.querySelectorAll('input[data-participant]')].find(box=>box.dataset.participant===member)?.focus({preventScroll:true});return;}
@@ -1268,7 +1387,7 @@ document.addEventListener('drop',async event => {
   const id=Number(event.dataTransfer.getData('application/x-neo-task')); if (!id) return;
   const target=zone.dataset.drop, iteration=selected();
   if (!iteration) return;
-  try { await stage(id,target === 'backlog' ? {iterationPath:state.workspace.settings.backlogIteration.path} : {assignedTo:target,iterationPath:iteration.path});toast('Planificación guardada en local.'); } catch(error){toast(error.message);}
+  try { await stage(id,target === 'backlog' ? {iterationPath:state.workspace.settings.backlogIteration.path} : {assignedTo:target,iterationPath:iteration.path});toast('Planificación guardada en local.'); } catch(error){toast(error.message,'error');}
 });
 
 // Optional WebMCP access shares the same local staging path as the UI.
@@ -1287,6 +1406,10 @@ async function registerTools() {
   for (const tool of tools) { try { await document.modelContext.registerTool(tool,{signal:lifecycle.signal}); } catch { /* Browsers without stable WebMCP still use the complete UI. */ } }
 }
 window.addEventListener('pagehide',()=>lifecycle.abort(),{once:true});
+// An unexpected failure in the interface is shown instead of silently stopping an action.
+window.addEventListener('unhandledrejection',event=>toast(event.reason?.message || 'Se produjo un error inesperado. Recarga la página si algo no responde.','error'));
+window.addEventListener('error',event=>{ if (event.message) toast(`Error inesperado en la interfaz: ${event.message}. Recarga la página si algo no responde.`,'error'); });
+$('#toast').addEventListener('click',()=>{ $('#toast').hidden=true; });
 loadState().then(() => { registerTools(); if (!state.busy && state.stateReview) showStateReview(state.stateReview); else return resumeOperation(); }).catch(error=>{
   $('#app').innerHTML=`<div class="notice error">${escape(error.message)} Recarga esta página cuando el servidor local esté disponible.</div>`;
 });

@@ -14,7 +14,20 @@ export function previousIteration(iterations, iterationId) {
   return earlier[0] ?? (before && !(start && startOf(before)) ? before : null);
 }
 export const typeRank = item => ({epic:0,feature:1,'user story':2,'product backlog item':2,requirement:2,task:3,tarea:3,bug:3}[item.type.toLowerCase()] ?? 4);
+// The snapshots received by the interface are never edited, so their trees and
+// eligible tasks are computed once per snapshot instead of once per person.
+// Plans edited in place (the server's working copy) are never cached.
+const snapshots = new WeakSet(), trees = new WeakMap(), eligibleCache = new WeakMap();
+export function markSnapshot(workspace) {
+  if (workspace) { snapshots.add(workspace); if (workspace.effectiveItems) snapshots.add(workspace.effectiveItems); }
+  return workspace;
+}
 export function hierarchy(items) {
+  if (!snapshots.has(items)) return buildHierarchy(items);
+  if (!trees.has(items)) trees.set(items, buildHierarchy(items));
+  return trees.get(items);
+}
+function buildHierarchy(items) {
   const nodes = new Map(items.map(item => [item.id, {...item, children:[]} ]));
   const parents = new Map();
   for (const item of nodes.values()) {
@@ -80,6 +93,14 @@ export function orderedPlanningMembers(workspace, iterationId) {
     .sort((a,b)=>Number(a.covered)-Number(b.covered) || a.index-b.index);
 }
 export function eligibleTasks(workspace, member, iterationId) {
+  if (!snapshots.has(workspace)) return findEligibleTasks(workspace, member, iterationId);
+  let cache = eligibleCache.get(workspace);
+  if (!cache) eligibleCache.set(workspace, cache = new Map());
+  const cacheKey = `${member}\n${iterationId ?? ''}`;
+  if (!cache.has(cacheKey)) cache.set(cacheKey, findEligibleTasks(workspace, member, iterationId));
+  return cache.get(cacheKey);
+}
+function findEligibleTasks(workspace, member, iterationId) {
   if(iterationId && !hasPlanningCapacity(workspace,member,iterationId)) return [];
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
   const tree=hierarchy(items);

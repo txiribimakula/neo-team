@@ -224,3 +224,23 @@ test('the person chooses the completed state of each type; tasks already marked 
   assert.throws(()=>completeTask(ws,1032),/«Bug»/);
   assert.throws(()=>completeTask(ws,1001),/tareas y bugs/);
 });
+test('a task that could not be read during the review is written only if Azure still has the imported revision',async t=>{
+  const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});
+  const imported=f.workspace().items.find(i=>i.id===1042).rev;
+  f.azure.getItems=async()=>{throw new Error('HTTP 503');};
+  // Azure rejects the whole update when the revision differs, as the real API does.
+  f.azure.update=async(_c,id,rev,changes)=>{
+    f.calls.push({id,rev,changes});
+    if(rev!==null && f.remote.get(id).rev!==rev) throw new Error('Error updating work item [HTTP 412 Precondition Failed]: TF401289: The current work item revision is different.');
+    const updated={...f.remote.get(id),...changes,rev:f.remote.get(id).rev+1};f.remote.set(id,updated);return structuredClone(updated);
+  };
+  f.remote.set(1045,{...f.remote.get(1045),priority:3,rev:9});
+  const review=await f.planner.prepareReview();
+  assert.ok(review.plans.every(p=>p.unverified));assert.match(review.unreadable[0],/HTTP 503/);
+  const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.successes,[1042],'an unchanged task is still written');
+  assert.deepEqual(f.calls.find(c=>c.id===1042).rev,imported);
+  assert.equal(result.failures[0].id,1045);assert.match(result.failures[0].error,/TF401289/);
+  assert.equal(f.remote.get(1045).priority,3,'the change made in Azure is not overwritten');
+  assert.deepEqual(f.workspace().drafts[1045],{priority:1},'the local change stays pending');
+});

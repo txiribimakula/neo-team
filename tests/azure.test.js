@@ -18,6 +18,25 @@ test('update emits a numeric atomic revision test before the field patches',asyn
   await gateway.update({project:'Project'},42,8,{state:'Closed'});
   assert.deepEqual(call.args.updates,[{op:'test',path:'/rev',value:8},{op:'add',path:'/fields/System.State',value:'Closed'}]);
 });
+test('a guarded update rejected for a different revision explains that nothing was written',async()=>{
+  const gateway=new AzureGateway();
+  gateway.call=async()=>{throw new Error('Error updating work item [HTTP 412 Precondition Failed]: TF401289');};
+  await assert.rejects(()=>gateway.update({project:'Project'},42,7,{priority:1}),/#42 ha cambiado en Azure DevOps .*No se ha modificado/);
+  gateway.call=async()=>{throw new Error('Permission denied');};
+  await assert.rejects(()=>gateway.update({project:'Project'},42,7,{priority:1}),/^Error: Permission denied$/);
+});
+test('a pull request comment is never repeated automatically after an uncertain answer',async()=>{
+  const gateway=new AzureGateway();gateway.lastConfig={organization:'o'};gateway.retryDelay=1;gateway.client={};gateway.open=async()=>{};let attempts=0;
+  gateway.callOnce=async()=>{attempts++;throw Object.assign(new Error('socket hang up'),{code:-32000});};
+  await assert.rejects(()=>gateway.addPullRequestComment({project:'P'},{repositoryId:'r',pullRequestId:1,content:'x'}),/socket hang up/);
+  assert.equal(attempts,1);
+  attempts=0;await assert.rejects(()=>gateway.repositories({project:'P'}));assert.equal(attempts,3,'reads are still retried');
+});
+test('batch reads skip items that Azure omits because they were deleted',async()=>{
+  const gateway=new AzureGateway();
+  gateway.call=async()=>[null,{id:5,rev:2,fields:{'System.Title':'Kept','System.WorkItemType':'Task'}}];
+  assert.deepEqual((await gateway.getItems({project:'Project'},[4,5])).map(i=>i.id),[5]);
+});
 test('maintenance reads the open items of the project in a single MCP call, without team areas',async()=>{
   const gateway=new AzureGateway(),calls=[],progress=[];
   const settings={type:'Functional Issue',states:[{name:'New',category:'proposed'},{name:'Active',category:'inprogress'},{name:'Closed',category:'completed'}],closedStates:['Closed']};

@@ -8,8 +8,10 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, capacityChanges, setCompletedState, completeTask } from './planner.js';
-import { createDemo, demoFunctionalIssues, DEMO_STATES } from './demo.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
+import { configFrom } from './config.js';
+import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
+import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
 
@@ -25,6 +27,21 @@ azure.onActivity = entry => {
   if (!busy || !operation) return;
   operation = { ...operation, pendingCall: entry.pending, activityAt: entry.at, activity: [...(operation.activity ?? []), { at: entry.at, kind: entry.kind, message: entry.message }].slice(-80) };
 };
+// Pull request review: Azure DevOps and GitHub Copilot in the real workspace,
+// simulated in the example.
+const copilot = new CopilotReviewer(), demoReviewer = new DemoReviewer(), demoPullRequests = new DemoPullRequestGateway();
+const reviewTools = () => store.data.mode === 'demo' ? { gateway: demoPullRequests, reviewer: demoReviewer } : { gateway: azure, reviewer: copilot };
+function reviewConfig() {
+  if (store.data.mode === 'demo') return { organization: 'ejemplo', project: 'Neo Platform', team: '', authentication: 'interactive', tenant: '' };
+  if (!store.data.config?.project) throw fail('Conecta Azure DevOps y elige un proyecto para revisar sus pull requests.');
+  return configFrom(store.data.config, false);
+}
+const currentReviews = () => (store.data.prReviews ?? []).filter(review => review.mode === store.data.mode);
+function findReview(data, id) {
+  const review = (data.prReviews ?? []).find(r => r.id === id && r.mode === data.mode);
+  if (!review) throw fail('La revisión ya no está disponible. Actualiza la página.', 404);
+  return review;
+}
 const csrf = randomBytes(32).toString('hex');
 let busy = false;
 let importProgress = null;
@@ -62,36 +79,45 @@ async function saveDiagnostics(kind, error) {
     return await recordFailure(store.directory, { kind, operation: operation && { path: operation.path, title: operation.title, status: operation.status, phase: operation.phase, step: operation.step, message: operation.message, counts: operation.counts, pendingCall: operation.pendingCall, startedAt: new Date(operation.startedAt).toISOString(), activity: operation.activity ?? [] }, error: describeError(error) });
   } catch (failure) { console.error('[neo-team] No se pudo guardar el diagnóstico:', failure); return null; }
 }
-const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
-function configFrom(input, requireTeam = true) {
-  let organization = String(input?.organization || '').trim();
-  if (organization.startsWith('https://dev.azure.com/')) organization = organization.replace(/^https:\/\/dev\.azure\.com\//,'').replace(/\/$/,'');
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization)) throw fail('Indica el nombre de tu organización o su URL https://dev.azure.com/organización.');
-  const project = String(input?.project || '').trim(), team = String(input?.team || '').trim();
-  if (requireTeam && (!project || !team || project.length > 200 || team.length > 200)) throw fail('Indica un proyecto y un equipo válidos.');
-  const authentication = input?.authentication || 'interactive';
-  if (!['interactive', 'azcli'].includes(authentication)) throw fail('Método de autenticación no válido.');
-  const tenant = String(input?.tenant || '').trim();
-  if (tenant && !/^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$/.test(tenant)) throw fail('El tenant debe ser un identificador de Microsoft Entra válido.');
-  return { organization, project, team, authentication, tenant };
+// The session token changes when the server restarts: the interface renews it
+// and repeats the request, which the server rejected without changing anything.
+function requireSession(req) {
+  if (req.headers['x-neo-csrf'] !== csrf) throw Object.assign(fail('La sesión local ha caducado. Recarga la aplicación para renovarla.', 403), { reason: 'session' });
 }
-const pendingChanges = workspace => Object.keys(workspace?.drafts || {}).length + capacityChanges(workspace).length;
-const scope = c => c ? [c.organization,c.project,c.team].map(v=>v.toLowerCase()).join('\n') : '';
+const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 function publicState() {
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), busy, operation: busy ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews() };
 }
+const BODY_LIMIT = 100000;
+// Chunks are joined before decoding, so a character split between two chunks
+// (accents, «», emoji) is never corrupted.
 async function body(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Se requiere JSON.', 415);
-  let text = '';
-  for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 100000) throw fail('Petición demasiado grande.', 413); }
-  try { return JSON.parse(text || '{}'); } catch { throw fail('JSON no válido.'); }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > BODY_LIMIT) throw fail('Petición demasiado grande.', 413);
+    chunks.push(chunk);
+  }
+  let input;
+  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw fail('JSON no válido.'); }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('Se esperaba un objeto JSON.');
+  return input;
 }
+// Requests that only change the local copy. Their errors are validation
+// messages, so they do not leave a diagnostic report.
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/confirm-person', '/api/task-selection', '/api/participation', '/api/plan-tasks', '/api/undo-plan', '/api/participants', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
+const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   try {
     const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
@@ -99,42 +125,45 @@ const server = http.createServer(async (req, res) => {
     if (req.headers.origin && !allowedHosts.map(h=>`http://${h}`).includes(req.headers.origin)) throw fail('Origen no permitido.', 403);
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const path = url.pathname;
+    // Another website can link to or embed the local API, but never use it.
+    if (path.startsWith('/api/') && req.headers['sec-fetch-site'] === 'cross-site') throw fail('Origen no permitido.', 403);
     if (req.method === 'GET' && path === '/api/state') return json(res, publicState());
     if (req.method === 'GET' && path === '/api/operation') {
-      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      requireSession(req);
       return json(res, { operation: operation?.id === url.searchParams.get('id') ? operation : null });
     }
     if (req.method === 'GET' && path === '/api/import-progress') {
-      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      requireSession(req);
       return json(res, { progress: importProgress?.id === url.searchParams.get('id') ? importProgress : null });
     }
     if (req.method === 'GET' && path === '/api/security') {
-      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      requireSession(req);
       return json(res, { security: currentSecurity() });
     }
     if (req.method === 'GET' && path === '/api/maintenance') {
-      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      requireSession(req);
       return json(res, { maintenance: currentMaintenance() });
     }
     if (req.method === 'GET' && path === '/api/export') {
-      res.setHeader('Content-Disposition', 'attachment; filename="neo-team-planificacion.json"');
+      res.setHeader('Content-Disposition', `attachment; filename="neo-team-planificacion-${today()}.json"`);
       return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
     }
     if (req.method === 'POST' && path.startsWith('/api/')) {
-      if (req.headers['x-neo-csrf'] !== csrf) throw fail('Recarga la aplicación para renovar la sesión local.', 403);
+      requireSession(req);
       const input = await body(req);
       if (path === '/api/cancel-operation') {
         if (!busy || !operation || input.id !== operation.id) throw fail('La operación ya terminó o cambió. Actualiza su estado.', 409);
         if (!operation.cancellable) throw fail('Esta operación no se puede cancelar mientras guarda o sincroniza datos.', 409);
         operation = { ...operation, cancelRequested: true, cancellable: false, message: 'Cancelando la consulta…', updatedAt: Date.now() };
+        if (operation.path === '/api/pr-review' || operation.path === '/api/copilot-status') await copilot.abort();
         await azure.close();
         return json(res, { cancelling: true });
       }
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // On demand, cancellable: the person chooses the completed state from this list.
         if (path === '/api/work-item-states') {
@@ -224,7 +253,69 @@ const server = http.createServer(async (req, res) => {
           await azure.open(config);
           return json(res, { teams: await azure.teams(config.project) });
         }
-        if (path === '/api/state-rules') {
+        const progress = update => {
+          if (operation.cancelRequested) throw fail('Consulta cancelada.');
+          operation = { ...operation, ...update, updatedAt: Date.now() };
+        };
+        // Pull request review: lists and the review only read Azure DevOps; the
+        // review itself is saved locally until the person publishes it.
+        if (['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish'].includes(path)) {
+          const config = reviewConfig(), { gateway, reviewer } = reviewTools();
+          if (gateway === azure) { progress({ message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.' }); await azure.open(config); progress({}); }
+          if (path === '/api/pr-repositories') return json(res, { repositories: await gateway.repositories(config) });
+          if (path === '/api/pr-list') {
+            const repository = typeof input.repository === 'string' ? input.repository.trim() : '';
+            if (!repository || repository.length > 200) throw fail('Elige un repositorio.');
+            progress({ message: `Buscando los pull requests activos de «${repository}»…` });
+            return json(res, { pullRequests: await gateway.pullRequests(config, repository) });
+          }
+          if (path === '/api/pr-review') {
+            const fromUrl = input.url ? parsePullRequestUrl(input.url) : null;
+            if (input.url && !fromUrl) throw fail('Pega la URL de un pull request de Azure DevOps (…/_git/repositorio/pullrequest/número).');
+            const target = fromUrl ?? { organization: config.organization, project: config.project, repository: typeof input.repository === 'string' ? input.repository.trim() : '', pullRequestId: input.pullRequestId };
+            if (store.data.mode !== 'demo' && target.organization.toLowerCase() !== config.organization.toLowerCase()) throw fail(`El pull request es de la organización «${target.organization}» y Neo Team está conectado a «${config.organization}». Cambia la organización en la configuración.`);
+            if (!target.repository || target.repository.length > 200 || !Number.isSafeInteger(target.pullRequestId) || target.pullRequestId < 1) throw fail('Elige un repositorio y un pull request.');
+            if (store.data.mode === 'demo') target.project = config.project;
+            const review = await runReview({ azure: gateway, reviewer, config, target, mode: store.data.mode, onProgress: progress });
+            progress({ cancellable: false });
+            const data = structuredClone(store.data);
+            data.prReviews = [review, ...(data.prReviews ?? [])].slice(0, REVIEW_LIMITS.reviews);
+            await store.save(data);
+            return json(res, { reviewId: review.id, state: publicState() });
+          }
+          const review = findReview(store.data, input.id);
+          const result = await publishReview({ azure: gateway, config, review, includeSummary: input.includeSummary === true, onProgress: progress, onPublished: async (itemId, published) => {
+            const data = structuredClone(store.data), saved = findReview(data, review.id);
+            if (itemId === 'summary') saved.summaryPublished = published;
+            else saved.findings.find(f => f.id === itemId).published = published;
+            await store.save(data);
+          } });
+          return json(res, { result, state: publicState() });
+        }
+        if (path === '/api/copilot-status') {
+          const { reviewer } = reviewTools();
+          progress({ message: 'Iniciando GitHub Copilot y comprobando la sesión de GitHub de este equipo…' });
+          return json(res, { copilot: await reviewer.status() });
+        }
+        if (path === '/api/pr-finding') {
+          const data = structuredClone(store.data), finding = findReview(data, input.id).findings.find(f => f.id === input.findingId);
+          if (!finding) throw fail('El comentario ya no está disponible.');
+          if (finding.published) throw fail('Este comentario ya está publicado en Azure DevOps.');
+          if (input.body !== undefined) {
+            if (typeof input.body !== 'string' || !input.body.trim() || input.body.length > REVIEW_LIMITS.body) throw fail(`El comentario no puede estar vacío ni superar ${REVIEW_LIMITS.body} caracteres.`);
+            finding.body = input.body.trim();
+          }
+          if (input.selected !== undefined) {
+            if (typeof input.selected !== 'boolean') throw fail('Selección no válida.');
+            finding.selected = input.selected;
+          }
+          await store.save(data);
+        } else if (path === '/api/pr-review-delete') {
+          const data = structuredClone(store.data);
+          findReview(data, input.id);
+          data.prReviews = data.prReviews.filter(r => r.id !== input.id);
+          await store.save(data);
+        } else if (path === '/api/state-rules') {
           if (!stateReview) throw fail('No hay un estado pendiente de revisar.');
           const choices = input.choices;
           const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -363,6 +454,7 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve-capacity') {
           const data = structuredClone(store.data);
+          if (!data[data.mode]) throw fail('No hay planificación.');
           if (input.sourceId && data[data.mode].sources) {
             const source=data[data.mode].sources.find(s=>s.id===input.sourceId);
             const plan=planner.review?.capacityPlans.find(p=>p.sourceId===input.sourceId && p.iterationId===input.iterationId && p.key===input.key && p.conflict);
@@ -388,6 +480,8 @@ const server = http.createServer(async (req, res) => {
         return json(res, publicState());
       } catch (error) {
         explain(error);
+        // Local edits fail with validation messages; disk and internal errors keep their report.
+        if (LOCAL_PATHS.has(path) && !error.status && !error.code && !isInternalError(error)) error.status = 400;
         // Validation and cancellation are expected; anything else leaves a report.
         if (!operation.cancelRequested && !error.status && !error.stateReview) error.diagnostics = await saveDiagnostics('operation', error);
         operation = { ...operation, status: operation.cancelRequested ? 'cancelled' : 'failed', error: operation.cancelRequested ? 'Consulta cancelada.' : error.message, diagnostics: error.diagnostics ?? null };
@@ -401,13 +495,34 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
-  } catch (error) { json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.stateReview ? { stateReview: error.stateReview } : {}), ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) }, error.status || 400); }
+  } catch (error) {
+    if (res.headersSent) { res.destroy(); return; }
+    // Internal failures are server errors; Azure and validation answers keep 400.
+    const status = error.status || (isInternalError(error) ? 500 : 400);
+    json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.reason ? { reason: error.reason } : {}), ...(error.stateReview ? { stateReview: error.stateReview } : {}), ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) }, status);
+  }
+});
+server.on('error', error => {
+  console.error(error.code === 'EADDRINUSE'
+    ? `[neo-team] El puerto ${port} ya está en uso. Cierra la otra instancia de Neo Team o elige otro con NEO_TEAM_PORT.`
+    : `[neo-team] No se pudo iniciar el servidor local: ${error.message}`);
+  process.exit(1);
 });
 server.listen(port, '127.0.0.1', () => console.log(`Neo Team: http://127.0.0.1:${port}`));
 // A crash would otherwise only leave a lost connection in the interface.
-for (const kind of ['uncaughtException', 'unhandledRejection']) process.on(kind, async error => { await saveDiagnostics(kind, error); process.exit(1); });
-async function shutdown() { server.close(); await azure.close(); process.exit(0); }
+process.on('uncaughtException', async error => { await saveDiagnostics('uncaughtException', error); process.exit(1); });
+// A stray rejection (for example, from the MCP process closing) does not affect
+// the saved copy: it is reported and the server keeps answering.
+process.on('unhandledRejection', error => { void saveDiagnostics('unhandledRejection', error); });
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  server.close();
+  await azure.close();
+  process.exit(0);
+}
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
