@@ -9,6 +9,7 @@ function gateway(ws){
  const azure=new AzureGateway(),calls=[];azure.open=async()=>{};
  azure.call=async(name,args)=>{calls.push([name,args]);
   if(name==='work' && args.action==='list_team_iterations')return ws.iterations.map(i=>({...i,name:i.name+' actualizada'}));
+  if(name==='work' && args.action==='get_team_settings')return ws.settings;
   if(name==='work' && args.action==='get_team_capacity')return {teamMembers:ws.members.map(m=>({teamMember:m,activities:[{name:'Development',capacityPerDay:3}],daysOff:[]}))};
   if(name==='neo_team_days_off')return {daysOff:[]};
   if(name==='neo_work_item_types')return [{name:'Task'}];
@@ -31,12 +32,21 @@ test('capacity refresh reads only capacity and holidays and keeps pending task e
  for(const field of ['items','drafts','iterations','members'])assert.deepEqual(next[field],ws[field]);
  assert.ok(calls.every(([name,args])=>name==='neo_team_days_off' || name==='work' && args.action==='get_team_capacity'));
 });
-test('task refresh does not request iterations, settings, members or capacities; capacity drafts survive',async()=>{
+test('task download asks with the team current sprints and areas but keeps the local calendar, members and capacities',async()=>{
  const ws=fixture();ws.capacityDrafts={[ws.iterations[0].id]:{ana:{activities:[{name:'',capacityPerDay:4}],daysOff:[]}}};
  const {azure,calls}=gateway(ws),next=await refreshSection(ws,'tasks',azure,[]);
  assert.deepEqual(next.items,[]);
  for(const field of ['capacities','capacityDrafts','iterations','members','settings'])assert.deepEqual(next[field],ws[field]);
- assert.ok(calls.every(([name])=>['neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)));
+ assert.ok(calls.every(([name])=>['work','neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)),'no members or capacities are read');
+ assert.ok(!calls.some(([name,args])=>name==='work' && args.action==='get_team_capacity'));
+});
+test('a sprint added to the team after the import is included in the task download, with a notice',async()=>{
+ const ws=fixture(),{azure,calls}=gateway(ws),added={id:'sprint-new',name:'Sprint nuevo',path:'Neo Platform\\Sprint nuevo',attributes:{timeFrame:2}};
+ const base=azure.call;azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [...ws.iterations,added] : base(name,args);
+ const next=await refreshSection(ws,'tasks',azure,[]);
+ assert.ok(calls.filter(([name])=>name==='neo_query_work_items').every(([,args])=>args.wiql.includes("UNDER 'Neo Platform\\Sprint nuevo'")),'its tasks are requested');
+ assert.deepEqual(next.iterations,ws.iterations,'the planning calendar is not changed');
+ assert.ok(next.warnings.some(w=>w.includes('Sprint nuevo')));
 });
 test('downloading tasks keeps local changes on top; capacity drafts still block a capacity refresh',async()=>{
  const ws=fixture(),edited=ws.items.find(i=>!i.localOnly),untouched=ws.items.find(i=>i.id!==edited.id && !i.localOnly);
@@ -47,7 +57,8 @@ test('downloading tasks keeps local changes on top; capacity drafts still block 
  assert.ok(next.items.some(i=>i.id===edited.id),'an edited item Azure no longer lists stays to be reviewed');
  assert.ok(!next.items.some(i=>i.id===untouched.id),'an unedited item follows Azure');
  // A change Azure already has is no longer pending; other fields stay.
- azure.call=async(name,args)=>name==='neo_query_work_items' ? {workItems:[{id:edited.id,rev:5,fields:{'System.Title':'Pending','System.WorkItemType':'Task','System.State':'Active','System.IterationPath':edited.iterationPath}}],limited:false} : name==='neo_work_item_types' ? [{name:'Task'}] : name==='neo_work_item_states' ? [{name:'Active',category:'InProgress'},{name:'Closed',category:'Completed'}] : (()=>{throw new Error('Unexpected '+name);})();
+ const base=azure.call;
+ azure.call=async(name,args)=>name==='neo_query_work_items' ? {workItems:[{id:edited.id,rev:5,fields:{'System.Title':'Pending','System.WorkItemType':'Task','System.State':'Active','System.IterationPath':edited.iterationPath}}],limited:false} : base(name,args);
  ws.drafts={[edited.id]:{title:'Pending',priority:1}};
  const synced=await refreshSection(ws,'tasks',azure,[]);
  assert.deepEqual(synced.drafts,{[edited.id]:{priority:1}});

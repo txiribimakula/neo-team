@@ -216,17 +216,21 @@ export class AzureGateway {
       }
       return {...snapshot,capacities};
     }
-    if(!snapshot) report('settings', 'Leyendo la configuración del equipo…');
-    const rawSettings = snapshot ? snapshot.settings : await this.call('work', { action: 'get_team_settings', ...context });
+    // Downloading tasks asks Azure with the team's current settings and iterations,
+    // so work in a sprint or area added after the import is not left out.
+    const live = !snapshot || section==='tasks';
+    if(live) report('settings', 'Leyendo la configuración del equipo…');
+    const rawSettings = live ? await this.call('work', { action: 'get_team_settings', ...context }) : snapshot.settings;
     const settings = { ...rawSettings, backlogIteration: normalizeIteration(rawSettings?.backlogIteration, config.project, 'el backlog') };
     if (typeof settings.defaultIteration?.path === 'string') settings.defaultIteration = normalizeIteration(settings.defaultIteration, config.project, 'la iteración predeterminada');
     if(section!=='tasks') report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
-    const rawIterations = section==='tasks' ? snapshot.iterations : await this.call('work', { action: 'list_team_iterations', ...context });
+    const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const today = new Date().toISOString().slice(0, 10);
     const pastPaths=rawIterations.filter(i=>isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
     const iterations=rawIterations.filter(i=>!isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración del equipo'));
     if(section==='iterations') return {...snapshot,iterations};
+    const added=section==='tasks' ? iterations.filter(i=>!snapshot.iterations.some(known=>known.id===i.id)) : [];
     const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
     if(!snapshot) report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
     const members = snapshot ? snapshot.members : await this.call('neo_team_members', context);
@@ -293,6 +297,7 @@ export class AzureGateway {
       catch(error) {warnings.push(`No se pudo consultar la capacidad de «${iteration.name}» en ${config.project}: ${String(error?.message ?? error).slice(0,500)}`);}
       report('capacity',`Capacidad consultada: «${iteration.name}».`,{capacities:Object.keys(capacities).length});
     }
+    if(added.length) warnings.push(`${config.project}: el equipo tiene iteraciones nuevas en Azure DevOps (${added.map(i=>i.name).join(', ')}). Sus tareas ya se han descargado; actualiza las iteraciones para planificarlas.`);
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
     return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
