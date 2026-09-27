@@ -101,8 +101,9 @@ async function request(path, input = {}) {
   pending = true;
   let recover = false;
   const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]), input:not(:disabled), select:not(:disabled)')];
-  enabled.forEach(el => el.disabled = true);
-  $('#save-status').textContent = 'Procesando…';
+  // Local saves answer in a few milliseconds: controls are only disabled when a
+  // request takes longer, so quick edits never make the screen flash.
+  const busy = setTimeout(() => { enabled.forEach(el => el.disabled = true); $('#save-status').textContent = 'Procesando…'; }, 250);
   try {
     const version = state.version;
     let { response, data } = await send(path, input);
@@ -126,7 +127,7 @@ async function request(path, input = {}) {
     if (state) render();
     throw error;
   } finally {
-    pending = false; enabled.forEach(el => el.disabled = false);
+    clearTimeout(busy); pending = false; enabled.forEach(el => el.disabled = false);
     $('#save-status').textContent = savedStatus();
     if (recover) setTimeout(() => resumeOperation(), 0);
   }
@@ -824,10 +825,17 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
   const head=`<tr><th class="cg-person" scope="col">Persona</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
   const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todo el equipo</strong><small>${team.off ? plural(team.off,'día libre','días libres') : 'Sin descansos comunes'}</small></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todo el equipo',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
-  // People with no capacity go last and dimmed: they take no part in this iteration.
-  const rows=ws.members.map((member,index)=>({member,index})).sort((a,b)=>Number(hours[a.member.id]===0)-Number(hours[b.member.id]===0) || a.index-b.index).map(({member,index})=>{
+  // Available people first; then those off every day, those with 0 h and, last,
+  // those without capacity in Azure. Everyone without hours is dimmed.
+  const rank=member=>{
+    const total=hours[member.id], entry=capacityOf(iteration.id,member.id);
+    if (total==null || !entry.activities.length) return 3;
+    if (total>0) return 0;
+    return capacityBreakdown(member.id,entry).daily>0 ? 1 : 2;
+  };
+  const rows=ws.members.map((member,index)=>({member,index,rank:rank(member)})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(({member,index,rank})=>{
     const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
-    return `<tr class="${person===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
+    return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
   return `<div class="capacity-grid-wrap"><table class="capacity-grid"><thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
@@ -846,7 +854,7 @@ async function saveCapacity(owner, change, focus) {
   const active=focus || capacityFocus(document.activeElement);
   await request('/api/capacity',{ iterationId:selectedIteration, key:owner, ...change });
   review=null; render();
-  if (active) $(active)?.focus();
+  if (active) $(active)?.focus({preventScroll:true});
 }
 // Saving re-renders the step, so the control the person moved to is restored.
 function capacityFocus(element) { return element?.dataset?.focus ? `[data-focus="${element.dataset.focus}"]` : ''; }
@@ -956,11 +964,14 @@ function render() {
   if(focusedMember && !ws.members.some(m=>key(m)===focusedMember))focusedMember='';
   const iteration=selected();ensureSelection();
   const changes=pendingCount(ws), drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
+  // Redrawing keeps the horizontal position of the capacity grid.
+  const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0;
   $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
   ${stepTabs(changes)}
   <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   updateBulkCheckbox();
+  if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
 }
 function editTask(id) {
   const ws = state.workspace, item = ws.effectiveItems.find(i=>i.id === id);
