@@ -251,3 +251,44 @@ test('a duplicate is created in Azure with its estimate and tags',async()=>{
   assert.equal(call.args.fields['System.Tags'],'neo-create-k; Frontend');
   assert.equal(call.args.parent,5);
 });
+
+test('comments are kept locally with their mentions and published once when synchronizing',async t=>{
+  const {addComment,discardComment,planningWorkspace}=await import('../server/planner.js');
+  const f=await fixture(t), posted=[];
+  f.azure.addComment=async(config,id,text)=>{posted.push({project:config.project,id,text});};
+  const data=structuredClone(f.store.data), ws=data.azure;
+  assert.throws(()=>addComment(ws,1042,'   '),/comentario/);
+  assert.throws(()=>addComment(ws,9999,'Hola'),/no pertenece/);
+  addComment(ws,1042,'Revisa esto @<ana@example.test>');addComment(ws,1045,'Otro');
+  assert.equal(planningWorkspace(ws).pendingChanges,2,'comments count as pending changes');
+  discardComment(ws,ws.pendingComments[1].key);assert.throws(()=>discardComment(ws,'missing'),/ya no está pendiente/);
+  await f.store.save(data);
+  const review=await f.planner.prepareReview();
+  assert.deepEqual(review.comments.map(c=>[c.id,c.text]),[[1042,'Revisa esto @<ana@example.test>']]);
+  const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.comments,{successes:[1042],failures:[]});
+  assert.deepEqual(posted,[{project:f.workspace().config.project,id:1042,text:'Revisa esto @<ana@example.test>'}]);
+  assert.deepEqual(f.workspace().pendingComments,[]);
+});
+test('a comment that fails stays pending and is not repeated automatically',async t=>{
+  const {addComment}=await import('../server/planner.js');
+  const f=await fixture(t);let attempts=0;
+  f.azure.addComment=async()=>{attempts++;throw new Error('timeout');};
+  const data=structuredClone(f.store.data);addComment(data.azure,1042,'Hola');await f.store.save(data);
+  const result=await f.planner.sync((await f.planner.prepareReview()).token);
+  assert.equal(attempts,1);assert.equal(result.comments.failures[0].error,'timeout');
+  assert.equal(f.workspace().pendingComments.length,1);
+  const {AzureGateway}=await import('../server/azure.js');const gateway=new AzureGateway();let call;
+  gateway.call=async(name,args)=>{call={name,args};return {};};
+  await gateway.addComment({project:'P'},7,'Hola @<ana@example.test>');
+  assert.deepEqual(call,{name:'wit_work_item_comment_write',args:{action:'add',project:'P',workItemId:7,text:'Hola @<ana@example.test>',format:'Markdown'}});
+});
+test('a comment on a task created in the same synchronization is published on the new item',async t=>{
+  const {addComment,createLocalItem}=await import('../server/planner.js');
+  const f=await fixture(t), posted=[];
+  f.azure.findCreation=async()=>null;f.azure.create=async(config,item,validate)=>validate ? {} : {...item,id:5000,rev:1,localOnly:undefined};
+  f.azure.addComment=async(config,id,text)=>{posted.push(id);};
+  const data=structuredClone(f.store.data);const id=createLocalItem(data.azure,{type:'Task',title:'Nueva',parent:1001});addComment(data.azure,id,'Hola');await f.store.save(data);
+  const result=await f.planner.sync((await f.planner.prepareReview()).token);
+  assert.deepEqual(result.comments.failures,[]);assert.deepEqual(posted,[5000]);
+});

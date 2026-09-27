@@ -58,11 +58,27 @@ export function duplicateItem(workspace, id) {
   if (Object.keys(extra).length) stageChanges(workspace, copy, extra);
   return copy;
 }
+// Comments are written locally and published in Azure DevOps when synchronizing.
+// Mentions are kept as @<email>, which Azure turns into a real mention.
+export function addComment(workspace, id, text) {
+  const item = workspace && effectiveItems(workspace).find(i => i.id === id);
+  if (!item || item.contextOnly) throw new Error('La tarea no pertenece a esta planificación.');
+  const body = typeof text === 'string' ? text.trim() : '';
+  if (!body || body.length > 4000) throw new Error('Escribe un comentario de hasta 4000 caracteres.');
+  workspace.pendingComments = [...(workspace.pendingComments ?? []), { key: randomUUID(), id, text: body, createdAt: new Date().toISOString() }];
+}
+export function discardComment(workspace, key) {
+  const before = workspace?.pendingComments?.length ?? 0;
+  workspace.pendingComments = (workspace?.pendingComments ?? []).filter(c => c.key !== key);
+  if (workspace.pendingComments.length === before) throw new Error('El comentario ya no está pendiente.');
+}
 export function discardLocal(workspace,id) {
   const ids=id===undefined ? workspace.items.filter(i=>i.localOnly).map(i=>i.id) : [id];
   if (ids.some(id=>workspace.creationAttempts?.[id])) throw new Error('Hay una creación enviada sin confirmar. Revisa y recupera su resultado antes de descartarla.');
   if (id<0 && workspace.items.some(i=>i.parent===id)) throw new Error('Descarta primero los elementos hijos nuevos.');
   workspace.items=workspace.items.filter(i=>!(i.localOnly && ids.includes(i.id)));
+  // Comments on an item that will not be created go with it; discarding everything clears them.
+  workspace.pendingComments=(workspace.pendingComments ?? []).filter(c=>id!==undefined && !(c.id<0 && ids.includes(c.id)));
   if(id===undefined){
     workspace.drafts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};
     // What remains is the project split recalculated from the imported data: keep Azure's.
@@ -347,7 +363,7 @@ export function planningWorkspace(workspace) {
   const capacityPendingByIteration = {};
   if (workspace.sources) for (const plan of projectAllocations.filter(allocationPending)) capacityPendingByIteration[plan.iterationId] = (capacityPendingByIteration[plan.iterationId] ?? 0) + 1;
   else for (const [iterationId, drafts] of Object.entries(workspace.capacityDrafts ?? {})) capacityPendingByIteration[iterationId] = Object.keys(drafts).length;
-  return {...workspace,projectAllocations,capacityPendingByIteration,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
+  return {...workspace,projectAllocations,capacityPendingByIteration,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending+(workspace.pendingComments?.length ?? 0),capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 
 // The person planning decides which state closes each type of task. Tasks
@@ -395,7 +411,8 @@ export class Planner {
     const ids = Object.keys(workspace.drafts).map(Number);
     const creations=effectiveItems(workspace).filter(i=>i.localOnly).sort((a,b)=>b.id-a.id);
     const capacityIterations = [...new Set([...capacityChanges(workspace).map(change => change.iterationId),...Object.keys(workspace.capacityDrafts ?? {})])];
-    if (!ids.length && !capacityIterations.length) throw new Error('No hay cambios pendientes.');
+    const comments = (workspace.pendingComments ?? []).map(c => ({ ...c, title: effectiveItems(workspace).find(i => i.id === c.id)?.title ?? `#${c.id}` }));
+    if (!ids.length && !capacityIterations.length && !comments.length) throw new Error('No hay cambios pendientes.');
     if (workspace.mode === 'azure') await this.azure.open(workspace.config);
     // Local is the source of truth: only edited tasks are read, to show what changes.
     // If Azure cannot be read, the local copy stands in, but those writes are
@@ -411,7 +428,7 @@ export class Planner {
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, comments, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
     // Conflicts are informative: synchronizing keeps the local version.
     return { ...this.review };
   }
@@ -522,7 +539,26 @@ export class Planner {
       successes.push(plan.id);
     }
     const capacity = await this.syncCapacity(review, workspace);
-    return { successes, failures, capacity, demo: workspace.mode === 'demo' };
+    const comments = await this.syncComments(review, workspace, remapped);
+    return { successes, failures, capacity, comments, demo: workspace.mode === 'demo' };
+  }
+  // Each reviewed comment is published once, after the task it belongs to exists.
+  // A failed one stays pending; it is never repeated automatically.
+  async syncComments(review, workspace, remapped) {
+    const successes = [], failures = [];
+    for (const comment of review.comments ?? []) {
+      const id = remapped.get(comment.id) ?? comment.id;
+      try {
+        if (id < 1) throw new Error('La tarea todavía no existe en Azure DevOps.');
+        const item = this.workspace().items.find(i => i.id === id);
+        if (workspace.mode !== 'demo') await this.azure.addComment(sourceFor(this.workspace(), item).config, id, comment.text);
+        const data = structuredClone(this.store.data), next = data[data.mode];
+        next.pendingComments = (next.pendingComments ?? []).filter(c => c.key !== comment.key);
+        await this.store.save(data);
+        successes.push(id);
+      } catch (error) { failures.push({ id, error: error.message }); }
+    }
+    return { successes, failures };
   }
   // Local capacity is the source of truth: each reviewed value is written as it
   // is. A value whose Azure version could not be read during the review is read

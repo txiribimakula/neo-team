@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -109,7 +109,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -420,6 +420,10 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/create') {
           const data=structuredClone(store.data);createLocalItem(data[data.mode],input);await store.save(data);planner.review=null;
+        } else if (path === '/api/comment' || path === '/api/comment-discard') {
+          const data=structuredClone(store.data);
+          if(path==='/api/comment') addComment(data[data.mode],input.id,input.text); else discardComment(data[data.mode],input.key);
+          await store.save(data);planner.review=null;
         } else if (path === '/api/duplicate') {
           const data=structuredClone(store.data);duplicateItem(data[data.mode],input.id);await store.save(data);planner.review=null;
         } else if (path === '/api/complete-task' || path === '/api/completed-state') {

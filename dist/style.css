@@ -346,3 +346,13 @@ section.board-column:not(.backlog){padding-right:4px}
 @media(max-width:740px){.board-column{position:static;max-height:none;overflow:visible}}
 .icon-button{flex-shrink:0;width:26px;height:26px;border:1px solid #d5dfce;border-radius:6px;background:white;color:#5d7056;font-size:14px;line-height:1;cursor:pointer;display:inline-grid;place-items:center;padding:0}.icon-button:hover{background:#eef3ed;color:var(--ink)}.task-meta .icon-button{margin-left:auto}
 .hierarchy-leaf.planned-local{background:#f3f8ee;box-shadow:inset 3px 0 0 #8daf53}.hierarchy-leaf.planned-local .leaf-status{color:#47772f;font-weight:600}
+/* Comments written on a task card, with @ mentions of the sprint's people. */
+.task-meta .card-actions{margin-left:auto;display:flex;gap:4px}.task-meta .card-actions .icon-button{margin-left:0}
+.icon-button small{font-size:10px;margin-left:1px;font-weight:700;color:var(--green)}.icon-button{width:auto;min-width:26px;padding:0 4px}
+.task-comments{margin-top:10px;padding-top:10px;border-top:1px solid #edf0ec;display:flex;flex-direction:column;gap:8px;cursor:default}
+.pending-comment{display:flex;gap:8px;align-items:flex-start;background:#f3f8ee;border-radius:7px;padding:7px 9px;font-size:13px}.pending-comment p{margin:0;flex:1;white-space:pre-wrap;overflow-wrap:anywhere}
+.comment-box{position:relative}.comment-box textarea{width:100%;resize:vertical;min-height:52px;border:1px solid #d5dfd7;border-radius:7px;padding:8px 10px;font:inherit;font-size:13px}
+.mention-list{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:white;border:1px solid #d5dfce;border-radius:8px;box-shadow:0 12px 30px #17251c26;z-index:20;padding:4px;max-height:220px;overflow:auto}
+.mention-option{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:6px 8px;border-radius:6px;text-align:left;font-size:13px;cursor:pointer}.mention-option .avatar{width:24px;height:24px;font-size:10px}
+.mention-option[aria-selected="true"],.mention-option:hover{background:#eef5e3}
+.comment-actions{display:flex;justify-content:flex-end}.mention{color:#2d5a96;font-weight:650}.comment-text{white-space:pre-wrap;font-size:14px;margin:6px 0 0}

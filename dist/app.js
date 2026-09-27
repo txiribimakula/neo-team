@@ -939,6 +939,23 @@ function updatePlanningView() {
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
+// Comments are written on the card; @ offers the people of the sprint. Mentions are
+// sent as @<email>, which Azure DevOps turns into a real mention.
+const commentsOpen = new Set(), commentDrafts = {}, commentMentions = {};
+let mentionUi = null;
+const pendingCommentsOf = id => (state.workspace.pendingComments ?? []).filter(c => c.id === id);
+function renderMentions(text) {
+  return escape(text).replace(/@&lt;([^&\s]+@[^&\s]+)&gt;/g,(_,email)=>`<strong class="mention">@${escape(state.workspace.members.find(m=>(m.uniqueName || '').toLowerCase()===email.toLowerCase())?.displayName ?? email)}</strong>`);
+}
+function commentButton(item) {
+  const count=pendingCommentsOf(item.id).length;
+  return `<button type="button" class="icon-button" data-action="toggle-comments" data-task="${item.id}" aria-expanded="${commentsOpen.has(item.id)}" title="Comentar" aria-label="Comentar #${item.id}">💬${count ? `<small>${count}</small>` : ''}</button>`;
+}
+function taskComments(item) {
+  if (!commentsOpen.has(item.id)) return '';
+  const pendingList=pendingCommentsOf(item.id).map(c=>`<div class="pending-comment"><p>${renderMentions(c.text)}</p><button type="button" class="link-button" data-action="discard-comment" data-key="${escape(c.key)}">Quitar</button></div>`).join('');
+  return `<div class="task-comments">${pendingList}<div class="comment-box"><textarea rows="2" maxlength="4000" data-comment-for="${item.id}" data-focus="comment:${item.id}" placeholder="Comentario… @ para mencionar" aria-label="Comentario para #${item.id}">${escape(commentDrafts[item.id] ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><div class="comment-actions"><button type="button" class="button small primary" data-action="add-comment" data-task="${item.id}">Comentar</button></div></div>`;
+}
 const duplicateButton = item => `<button type="button" class="icon-button" data-action="duplicate" data-task="${item.id}" title="Duplicar con su mismo padre" aria-label="Duplicar #${item.id}">⧉</button>`;
 // Hour fields are edited on the card itself, with the names they have in Azure DevOps.
 function taskEstimates(item) {
@@ -950,11 +967,12 @@ function taskEstimates(item) {
 function taskCard(item, inBacklog = false) {
   const estimates = taskEstimates(item);
   const effort = estimates ? '' : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
-  return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="true" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
-    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}${duplicateButton(item)}</div>
+  return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="${commentsOpen.has(item.id) ? 'false' : 'true'}" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
+    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}<span class="card-actions">${commentButton(item)}${duplicateButton(item)}</span></div>
     <p class="task-title">${item.project ? `<small class="pill">${escape(item.project)}</small> ` : ''}${escape(item.title)}</p>
     <div class="task-footer"><div class="task-tags">${item.tags.slice(0,2).map(t=>`<span class="tag">${escape(t)}</span>`).join('')}${item.priority === 1 ? '<span class="tag" style="background:#fceee3;color:#a6743e">P1</span>' : ''}</div>${effort ? `<span class="effort">${effort}</span>` : ''}</div>
     ${estimates}
+    ${taskComments(item)}
     ${inBacklog && item.iterationPath !== state.workspace.settings.backlogIteration.path ? `<div class="local-note">${escape(iterationName(item.iterationPath))}</div>` : ''}
   </article>`;
 }
@@ -1077,6 +1095,11 @@ function incompleteAllocationsNotice() {
   if (!incomplete.length) return '';
   return `<div class="notice warning">El reparto de capacidad se sincroniza con los datos actuales y se ajustará cuando lo completes: ${incomplete.map(p=>`${escape(p.label)} en ${escape(p.iteration)} (${p.missingEstimate ? 'tareas sin estimar, cuentan como 0 h' : 'sin días disponibles'})`).join('; ')}.</div>`;
 }
+function commentsReview() {
+  const comments=review.comments ?? [];
+  if (!comments.length) return '';
+  return `<h3 class="review-section">Comentarios</h3>${comments.map(c=>`<section class="review-item"><div class="review-item-head"><h3>${taskId(state.workspace.items.find(i=>i.id===c.id) ?? c)} · ${escape(c.title)}</h3><button class="button small danger" data-action="discard-comment" data-key="${escape(c.key)}">Descartar</button></div><p class="comment-text">${renderMentions(c.text)}</p></section>`).join('')}`;
+}
 function capacityReview() {
   const plans=review.capacityPlans ?? [];
   if (!plans.length) return '';
@@ -1104,7 +1127,7 @@ function changesView() {
   if (!reviewFresh()) { setTimeout(loadReview,0); return `${notice}<div id="changes-progress"></div>`; }
   const demo=state.mode==='demo', plans=review.plans, capacity=review.capacityPlans ?? [];
   const conflicts=plans.reduce((sum,p)=>sum+p.conflicts.length,0)+capacity.filter(p=>p.conflict).length;
-  const summary=[plural(plans.length,'tarea'),...(capacity.length ? [plural(capacity.length,'ajuste de capacidad','ajustes de capacidad')] : []),demo ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'].join(' · ');
+  const summary=[plural(plans.length,'tarea'),...(capacity.length ? [plural(capacity.length,'ajuste de capacidad','ajustes de capacidad')] : []),...(review.comments?.length ? [plural(review.comments.length,'comentario')] : []),demo ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'].join(' · ');
   const unreadable=review.unreadable?.length ? `<div class="notice warning">No se pudo leer parte de Azure DevOps para compararla: ${review.unreadable.map(escape).join('; ')}. Antes de escribirlo se vuelve a comprobar, para no sobrescribir lo que otra persona haya cambiado desde la importación.</div>` : '';
   const conflictNotice=conflicts ? `<div class="notice warning"><strong>${plural(conflicts,'conflicto')}.</strong> Algo ha cambiado en Azure DevOps desde tu importación. Elige qué versión conservar en cada caso; si sincronizas sin elegir, se enviará tu versión local.</div>` : '';
   const syncLabel=demo ? 'Confirmar simulación' : conflicts ? `Sincronizar y sobrescribir ${plural(conflicts,'conflicto')}` : 'Sincronizar con Azure DevOps';
@@ -1112,7 +1135,7 @@ function changesView() {
     ? `<span class="changes-confirm">¿Descartar ${plural(pendingCount(),'cambio')}? Se recuperan los valores importados.</span><button class="button" data-action="cancel-discard-all">Cancelar</button><button class="button danger" data-action="confirm-discard">Sí, descartar todo</button>`
     : '<button class="button danger" data-action="discard-all">Descartar todo</button>';
   const actions=`<div class="changes-actions">${discardAll}${review.token && !changesUi.confirmAll ? `<button class="button primary ${conflicts && !demo ? 'danger' : ''}" data-action="sync">${escape(syncLabel)} ↗</button>` : ''}</div>`;
-  return `${notice}<section class="changes-page"><header class="changes-heading"><div><h2>${demo ? 'Cambios del ejemplo' : 'Cambios pendientes'}</h2><p>${escape(summary)}</p></div>${actions}</header><p class="local-note">Se envían las asignaciones, iteraciones, prioridades, horas y estados que has cambiado. El reparto de ramas y las confirmaciones son organización local y no se envían. Descartar un cambio lo deshace solo en local.</p>${unreadable}${conflictNotice}<div class="changes-list">${plans.map(reviewPlan).join('')}${incompleteAllocationsNotice()}${capacityReview()}</div></section>`;
+  return `${notice}<section class="changes-page"><header class="changes-heading"><div><h2>${demo ? 'Cambios del ejemplo' : 'Cambios pendientes'}</h2><p>${escape(summary)}</p></div>${actions}</header><p class="local-note">Se envían las asignaciones, iteraciones, prioridades, horas y estados que has cambiado. Los comentarios se publican en cada tarea. Descartar un cambio lo deshace solo en local.</p>${unreadable}${conflictNotice}<div class="changes-list">${plans.map(reviewPlan).join('')}${incompleteAllocationsNotice()}${capacityReview()}${commentsReview()}</div></section>`;
 }
 async function synchronize() {
   const token=review.token, title=state.mode==='demo' ? 'Simulando sincronización' : 'Sincronizando cambios';
@@ -1122,12 +1145,12 @@ async function synchronize() {
   catch (error) { changesUi.notice=`<div class="notice error">${escape(error.message)}</div>`; }
   finally { changesUi.syncing=false; review=null; }
   if (data) {
-    const result=data.result, capacity=result.capacity ?? { successes:[], failures:[] };
-    const failed=result.failures.length+capacity.failures.length, succeeded=result.successes.length+capacity.successes.length;
-    const confirmed=[plural(result.successes.length,'tarea'), ...(capacity.successes.length ? [plural(capacity.successes.length,'ajuste de capacidad','ajustes de capacidad')] : [])];
-    const done=succeeded ? `Se han confirmado ${confirmed.join(' y ')}${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.` : 'No se ha confirmado ningún cambio.';
+    const result=data.result, capacity=result.capacity ?? { successes:[], failures:[] }, comments=result.comments ?? { successes:[], failures:[] };
+    const failed=result.failures.length+capacity.failures.length+comments.failures.length, succeeded=result.successes.length+capacity.successes.length+comments.successes.length;
+    const confirmed=[plural(result.successes.length,'tarea'), ...(capacity.successes.length ? [plural(capacity.successes.length,'ajuste de capacidad','ajustes de capacidad')] : []), ...(comments.successes.length ? [plural(comments.successes.length,'comentario')] : [])];
+    const done=succeeded ? `Se han confirmado ${confirmed.length>1 ? `${confirmed.slice(0,-1).join(', ')} y ${confirmed.at(-1)}` : confirmed[0]}${result.demo ? ' en el ejemplo local' : ' en Azure DevOps'}.` : 'No se ha confirmado ningún cambio.';
     changesUi.notice=failed
-      ? `<div class="notice warning changes-result"><strong>${succeeded ? 'Sincronización parcial.' : 'No se pudo sincronizar.'}</strong> ${escape(done)} Lo que falló sigue abajo como pendiente.${result.failures.map(f=>`<p class="inline-error">${taskId(state.workspace?.items.find(i=>i.id===f.id) ?? f)}: ${escape(f.error)}</p>`).join('')}${capacity.failures.map(f=>`<p class="inline-error">${escape(f.label)}: ${escape(f.error)}</p>`).join('')}</div>`
+      ? `<div class="notice warning changes-result"><strong>${succeeded ? 'Sincronización parcial.' : 'No se pudo sincronizar.'}</strong> ${escape(done)} Lo que falló sigue abajo como pendiente.${result.failures.map(f=>`<p class="inline-error">${taskId(state.workspace?.items.find(i=>i.id===f.id) ?? f)}: ${escape(f.error)}</p>`).join('')}${capacity.failures.map(f=>`<p class="inline-error">${escape(f.label)}: ${escape(f.error)}</p>`).join('')}${comments.failures.map(f=>`<p class="inline-error">Comentario en #${escape(String(f.id))}: ${escape(f.error)}. Si llegó a publicarse, descártalo antes de volver a sincronizar.</p>`).join('')}</div>`
       : `<div class="notice changes-result"><strong>${result.demo ? 'Simulación completada.' : 'Cambios sincronizados.'}</strong> ${escape(done)}</div>`;
   }
   render();
@@ -1161,6 +1184,38 @@ async function downloadCapacity() {
   review=null;render();
   const differences=Object.keys(state.workspace.capacityDownloads?.[iteration.id]?.local ?? {}).length;
   toast(differences ? `Capacidad descargada. ${plural(differences,'diferencia','diferencias')} con tu copia local por validar.` : 'Capacidad descargada. Coincide con tu copia local.');
+}
+async function submitComment(id) {
+  let text=(commentDrafts[id] ?? '').trim();
+  if (!text) { $(`[data-comment-for="${id}"]`)?.focus(); return; }
+  for (const [name,email] of Object.entries(commentMentions[id] ?? {}).sort((a,b)=>b[0].length-a[0].length)) text=text.split(`@${name}`).join(`@<${email}>`);
+  await request('/api/comment',{id,text});
+  delete commentDrafts[id];delete commentMentions[id];mentionUi=null;review=null;render();
+  $(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});
+  toast('Comentario guardado. Se publicará al sincronizar.');
+}
+// @ offers the people in the sprint, filtered as the name is typed.
+function updateMentions(textarea) {
+  const id=Number(textarea.dataset.commentFor), before=textarea.value.slice(0,textarea.selectionStart), match=before.match(/(?:^|\s)@([^\s@<>]*)$/);
+  const list=textarea.parentElement.querySelector('.mention-list');
+  if (!match) { mentionUi=null; list.hidden=true; return; }
+  const wanted=plain(match[1]), people=planningMembers().filter(m=>plain(`${m.displayName} ${m.uniqueName ?? ''}`).includes(wanted)).slice(0,8);
+  if (!people.length) { mentionUi=null; list.hidden=true; return; }
+  const index=mentionUi?.id===id ? Math.min(mentionUi.index,people.length-1) : 0;
+  mentionUi={id,start:before.length-match[1].length-1,end:textarea.selectionStart,people,index};
+  list.innerHTML=people.map((m,i)=>`<button type="button" role="option" class="mention-option" data-action="pick-mention" data-index="${i}" aria-selected="${i===index}"><span class="avatar c${state.workspace.members.indexOf(m)%4}">${escape(initials(m.displayName))}</span>${escape(m.displayName)}</button>`).join('');
+  list.hidden=false;
+}
+function pickMention(index) {
+  const ui=mentionUi, textarea=ui && $(`[data-comment-for="${ui.id}"]`), person=ui?.people[index];
+  if (!textarea || !person) return;
+  const inserted=`@${person.displayName} `;
+  textarea.value=textarea.value.slice(0,ui.start)+inserted+textarea.value.slice(ui.end);
+  commentDrafts[ui.id]=textarea.value;
+  commentMentions[ui.id]={...commentMentions[ui.id],[person.displayName]:person.uniqueName || person.id};
+  const caret=ui.start+inserted.length;
+  mentionUi=null;textarea.parentElement.querySelector('.mention-list').hidden=true;
+  textarea.focus();textarea.setSelectionRange(caret,caret);
 }
 // Tasks and hierarchy come from Azure while local changes stay on top of them.
 async function downloadHierarchy() {
@@ -1310,6 +1365,10 @@ const actions = {
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
   'download-hierarchy':downloadHierarchy,
+  'toggle-comments':el=>{const id=Number(el.dataset.task);if(commentsOpen.has(id))commentsOpen.delete(id);else commentsOpen.add(id);updatePlanningView();if(commentsOpen.has(id))$(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});},
+  'add-comment':el=>submitComment(Number(el.dataset.task)),
+  'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
+  'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
   'upload-capacity':uploadCapacity,
@@ -1377,9 +1436,9 @@ modal.addEventListener('cancel', event => { if (pending) event.preventDefault();
 document.addEventListener('click', async event => {
   // A link to Azure DevOps opens there without triggering the card or branch action.
   if (event.target.closest('a[href]')) return;
-  // Fields inside a card are edited in place; they do not open the card.
-  if (event.target.closest('.task-estimates')) return;
   const target = event.target.closest('[data-action]');
+  // Fields and comments inside a card are edited in place; they do not open it.
+  if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments')) return;
   if (!target || pending || target.disabled) return;
   if (target.closest('summary')) event.preventDefault();
   const action = actions[target.dataset.action];
@@ -1387,6 +1446,16 @@ document.addEventListener('click', async event => {
   try { await action(target); } catch (error) { errorInModal(error); }
 });
 document.addEventListener('keydown', event => {
+  const commentBox=event.target.dataset?.commentFor ? event.target : null;
+  if (commentBox && mentionUi && ['ArrowDown','ArrowUp','Enter','Tab','Escape'].includes(event.key)) {
+    event.preventDefault();
+    if (event.key==='Escape') { mentionUi=null; commentBox.parentElement.querySelector('.mention-list').hidden=true; return; }
+    if (event.key==='Enter' || event.key==='Tab') { pickMention(mentionUi.index); return; }
+    mentionUi.index=(mentionUi.index+(event.key==='ArrowDown' ? 1 : mentionUi.people.length-1))%mentionUi.people.length;
+    commentBox.parentElement.querySelectorAll('.mention-option').forEach((option,i)=>option.setAttribute('aria-selected',String(i===mentionUi.index)));
+    return;
+  }
+  if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
   const card = event.target.closest('.task-card');
   if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
   // Arrow keys move between the planning steps; Enter or Space opens one.
@@ -1465,6 +1534,7 @@ document.addEventListener('input',event=>{
   if (event.target.name === 'other' && event.target.closest('#completed-state-form')) $('[data-other-state]').checked = true;
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
+  if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
 });
 document.addEventListener('toggle',event=>{
   const element=event.target;
@@ -1472,6 +1542,7 @@ document.addEventListener('toggle',event=>{
   const id=element.dataset.project ? `project:${element.dataset.project}` : Number(element.dataset.node);
   if(element.open)collapsed.delete(id);else collapsed.add(id);
 },true);
+document.addEventListener('mousedown', event => { if (event.target.closest('.mention-option')) event.preventDefault(); });
 document.addEventListener('dragstart', event => {
   const card=event.target.closest('.task-card, [data-drag-task]'); if (!card || pending) return event.preventDefault();
   event.dataTransfer.setData('application/x-neo-task',card.dataset.task || card.dataset.dragTask); event.dataTransfer.effectAllowed='move';

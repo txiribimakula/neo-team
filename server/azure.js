@@ -50,7 +50,7 @@ function workflowStates(states) {
 const REVISION_CHANGED = /TF401289|\b(409|412)\b|Precondition Failed|test operation|\/rev\b/i;
 // Writes that would be duplicated if repeated after an uncertain answer. They are
 // never retried here: their callers look for the result before sending again.
-const NOT_REPEATABLE = new Set(['neo_create_item', 'neo_pull_request_comment_write']);
+const NOT_REPEATABLE = new Set(['neo_create_item', 'neo_pull_request_comment_write', 'wit_work_item_comment_write']);
 const isTransient = error => [-32001, -32000].includes(error?.code) || /Connection closed|Conecta Azure DevOps|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed out|\b(408|429|500|502|503|504)\b/i.test(String(error?.message ?? ''));
 
 export class AzureGateway {
@@ -342,6 +342,9 @@ export class AzureGateway {
     if(item.originalEstimate!=null) fields['Microsoft.VSTS.Scheduling.OriginalEstimate']=item.originalEstimate;
     const raw=await this.call('neo_create_item',{project:config.project,type:item.type,fields,parent:item.parent,validateOnly});
     return validateOnly ? raw : normalizeItem(raw);
+  }
+  async addComment(config, id, text) {
+    return this.call('wit_work_item_comment_write', { action: 'add', project: config.project, workItemId: id, text, format: 'Markdown' });
   }
   async update(config, id, revision, fields) {
     const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', originalEstimate: 'Microsoft.VSTS.Scheduling.OriginalEstimate', state: 'System.State' };
