@@ -820,6 +820,7 @@ function toggleDay(ranges, day) {
   for(const r of sorted){const last=merged.at(-1);if(last && r.start<=nextDay(last.end))last.end=last.end>r.end ? last.end : r.end;else merged.push({...r});}
   return merged;
 }
+let capacityOrder=null;
 function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
   const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3, teamOff=capacityOf(iteration.id,'team').daysOff;
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
@@ -833,11 +834,15 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
     if (total>0) return 0;
     return capacityBreakdown(member.id,entry).daily>0 ? 1 : 2;
   };
-  const rows=ws.members.map((member,index)=>({member,index,rank:rank(member)})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(({member,index,rank})=>{
+  // The order is fixed on entering the step: editing never moves a row.
+  const orderKey=`${state.mode}|${iteration.id}|${ws.members.map(m=>m.id).join(',')}`;
+  if (capacityOrder?.key!==orderKey) capacityOrder={key:orderKey,ids:ws.members.map((member,index)=>({id:member.id,index,rank:rank(member)})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(p=>p.id)};
+  const rows=capacityOrder.ids.map(id=>ws.members.findIndex(m=>m.id===id)).filter(index=>index>=0).map(index=>({member:ws.members[index],index,rank:rank(ws.members[index])})).map(({member,index,rank})=>{
     const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
     return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
-  return `<div class="capacity-grid-wrap"><table class="capacity-grid"><thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
+  const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total"></colgroup>`;
+  return `<div class="capacity-grid-wrap"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
 function capacityView() {
   const ws=state.workspace, iteration=selected();
@@ -1076,9 +1081,9 @@ function capacityControls() {
   const ws=state.workspace, iteration=selected(), azure=ws?.mode==='azure';
   if(!ws || !iteration) return '';
   const pending=ws.capacityPendingByIteration?.[iteration.id] ?? 0;
-  const upload=`<button class="button small ${pending ? 'primary' : ''}" data-action="upload-capacity" ${pending ? '' : 'disabled'} title="${pending ? `Envía a Azure DevOps los ${pending} ajustes de capacidad de ${escape(iteration.name)}` : 'No hay cambios de capacidad pendientes en esta iteración'}">${azure ? 'Subir capacidad' : 'Simular subida'}${pending ? ` (${pending})` : ''}</button>`;
+  const upload=`<button class="button small ${pending ? 'primary' : ''}" data-action="upload-capacity" ${pending ? '' : 'disabled'} title="${pending ? `Envía a Azure DevOps los ${pending} ajustes de capacidad de ${escape(iteration.name)}` : 'No hay cambios de capacidad pendientes en esta iteración'}">${azure ? 'Subir capacidad' : 'Simular subida'}<span class="upload-count" aria-hidden="${!pending}">${pending || ''}</span></button>`;
   const download=azure ? `<button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button>` : '';
-  const undo=ws.capacityDrafts?.[iteration.id] ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : '';
+  const undo=`<button class="button small" data-action="discard-capacity" ${ws.capacityDrafts?.[iteration.id] ? '' : 'disabled'}>Deshacer ajustes</button>`;
   return `<div class="workspace-controls">${download}${upload}${undo}</div><div id="capacity-download-progress" hidden></div>${capacityNotice}`;
 }
 async function uploadCapacity() {
@@ -1271,7 +1276,7 @@ const actions = {
   'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member))expandedLanes.delete(member);else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
-  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
+  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
   review: reviewChanges, sync:synchronize,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
