@@ -579,7 +579,9 @@ function treeView({ availableOnly = false, search = query } = {}) {
   }
   const include=item=>{
     if (!matches.has(item.id)) return false;
-    if (availableOnly) return isExecutable(item) && (!iteration || item.iterationPath !== iteration.path);
+    // Open branches are shown even without available tasks (a new story, say), so
+    // the whole hierarchy is visible; while filtering, only branches with matches.
+    if (availableOnly) return isExecutable(item) ? !iteration || item.iterationPath !== iteration.path : !search.trim() && !item.contextOnly;
     return true;
   };
   const roots=filterHierarchy(tree.roots,include);
