@@ -569,6 +569,14 @@ function azureLink(item, label='↗', config=null, className='azure-link') {
 function taskId(item, config=null) {
   return azureLink(item, `#${item?.id}`, config, 'task-id-link') || `#${escape(String(item?.id ?? ''))}`;
 }
+// The available backlog: tasks outside the planned iteration, plus those planned
+// from it locally, which stay listed and marked until they are synchronized.
+function inAvailableBacklog(item, iteration=selected()) {
+  if (!isExecutable(item)) return false;
+  if (!iteration || item.iterationPath!==iteration.path) return true;
+  const base=state.workspace.items.find(i=>i.id===item.id);
+  return !!state.workspace.drafts?.[item.id] && !!base && base.iterationPath!==iteration.path;
+}
 function treeView({ availableOnly = false, search = query } = {}) {
   const ws=state.workspace, tree=planningTree(), iteration=selected();
   const matches=new Set();
@@ -581,7 +589,7 @@ function treeView({ availableOnly = false, search = query } = {}) {
     if (!matches.has(item.id)) return false;
     // Open branches are shown even without available tasks (a new story, say), so
     // the whole hierarchy is visible; while filtering, only branches with matches.
-    if (availableOnly) return isExecutable(item) ? !iteration || item.iterationPath !== iteration.path : !search.trim() && !item.contextOnly;
+    if (availableOnly) return isExecutable(item) ? inAvailableBacklog(item,iteration) : !search.trim() && !item.contextOnly;
     return true;
   };
   const roots=filterHierarchy(tree.roots,include);
@@ -591,9 +599,10 @@ function treeView({ availableOnly = false, search = query } = {}) {
       return `<details class="hierarchy-branch" data-node="${node.id}" ${search || !collapsed.has(node.id) ? 'open' : ''}><summary><span class="branch-chevron">›</span>${type}<span class="branch-title">${node.project ? `<small class="pill">${escape(node.project)}</small> ` : ''}${escape(node.title)} <small>${taskId(node)}${node.contextOnly ? ' · contexto' : ''}</small>${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</span><button class="button small" data-action="create" data-parent="${node.id}" aria-label="Crear hijo de ${escape(node.title)}">+</button><button class="button small" data-action="edit" data-task="${node.id}">Editar</button></summary><div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('') || '<p class="branch-empty">Sin tareas o bugs disponibles en esta rama.</p>'}</div></details>`;
     }
     const effort=node.remainingWork !== null ? `${number(node.remainingWork)} h` : node.points !== null ? `${number(node.points)} pts` : 'Sin estimar';
-    const status=iterationName(node.iterationPath);
-    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${duplicateButton(node)}`;
-    const leaf=`<div class="hierarchy-leaf" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
+    const planned=availableOnly && iteration && node.iterationPath===iteration.path;
+    const status=planned ? (node.assignedTo ? `Asignada a ${memberName(node.assignedTo)}` : `En ${iteration.name}, sin responsable`) : iterationName(node.iterationPath);
+    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${!planned && node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${duplicateButton(node)}`;
+    const leaf=`<div class="hierarchy-leaf ${planned ? 'planned-local' : ''}" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
   const empty='<div class="empty-result">No hay tareas para esta selección.</div>';
@@ -958,13 +967,13 @@ function leftPanelContent() {
   return treeView({availableOnly:true,search:backlogQuery});
 }
 function leftPanelCount() {
-  const iteration=selected(), total=leftPanel==='unassigned' ? unassignedTasks(iteration).length : state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath!==iteration?.path).length;
+  const iteration=selected(), total=leftPanel==='unassigned' ? unassignedTasks(iteration).length : state.workspace.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)).length;
   if (!backlogQuery.trim()) return String(total);
   const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
   return `${shown} de ${total}`;
 }
 function board(iteration, planned) {
-  const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath !== iteration.path), unassigned=unassignedTasks(iteration);
+  const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)), unassigned=unassignedTasks(iteration);
   const members=planningMembers(iteration.id), activeKeys=new Set(members.map(key));
   const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
   const excluded=planned.filter(i=>i.assignedTo && ws.members.some(m=>key(m)===i.assignedTo) && !activeKeys.has(i.assignedTo));
