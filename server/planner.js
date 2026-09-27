@@ -100,11 +100,8 @@ export function stageChanges(workspace, id, changes) {
     if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !completedState(item,workspace) || value !== completedState(item,workspace))))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
     if (same(item[field], value)) delete draft[field]; else draft[field] = value;
   }
-  if (['assignedTo','iterationPath'].some(field=>Object.hasOwn(changes,field) && !same(current[field],changes[field]))) {
-    const assignee=draft.assignedTo ?? item.assignedTo;
-    const iteration=workspace.iterations.find(i=>i.path===(draft.iterationPath ?? item.iterationPath));
-    if(assignee && iteration && !memberHasCapacity(workspace,assignee,iteration.id)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
-  }
+  // Moving a task whose owner has no capacity there (or is outside the team) is the
+  // person's decision: the interface warns, the plan does not block it.
   if(workspace.sources) workspace.allocationIterations=[...new Set([...(workspace.allocationIterations ?? []),...workspace.iterations.filter(i=>i.path===item.iterationPath || i.path===draft.iterationPath).map(i=>i.id)])];
   if (item.localOnly) draft.title=changes.title ?? draft.title ?? item.title;
   if (Object.keys(draft).length) workspace.drafts[id] = draft; else delete workspace.drafts[id];

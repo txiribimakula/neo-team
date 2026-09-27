@@ -36,7 +36,7 @@ test('confirmation survives serialization and unrelated edits, but an edited pla
   stageChanges(ws,1042,{assignedTo:'marcos@example.test'});invalidateConfirmations(ws);
   assert.equal(personPlanningStatus(planningWorkspace(ws),ana,iteration).confirmed,false);
 });
-test('people with zero capacity are omitted from every planning action',()=>{
+test('people with zero capacity are left out of choosing tasks, but their tasks can still be moved',()=>{
   const ws=createDemo(),person=ws.members.find(m=>m.uniqueName===ana);
   ws.capacities[iteration].teamMembers.find(record=>record.teamMember.id===person.id).activities=[{name:'Development',capacityPerDay:0}];
   const view=planningWorkspace(ws);
@@ -44,7 +44,8 @@ test('people with zero capacity are omitted from every planning action',()=>{
   assert.ok(!orderedPlanningMembers(view,iteration).some(row=>row.member.id===person.id));
   assert.deepEqual(eligibleTasks(view,ana,iteration),[]);
   assert.throws(()=>planTasks(ws,ana,[1042],iteration),/capacidad 0/);
-  assert.throws(()=>stageChanges(ws,1053,{assignedTo:ana,iterationPath:ws.iterations.find(i=>i.id===iteration).path}),/capacidad 0/);
+  assert.doesNotThrow(()=>stageChanges(ws,1053,{assignedTo:ana,iterationPath:ws.iterations.find(i=>i.id===iteration).path}),'moving a task there is allowed: the interface only warns');
+  assert.equal(ws.drafts[1053].assignedTo,ana);
   assert.doesNotThrow(()=>stageChanges(ws,1042,{title:'Editar sin tocar su reparto',assignedTo:ana,iterationPath:ws.iterations.find(i=>i.id===iteration).path}));
 });
 test('confirmation validates capacity, estimates, member and iteration, and allows explicit acceptance of overload',()=>{

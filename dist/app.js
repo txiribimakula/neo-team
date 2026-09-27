@@ -80,6 +80,7 @@ function toast(text, kind = 'info') {
   clearTimeout(toastTimer);
   element.textContent = text;
   element.classList.toggle('error', kind === 'error');
+  element.classList.toggle('warning', kind === 'warning');
   element.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   element.hidden = false;
   toastTimer = setTimeout(() => { element.hidden = true; }, kind === 'error' ? 10000 : 5000);
@@ -733,6 +734,12 @@ async function decidePrevious(id, decision, path) {
   else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='move' ? {iterationPath:path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
   review=null;render();
   document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
+  // Allowed, but flagged: the owner has no capacity in the destination or is not in the team.
+  const target=decision==='carry' ? iteration : decision==='move' ? ws.iterations.find(i=>i.path===path) : null, owner=item.assignedTo;
+  if (target && owner) {
+    const member=state.workspace.members.find(m=>key(m)===owner);
+    if (!member || state.workspace.capacityHours?.[target.id]?.[member.id]===0) { toast(`#${id} pasa a ${target.name}, pero ${member ? `${member.displayName} tiene 0 h de capacidad` : `${memberName(owner)} no está en el equipo`} en esa iteración.`,'warning'); return; }
+  }
   toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='move' ? `#${id} pasa a ${iterationName(path)}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
 function ensureSelection() {
