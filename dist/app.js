@@ -803,8 +803,10 @@ function capacityDayCells(owner, name, days, daysOff, teamOff) {
 }
 // Conflicts and downloaded differences get their own row; a plain pending change
 // is a short line under the name.
-function capacityPendingLine(owner, drafts) {
-  return drafts[owner] ? `<small class="cg-pending">Pendiente · <button class="link-button" data-action="discard-capacity-entry" data-owner="${escape(owner)}" aria-label="Deshacer el ajuste">deshacer</button></small>` : '';
+// The undo button always keeps its place, so marking a change never moves the row.
+function capacityUndo(owner, drafts) {
+  const pending=!!drafts[owner];
+  return `<button type="button" class="cg-undo" data-action="discard-capacity-entry" data-owner="${escape(owner)}" title="Deshacer el ajuste sin subir" aria-label="Deshacer el ajuste sin subir" ${pending ? '' : 'hidden'}>↶</button>`;
 }
 function capacityNoteRow(owner, drafts, conflicts, columns) {
   const note=conflicts[owner] ? '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Descarga la capacidad o revísala en Cambios pendientes para elegir qué versión conservar.</p>' : capacityDownloadLine(owner);
@@ -821,10 +823,11 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
   const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3, teamOff=capacityOf(iteration.id,'team').daysOff;
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
   const head=`<tr><th class="cg-person" scope="col">Persona</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
-  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todo el equipo</strong><small>${team.off ? plural(team.off,'día libre','días libres') : 'Sin descansos comunes'}</small>${capacityPendingLine('team',drafts)}</span></span></th><td class="cg-hours"></td>${capacityDayCells('team','Todo el equipo',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
-  const rows=ws.members.map((member,index)=>({member,index})).map(({member,index})=>{
+  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todo el equipo</strong><small>${team.off ? plural(team.off,'día libre','días libres') : 'Sin descansos comunes'}</small></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todo el equipo',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
+  // People with no capacity go last and dimmed: they take no part in this iteration.
+  const rows=ws.members.map((member,index)=>({member,index})).sort((a,b)=>Number(hours[a.member.id]===0)-Number(hours[b.member.id]===0) || a.index-b.index).map(({member,index})=>{
     const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
-    return `<tr class="${person===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${person===0 ? 'Fuera del reparto' : person==null ? 'Define sus horas' : `${capacityBreakdown(member.id,entry).available} días disponibles`}</small>${capacityPendingLine(member.id,drafts)}</span></span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
+    return `<tr class="${person===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
   return `<div class="capacity-grid-wrap"><table class="capacity-grid"><thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
