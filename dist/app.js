@@ -661,12 +661,19 @@ function previousTasks(iteration=selected()) {
   });
   return {previous,tasks:tasks.sort((a,b)=>previousOrder[a.status]-previousOrder[b.status] || (a.item.priority ?? 5)-(b.item.priority ?? 5) || a.item.id-b.item.id)};
 }
+// Iterations after the one being planned, to send a task further ahead.
+function laterIterationSelect(item, iteration) {
+  const start=i=>String(i.attributes?.startDate ?? '');
+  const later=planningIterations().filter(i=>i.id!==iteration.id && (!start(iteration) || start(i)>start(iteration))).sort((a,b)=>start(a).localeCompare(start(b)));
+  if (!later.length) return '';
+  return `<select class="later-iteration" data-previous-move data-task="${item.id}" aria-label="Mandar #${item.id} a una iteración posterior"><option value="">Más adelante…</option>${later.map(i=>`<option value="${escape(i.path)}">${escape(i.name)}</option>`).join('')}</select>`;
+}
 function previousTaskRow({item,base,status},iteration) {
   const effort=item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar';
   const decided=item.iterationPath!==base.iterationPath || item.state!==base.state;
   const outcome={completed:'✓ Completada',backlog:'↩ En el backlog, sin iteración',moved:`→ Pasa a ${escape(iteration.name)}`,elsewhere:`Movida a ${escape(iterationName(item.iterationPath))}`}[status];
   const actions=status==='open'
-    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" title="Marcar como completada">✓ Completada</button><button class="button small" data-action="to-backlog" data-task="${item.id}" title="Mandar al backlog: quita la iteración y conserva el responsable">↩ Backlog</button>`
+    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" title="Marcar como completada">✓ Completada</button><button class="button small" data-action="to-backlog" data-task="${item.id}" title="Mandar al backlog: quita la iteración y conserva el responsable">↩ Backlog</button>${laterIterationSelect(item,iteration)}`
     : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button small subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
   return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(base.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
 }
@@ -716,17 +723,17 @@ function chooseCompletedState(type, taskId=null, states=null, sourceId=undefined
   showModal(`Estado completado de «${type}»${project ? ` en ${project}` : ''}`,'Elige el estado que se asigna al marcar como completada una tarea de este tipo. Se recordará.', `<form id="completed-state-form"><div class="participant-list">${options.map(o=>`<label class="participant-option"><input type="radio" name="state" value="${escape(o.name)}" ${o.name===checked ? 'checked' : ''} required><span><strong>${escape(o.name)}</strong><small>${escape(o.source)}</small></span></label>`).join('')}<label class="participant-option"><input type="radio" name="state" value="" data-other-state><span class="other-state"><strong>Otro estado</strong><input name="other" maxlength="128" placeholder="Nombre exacto en Azure DevOps" aria-label="Otro estado"></span></label></div>${states ? '<p class="form-intro">Estados del flujo de trabajo en Azure DevOps.</p>' : `<p class="form-intro">La lista reúne los estados de los datos importados y nombres habituales.${state.mode==='demo' ? '' : ' Azure DevOps comprobará el estado al sincronizar.'}</p><button type="button" class="button small" data-action="load-work-item-states">Consultar todos los estados en Azure DevOps</button><div id="connection-progress" hidden></div>`}</form>`, `<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="completed-state-form">${taskId ? 'Guardar y marcar completada' : 'Guardar'}</button>`);
   modal.classList.add('connection-modal');
 }
-async function decidePrevious(id, decision) {
+async function decidePrevious(id, decision, path) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
   if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
   if (decision==='complete') {
     if (!completedState(item,ws)) { chooseCompletedState(item.type,id,null,item.sourceId); return; }
     await request('/api/complete-task',{id});
   }
-  else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
+  else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='move' ? {iterationPath:path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
   review=null;render();
   document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
-  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
+  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='move' ? `#${id} pasa a ${iterationName(path)}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
 function ensureSelection() {
   const members=planningMembers();
@@ -1386,6 +1393,7 @@ document.addEventListener('change',async event=>{
     if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
+    if(el.dataset.previousMove!==undefined){if(el.value)await decidePrevious(Number(el.dataset.task),'move',el.value);return;}
     if(el.name==='taskIds'){await saveTaskSelection([Number(el.value)],el.checked);return;}
     if(el.id==='toggle-visible'){
       const ids=[...document.querySelectorAll('#picker-tree input[name="taskIds"]:not(:disabled)')].filter(box=>box.checked!==el.checked).map(box=>Number(box.value));

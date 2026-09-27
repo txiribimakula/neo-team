@@ -326,3 +326,4 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .iteration-option.active{border-color:var(--kind);box-shadow:inset 0 0 0 1px var(--kind);background:linear-gradient(var(--kind-bg),white 70%)}
 .iteration-tags{display:flex;gap:6px;align-items:center;min-height:22px}
 .iteration-chosen{font-size:11px;font-weight:700;color:white;background:var(--kind);border-radius:5px;padding:3px 7px;letter-spacing:.02em}
+.later-iteration{flex:1 1 auto;width:auto;padding:6px 10px;font-size:13px;font-weight:600;color:var(--ink)}
