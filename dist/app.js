@@ -18,6 +18,7 @@ let focusedMember='', pickerMember='', pickerQuery='', backlogQuery='', onlyAvai
 const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
 const expandedLanes = new Set(), expandedPrevious = new Set();
+let previousGroupOrder = null;
 // Elegir tareas works on the previous iteration (decide what is left) or the current one.
 let planningPeriod = null;
 const modal = $('#modal');
@@ -696,6 +697,11 @@ function previousView() {
     {id:'unassigned',name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
     {id:'outside',name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
   ].filter(group=>group.tasks.length);
+  // People with everything decided go last. The order is kept while deciding and
+  // refreshed on entering the view or opening/closing someone, so rows never jump.
+  const orderKey=`${previous.id}|${groups.map(g=>g.id).join(',')}`;
+  if (previousGroupOrder?.key!==orderKey) previousGroupOrder={key:orderKey,ids:groups.map((g,index)=>({id:g.id,index,done:!g.tasks.some(t=>t.status==='open')})).sort((a,b)=>Number(a.done)-Number(b.done) || a.index-b.index).map(g=>g.id)};
+  groups.sort((a,b)=>previousGroupOrder.ids.indexOf(a.id)-previousGroupOrder.ids.indexOf(b.id));
   const idle=ws.members.filter(member=>!owned(member).length), types=[...new Set(tasks.map(t=>t.item.type))];
   const kinds=[...new Map(tasks.map(t=>[`${t.item.sourceId ?? ''}\n${t.item.type}`,t.item])).values()];
   const completion=types.length ? `<p class="completed-states">Al completar: ${kinds.map(item=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(item.type)}" data-source="${escape(item.sourceId ?? '')}" title="Cambiar el estado completado de ${escape(item.type)}">${ws.sources ? `${escape(item.project)} · ` : ''}${escape(item.type)} → ${escape(completedState(item,ws) || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
@@ -1278,8 +1284,8 @@ const actions = {
   edit: el=>editTask(Number(el.dataset.task)),
   'pick-tasks': el=>pickTasks(el.dataset.member),
   'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;tab='capacity';render();window.scrollTo({top:0});},
-  'planning-period': el=>{planningPeriod=el.dataset.period;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
-  'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
+  'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
+  'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);previousGroupOrder=null;updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
@@ -1296,7 +1302,7 @@ const actions = {
   'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member))expandedLanes.delete(member);else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
-  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
+  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;if(tab==='planning')previousGroupOrder=null;changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
   review: reviewChanges, sync:synchronize,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
