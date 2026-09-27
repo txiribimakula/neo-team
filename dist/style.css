@@ -340,3 +340,7 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .panel-switch button[aria-pressed="true"]{background:white;color:var(--ink);box-shadow:0 1px 3px #1f352722}
 .panel-switch .count{min-width:26px;text-align:center;font-variant-numeric:tabular-nums;flex-shrink:0}
 .unassigned-list .task-card{margin-bottom:10px}
+/* Tasks (left) and people (right) scroll on their own, each fitting the window. */
+.board-column{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+section.board-column:not(.backlog){padding-right:4px}
+@media(max-width:740px){.board-column{position:static;max-height:none;overflow:visible}}

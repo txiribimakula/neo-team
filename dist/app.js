@@ -906,8 +906,12 @@ function refreshBacklog() {
   tree.innerHTML=leftPanelContent();
   $('#backlog-count').textContent=leftPanelCount();
 }
+const keptScrolls = () => Object.fromEntries([...document.querySelectorAll('[data-keep-scroll]')].map(el=>[el.dataset.keepScroll,el.scrollTop]));
+function restoreScrolls(scrolls) { for (const el of document.querySelectorAll('[data-keep-scroll]')) if (scrolls[el.dataset.keepScroll]) el.scrollTop=scrolls[el.dataset.keepScroll]; }
 function updatePlanningView() {
+  const scrolls=keptScrolls();
   $('#planning-view').innerHTML=stepView();
+  restoreScrolls(scrolls);
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
@@ -966,9 +970,9 @@ function board(iteration, planned) {
   const considered=planned.length-excluded.length;
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
-  const left=`<section class="backlog" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
+  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop=""${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i)).join('')}</div></section>` : '';
-  return `<div class="board">${left}<section><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><div class="members-grid">${members.map((m,index)=>lane(m,planned,index,iteration)).join('')}${extra('Fuera del reparto','Tareas asignadas a personas con capacidad 0',excluded,'zero-capacity')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
+  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><div class="members-grid">${members.map((m,index)=>lane(m,planned,index,iteration)).join('')}${extra('Fuera del reparto','Tareas asignadas a personas con capacidad 0',excluded,'zero-capacity')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
 function render() {
@@ -989,13 +993,15 @@ function render() {
   }
   const iteration=selected();
   const changes=pendingCount(ws), drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
-  // Redrawing keeps the horizontal position of the capacity grid.
-  const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0;
+  // Redrawing keeps the horizontal position of the capacity grid and the scroll of
+  // each column that scrolls on its own.
+  const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0, scrolls=keptScrolls();
   $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
   ${stepTabs(changes)}
   <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
+  restoreScrolls(scrolls);
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 function editTask(id) {
