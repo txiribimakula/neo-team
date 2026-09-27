@@ -159,3 +159,12 @@ test('downloading a joint iteration rebuilds the single budget from every projec
  assert.deepEqual(next.capacityDrafts,{});
  assert.equal(next.capacityDownloads[iterationId].local.ana.activities[0].capacityPerDay,9);
 });
+test('uploading a joint iteration writes its project split and keeps other iterations pending',async()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10)), iterationId=ws.iterations[0].id, store=storeFor(ws), calls=[];
+ stageCapacity(ws,iterationId,{key:'ana',activities:[{name:'Development',capacityPerDay:6}]});
+ const remotes={A:project('A',1,30),B:project('B',2,10)};
+ const planner=new Planner(store,{open:async()=>{},capacity:async(c,id)=>structuredClone(remotes[c.project].capacities[id]),updateMemberCapacity:async(c,id,key,activities)=>{calls.push([c.project,activities[0].capacityPerDay]);}});
+ const result=await planner.uploadCapacity(iterationId);
+ assert.deepEqual(result.failures,[]);assert.deepEqual(calls.map(c=>c[0]),['A','B']);
+ assert.equal(planningWorkspace(store.data.azure).capacityPendingByIteration[iterationId],undefined);
+});

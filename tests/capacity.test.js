@@ -199,3 +199,27 @@ test('downloading one iteration overwrites local capacity and keeps each local d
   stageCapacity(again,iteration.id,{key:'ana',activities:[{name:'Development',capacityPerDay:6}]});
   assert.equal(again.capacityDownloads[iteration.id],undefined);
 });
+
+test('uploading one iteration writes only its capacity changes and never overwrites a value changed in Azure',async()=>{
+  const { workspace, iteration } = demo();
+  workspace.mode='azure';
+  const other=workspace.iterations.find(i=>i.id!==iteration.id);
+  stageCapacity(workspace,iteration.id,{key:'ana',activities:[{name:'Development',capacityPerDay:7}]});
+  stageCapacity(workspace,iteration.id,{key:'marcos',activities:[{name:'Development',capacityPerDay:1}]});
+  stageCapacity(workspace,other.id,{key:'ana',activities:[{name:'Development',capacityPerDay:3}]});
+  assert.equal(planningWorkspace(workspace).capacityPendingByIteration[iteration.id],2);
+  const remote=structuredClone(workspace.capacities[iteration.id]);
+  remote.teamMembers.find(m=>m.teamMember.id==='marcos').activities=[{name:'Development',capacityPerDay:4}];
+  const writes=[];
+  const store={data:{mode:'azure',azure:workspace,version:0},async save(data){this.data={...data,version:this.data.version+1};}};
+  const planner=new Planner(store,{open:async()=>{},capacity:async()=>structuredClone(remote),updateMemberCapacity:async(config,id,key,activities)=>{writes.push([id,key,activities[0].capacityPerDay]);}});
+  const result=await planner.uploadCapacity(iteration.id);
+  assert.deepEqual(writes,[[iteration.id,'ana',7]],'only this iteration, and not the value changed in Azure');
+  assert.deepEqual(result.conflicts.map(label=>label.includes('Marcos')),[true]);
+  const saved=store.data.azure;
+  assert.equal(saved.capacityDrafts[iteration.id].ana,undefined);
+  assert.ok(saved.capacityDrafts[iteration.id].marcos,'the conflicted change stays pending');
+  assert.ok(saved.capacityConflicts[iteration.id].marcos);
+  assert.ok(saved.capacityDrafts[other.id].ana,'other iterations keep their drafts');
+  await assert.rejects(()=>new Planner({data:{mode:'azure',azure:structuredClone(demo().workspace),version:0}},{open:async()=>{}}).uploadCapacity(iteration.id),/No hay cambios de capacidad/);
+});

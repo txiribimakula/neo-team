@@ -138,7 +138,7 @@ async function loadState(renderNow = true) {
   if (renderNow) render();
 }
 function showModal(title, subtitle, body, actions = '') {
-  modal.classList.remove('wide-modal', 'connection-modal', 'capacity-editor-modal');
+  modal.classList.remove('wide-modal', 'connection-modal');
   $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2><p>${escape(subtitle)}</p></div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
   if (!modal.open) modal.showModal();
 }
@@ -606,10 +606,10 @@ function hierarchyView() {
 }
 function sectionRefreshButton() {
   const section=({iteration:'iterations',capacity:'capacity',hierarchy:'tasks',planning:'tasks',previous:'tasks'})[tab];
+  if(section==='capacity') return capacityControls();
   if(!section || state.workspace?.mode!=='azure') return '';
   const label=({iterations:'iteraciones',capacity:'capacidad',tasks:'tareas y jerarquía'})[section];
   const at=state.workspace.refreshedAt?.[section];
-  if(section==='capacity') return `<div class="workspace-controls"><button class="button small" data-action="download-capacity">Descargar capacidad</button><small class="text-muted">Solo ${escape(selected()?.name ?? 'esta iteración')}: tu copia local se sobrescribe con Azure y verás qué cambia en cada persona${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}</small></div><div id="capacity-download-progress" hidden></div>`;
   return `<div class="workspace-controls"><button class="button small" data-action="refresh-section" data-section="${section}">Actualizar ${label}</button><small class="text-muted">Solo ${label}${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}</small></div>`;
 }
 function stepView() { return sectionRefreshButton()+stepContent(); }
@@ -759,25 +759,14 @@ function freeDay(ranges, iteration) {
   if (last && candidate>last) throw new Error('No quedan días libres disponibles dentro de la iteración.');
   return candidate;
 }
-function rangeEditor(owner, ranges, iteration) {
-  const first=dayValue(iteration.attributes?.startDate), last=dayValue(iteration.attributes?.finishDate);
-  const limits=first && last ? ` min="${first}" max="${last}"` : '';
-  const field=(index,edge,range)=>`<input type="date" data-range data-owner="${escape(owner)}" data-index="${index}" data-edge="${edge}" data-focus="range:${escape(owner)}:${index}:${edge}" value="${escape(range[edge])}"${limits} aria-label="${edge==='start' ? 'Primer' : 'Último'} día libre">`;
-  return `<div class="days-off">${ranges.map((range,index)=>`<div class="days-off-row">${field(index,'start',range)}<span aria-hidden="true">→</span>${field(index,'end',range)}<button class="button small" data-action="remove-range" data-owner="${escape(owner)}" data-index="${index}" data-focus="remove:${escape(owner)}:${index}" aria-label="Quitar estos días libres">Quitar</button></div>`).join('') || '<p class="text-muted">Sin días libres</p>'}<button class="button small" data-action="add-range" data-owner="${escape(owner)}" data-focus="add:${escape(owner)}">+ Días libres</button></div>`;
-}
 // After a download, what the person had locally sits beside Azure's value until they choose.
 function capacityDownloadLine(owner) {
   const mine=state.workspace.capacityDownloads?.[selectedIteration]?.local?.[owner];
   if (!mine) return '';
   const azure=capacityOf(selectedIteration,owner);
   const text=entry=>`${owner==='team' ? '' : `${number(capacityBreakdown(owner,entry).total)} h · `}${capacityText(entry,owner)}`;
-  return `<div class="capacity-download-diff" role="group" aria-label="Diferencia con tu copia local"><p class="capacity-download-title">Cambia al descargar de Azure</p><p class="download-row"><span>Tenías</span><s>${escape(text(mine))}</s></p><p class="download-row"><span>Azure</span><strong>${escape(text(azure))}</strong></p><div class="conflict-actions"><button class="button small primary" data-action="download-choice" data-choice="azure" data-owner="${escape(owner)}">Validar Azure</button><button class="button small" data-action="download-choice" data-choice="local" data-owner="${escape(owner)}">Quedarme con lo mío</button><button class="button small" data-action="edit-capacity" data-owner="${escape(owner)}">Otro valor</button></div></div>`;
+  return `<div class="capacity-download-diff" role="group" aria-label="Diferencia con tu copia local"><p class="capacity-download-title">Cambia al descargar de Azure</p><p class="download-row"><span>Tenías</span><s>${escape(text(mine))}</s></p><p class="download-row"><span>Azure</span><strong>${escape(text(azure))}</strong></p><div class="conflict-actions"><button class="button small primary" data-action="download-choice" data-choice="azure" data-owner="${escape(owner)}">Validar Azure</button><button class="button small" data-action="download-choice" data-choice="local" data-owner="${escape(owner)}">Quedarme con lo mío</button><button class="button small" data-action="focus-capacity" data-owner="${escape(owner)}">Otro valor</button></div></div>`;
 }
-function capacityStatusLine(owner, drafts, conflicts) {
-  if (conflicts[owner]) return '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Revisa los cambios para elegir qué versión conservar.</p>';
-  return capacityDownloadLine(owner)+(drafts[owner] ? `<p class="local-note">Pendiente de sincronizar · <button class="link-button" data-action="discard-capacity-entry" data-owner="${escape(owner)}">deshacer</button></p>` : '');
-}
-let capacityEditor = null;
 function capacityDates(iteration) {
   const start=dayValue(iteration.attributes?.startDate), end=dayValue(iteration.attributes?.finishDate), days=[];
   if (!start || !end || !Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end))) return days;
@@ -797,6 +786,48 @@ function capacityBreakdown(owner, entry) {
   const daily=entry.activities.reduce((sum,a)=>sum+Number(a.capacityPerDay || 0),0);
   return { days, working:working.length, available:available.length, off:working.length-available.length, daily, total:Math.round(available.length*daily*100)/100 };
 }
+// One row per person and one column per working day, aligned for the whole team.
+// The first row holds the days off shared by everyone.
+const weekdayLetter = day => ['D','L','M','X','J','V','S'][new Date(day+'T00:00:00Z').getUTCDay()];
+const weekStart = (day, index, days) => index>0 && new Date(day+'T00:00:00Z').getUTCDay() < new Date(days[index-1]+'T00:00:00Z').getUTCDay();
+function capacityHoursField(member,entry) {
+  const activities=entry.activities.length ? entry.activities : [{name:'',capacityPerDay:null}];
+  return activities.map((a,i)=>`<label class="capacity-inline-hours">${activities.length>1 ? `<span>${escape(a.name || 'Actividad')}</span>` : ''}<input type="number" min="0" max="24" step="0.25" inputmode="decimal" value="${a.capacityPerDay ?? ''}" placeholder="—" data-capacity-hours data-member="${escape(member.id)}" data-activity="${i}" data-focus="hours:${escape(member.id)}:${i}" aria-label="Horas al día de ${escape(member.displayName)}${a.name ? ` en ${escape(a.name)}` : ''}"></label>`).join('');
+}
+function capacityDayCells(owner, name, days, daysOff, teamOff) {
+  return days.map((day,index)=>{
+    const shared=owner!=='team' && containsDay(teamOff,day), off=shared || containsDay(daysOff,day);
+    const label=`${name} · ${date(day)}: ${shared ? 'descanso del equipo' : off ? 'libre' : 'disponible'}`;
+    return `<td class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}"><button type="button" class="cg-toggle ${off ? 'off' : ''} ${shared ? 'shared' : ''}" data-action="card-day" data-owner="${escape(owner)}" data-day="${day}" data-focus="day:${escape(owner)}:${day}" aria-pressed="${off}" aria-label="${escape(label)}" title="${escape(label)}" ${shared ? 'disabled' : ''}></button></td>`;
+  }).join('');
+}
+// Conflicts and downloaded differences get their own row; a plain pending change
+// is a short line under the name.
+function capacityPendingLine(owner, drafts) {
+  return drafts[owner] ? `<small class="cg-pending">Pendiente · <button class="link-button" data-action="discard-capacity-entry" data-owner="${escape(owner)}" aria-label="Deshacer el ajuste">deshacer</button></small>` : '';
+}
+function capacityNoteRow(owner, drafts, conflicts, columns) {
+  const note=conflicts[owner] ? '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Descarga la capacidad o revísala en Cambios pendientes para elegir qué versión conservar.</p>' : capacityDownloadLine(owner);
+  return note ? `<tr class="cg-note"><td colspan="${columns}">${note}</td></tr>` : '';
+}
+// Marking a day splits or merges the ranges that Azure stores.
+function toggleDay(ranges, day) {
+  if(containsDay(ranges,day)) return ranges.flatMap(r=>day<r.start || day>r.end ? [r] : [...(r.start<day ? [{start:r.start,end:new Date(Date.parse(day)-86400000).toISOString().slice(0,10)}] : []),...(day<r.end ? [{start:nextDay(day),end:r.end}] : [])]);
+  const sorted=[...ranges,{start:day,end:day}].sort((a,b)=>a.start.localeCompare(b.start)), merged=[];
+  for(const r of sorted){const last=merged.at(-1);if(last && r.start<=nextDay(last.end))last.end=last.end>r.end ? last.end : r.end;else merged.push({...r});}
+  return merged;
+}
+function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
+  const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3, teamOff=capacityOf(iteration.id,'team').daysOff;
+  if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
+  const head=`<tr><th class="cg-person" scope="col">Persona</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
+  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todo el equipo</strong><small>${team.off ? plural(team.off,'día libre','días libres') : 'Sin descansos comunes'}</small>${capacityPendingLine('team',drafts)}</span></span></th><td class="cg-hours"></td>${capacityDayCells('team','Todo el equipo',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
+  const rows=ws.members.map((member,index)=>({member,index})).map(({member,index})=>{
+    const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
+    return `<tr class="${person===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${person===0 ? 'Fuera del reparto' : person==null ? 'Define sus horas' : `${capacityBreakdown(member.id,entry).available} días disponibles`}</small>${capacityPendingLine(member.id,drafts)}</span></span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
+  }).join('');
+  return `<div class="capacity-grid-wrap"><table class="capacity-grid"><thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
+}
 function capacityView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration || !ws.members.length) return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para revisar la capacidad.</div>';
@@ -805,48 +836,10 @@ function capacityView() {
   const team=capacityBreakdown('team',capacityOf(iteration.id,'team'));
   return `<section class="capacity-step">
     <header class="capacity-hero"><div><p class="eyebrow">PRIMERO, EL TIEMPO REAL</p><h2>El tiempo con el que cuenta el equipo.</h2><p>${escape(iteration.name)} · ${date(iteration.attributes?.startDate)} — ${date(iteration.attributes?.finishDate)}</p><span class="capacity-save-note">${ws.mode==='demo' ? 'Modo de ejemplo' : 'Guardado local · revisarás los cambios antes de enviarlos a Azure'}</span></div><div class="capacity-total"><strong>${number(total)}<small> h</small></strong><span>de capacidad${known.length<ws.members.length ? ' conocida' : ' del equipo'}</span><small>${known.length} de ${ws.members.length} personas con capacidad definida</small></div></header>
-    <section class="capacity-shared"><div class="capacity-shared-icon" aria-hidden="true">☀</div><div><h3>Los días que descansáis juntos</h3><p>${team.off ? `${team.off} días laborables libres para todo el equipo` : 'Sin días libres comunes'} · ${team.available} días laborables disponibles</p>${capacityStatusLine('team',drafts,conflicts)}</div><button class="button" data-action="edit-capacity" data-owner="team">Editar calendario del equipo</button></section>
-    <div class="capacity-section-title"><div><h3>El tiempo de cada persona</h3><p>Horas al día y ausencias. La capacidad se calcula al momento.</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : ''}</div>
-    <div class="capacity-people">${ws.members.map((member,index)=>({member,index,total:hours[member.id]})).sort((a,b)=>Number(a.total===0)-Number(b.total===0) || a.index-b.index).map(({member,index})=>{
-      const entry=capacityOf(iteration.id,member.id), b=capacityBreakdown(member.id,entry), total=hours[member.id];
-      return `<section class="capacity-card capacity-profile ${total===0 ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><div class="capacity-person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><div><strong>${escape(member.displayName)}</strong><span class="text-muted">${total===0 ? 'Fuera del reparto' : entry.activities.length>1 ? `${entry.activities.length} actividades` : 'Disponibilidad en la iteración'}</span></div></div><div class="capacity-profile-total">${total==null ? '—' : number(total)}<small> h</small></div><p class="capacity-equation">${total===0 ? 'No aparecerá en las fases de reparto' : total==null ? 'Define las horas para empezar' : `${number(b.daily)} h al día × ${b.available} días disponibles`}</p><div class="capacity-mini-days" aria-label="${b.available} días disponibles, ${b.off} días libres">${b.days.filter(isWorkingDay).slice(0,40).map(day=>`<span class="${containsDay(entry.daysOff,day) || containsDay(capacityOf(iteration.id,'team').daysOff,day) ? 'off' : ''}" title="${date(day)}"></span>`).join('')}</div><div class="capacity-profile-footer"><span>${b.off ? `${b.off} días libres` : 'Sin ausencias'}${b.days.length ? '' : ' · fechas sin definir'}</span><button class="button small" data-action="edit-capacity" data-owner="${escape(member.id)}">Ajustar capacidad</button></div>${capacityStatusLine(member.id,drafts,conflicts)}</section>`;
-    }).join('')}</div><div class="capacity-next"><span>${known.length<ws.members.length ? `${ws.members.length-known.length} personas con capacidad pendiente de definir` : 'La disponibilidad está lista. Puedes empezar a repartir el trabajo.'}</span><button class="button primary" data-action="tab" data-tab="planning">Elegir tareas →</button></div>
+    <div class="capacity-section-title"><div><h3>Días y horas del equipo</h3><p>Pulsa un día para marcarlo libre o disponible. La fila del equipo marca los descansos de todos.</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : ''}</div>
+    ${capacityGrid(ws,iteration,drafts,conflicts,hours,total,team)}
+    <div class="capacity-next"><span>${known.length<ws.members.length ? `${ws.members.length-known.length} personas con capacidad pendiente de definir` : 'La disponibilidad está lista. Puedes empezar a repartir el trabajo.'}</span><button class="button primary" data-action="tab" data-tab="planning">Elegir tareas →</button></div>
   </section>`;
-}
-function editCapacity(owner) {
-  const member=state.workspace.members.find(m=>m.id===owner);
-  if(owner!=='team' && !member)return;
-  capacityEditor={owner,...structuredClone(capacityOf(selectedIteration,owner))};
-  if(owner!=='team' && !capacityEditor.activities.length)capacityEditor.activities=[{name:'',capacityPerDay:0}];
-  showModal(owner==='team' ? 'Días libres del equipo' : `Capacidad de ${member.displayName}`, owner==='team' ? 'Marca los días en los que descansa todo el equipo.' : 'Ajusta las horas al día y marca las ausencias en el calendario.', `<form id="capacity-editor-form">
-    ${owner==='team' ? '' : `<div class="capacity-editor-hours">${capacityEditor.activities.map((a,i)=>`<label class="form-field">${escape(a.name || 'Horas disponibles al día')}<div class="capacity-hour-input"><input type="number" required min="0" max="24" step="0.25" value="${a.capacityPerDay}" data-edit-activity="${i}" aria-label="${escape(a.name || 'Horas disponibles al día')}"><span>h / día</span></div></label>`).join('')}${capacityEditor.activities.length===1 ? '<div class="capacity-presets">'+[4,6,8].map(n=>`<button class="button small" type="button" data-action="capacity-preset" data-hours="${n}">${n} h</button>`).join('')+'</div>' : ''}</div>`}
-    <div id="capacity-preview" aria-live="polite"></div><div class="capacity-calendar-heading"><strong>${owner==='team' ? 'Marca los días libres comunes' : 'Marca tus días libres'}</strong><button type="button" class="link-button" data-action="capacity-clear-days">Quitar ausencias</button></div><div class="capacity-calendar-legend"><span>● Disponible</span><span>○ Día libre</span><span>▧ Descanso del equipo</span></div><div id="capacity-calendar"></div><p class="local-note">Pulsa un día para marcarlo o volver a dejarlo disponible. Los descansos del equipo se descuentan una sola vez.</p></form>`, '<button class="button" data-action="close">Cancelar</button><button type="submit" form="capacity-editor-form" class="button primary">Guardar ajustes</button>');
-  modal.classList.add('connection-modal','capacity-editor-modal');
-  refreshCapacityEditor();
-}
-function refreshCapacityEditor() {
-  const e=capacityEditor;if(!e || !$('#capacity-editor-form'))return;
-  const b=capacityBreakdown(e.owner,e), before=state.workspace.capacityHours?.[selectedIteration]?.[e.owner];
-  const team=capacityOf(selectedIteration,'team').daysOff;
-  const total=e.owner==='team' ? state.workspace.members.reduce((sum,m)=>{const entry=capacityOf(selectedIteration,m.id);return sum+b.days.filter(day=>isWorkingDay(day)&&!containsDay(e.daysOff,day)&&!containsDay(entry.daysOff,day)).length*entry.activities.reduce((s,a)=>s+a.capacityPerDay,0);},0) : b.total;
-  const difference=before==null || e.owner==='team' ? '' : total-before;
-  $('#capacity-preview').innerHTML=`<div class="capacity-preview-total"><strong>${b.days.length ? number(total) : '—'}<small> h</small></strong><span>${e.owner==='team' ? 'de capacidad conocida en el equipo' : `${number(b.daily)} h × ${b.available} días disponibles`}</span></div><span class="capacity-preview-delta">${difference==='' ? `${b.off} días libres` : difference===0 ? 'Sin cambios en las horas totales' : `${difference>0 ? '+' : '−'}${number(Math.abs(difference))} h respecto a lo guardado`}</span>`;
-  const months=new Map();for(const day of b.days){const month=day.slice(0,7);if(!months.has(month))months.set(month,[]);months.get(month).push(day);}
-  $('#capacity-calendar').innerHTML=[...months].map(([month,days])=>{
-    const offset=(new Date(days[0]+'T00:00:00Z').getUTCDay()+6)%7;
-    return `<section class="capacity-month"><h3>${new Date(month+'-01T00:00:00Z').toLocaleDateString('es',{month:'long',year:'numeric',timeZone:'UTC'})}</h3><div class="capacity-day-grid">${['L','M','X','J','V','S','D'].map(day=>`<span class="weekday">${day}</span>`).join('')}${'<span></span>'.repeat(offset)}${days.map(day=>{const off=containsDay(e.daysOff,day),shared=e.owner!=='team' && containsDay(team,day),working=isWorkingDay(day);return `<button type="button" class="capacity-day ${off ? 'off' : ''} ${shared ? 'shared' : ''}" data-action="capacity-day" data-day="${day}" aria-label="${date(day)}: ${shared ? 'descanso del equipo' : !working ? 'no laborable' : off ? 'día libre' : 'disponible'}" aria-pressed="${off}" ${!working || shared ? 'disabled' : ''}>${Number(day.slice(8))}<small>${shared ? 'equipo' : !working ? '—' : off ? 'libre' : e.owner==='team' ? '✓' : `${number(b.daily)} h`}</small></button>`;}).join('')}</div></section>`;
-  }).join('') || '<p class="notice warning">La iteración no tiene fechas definidas. Puedes ajustar las horas diarias; añade fechas en Azure para gestionar el calendario.</p>';
-}
-function toggleCapacityDay(day) {
-  const ranges=capacityEditor.daysOff;
-  if(containsDay(ranges,day)) capacityEditor.daysOff=ranges.flatMap(r=>day<r.start || day>r.end ? [r] : [...(r.start<day ? [{start:r.start,end:new Date(Date.parse(day)-86400000).toISOString().slice(0,10)}] : []),...(day<r.end ? [{start:nextDay(day),end:r.end}] : [])]);
-  else {
-    const sorted=[...ranges,{start:day,end:day}].sort((a,b)=>a.start.localeCompare(b.start)), merged=[];
-    for(const r of sorted){const last=merged.at(-1);if(last && r.start<=nextDay(last.end))last.end=last.end>r.end ? last.end : r.end;else merged.push({...r});}
-    capacityEditor.daysOff=merged;
-  }
-  refreshCapacityEditor();
-  $(`[data-day="${day}"]`,modal)?.focus();
 }
 async function saveCapacity(owner, change, focus) {
   // The request disables every control, so the target is read before sending.
@@ -864,14 +857,6 @@ async function saveCapacityHours(el) {
   const activities=entry.activities.length ? entry.activities.map((activity,index)=>index===position ? {...activity,capacityPerDay:value ?? 0} : activity)
     : value===null ? [] : [{name:'',capacityPerDay:value}];
   await saveCapacity(el.dataset.member,{ activities });
-}
-async function saveCapacityRange(el) {
-  if (!el.value) return;
-  const owner=el.dataset.owner, position=Number(el.dataset.index);
-  const daysOff=capacityOf(selectedIteration,owner).daysOff.map((range,index)=>index===position ? {...range,[el.dataset.edge]:el.value} : range);
-  // Keep the range valid while the person is still choosing the other end.
-  if (daysOff[position].end<daysOff[position].start) daysOff[position][el.dataset.edge==='start' ? 'end' : 'start']=el.value;
-  await saveCapacity(owner,{ daysOff });
 }
 let planningMode = 'team';
 function plannerView() {
@@ -1073,7 +1058,29 @@ async function synchronize() {
   }
   render();
 }
+// Capacity moves both ways for the iteration being planned: download replaces the
+// local copy with Azure, upload sends only this iteration's capacity changes.
+let capacityNotice='';
+function capacityControls() {
+  const ws=state.workspace, iteration=selected(), azure=ws?.mode==='azure';
+  if(!ws || !iteration) return '';
+  const pending=ws.capacityPendingByIteration?.[iteration.id] ?? 0, at=ws.refreshedAt?.capacity;
+  const upload=`<button class="button small ${pending ? 'primary' : ''}" data-action="upload-capacity" ${pending ? '' : 'disabled'} title="${pending ? `Envía a Azure DevOps los ${pending} ajustes de capacidad de ${escape(iteration.name)}` : 'No hay cambios de capacidad pendientes en esta iteración'}">${azure ? 'Subir capacidad' : 'Simular subida'}${pending ? ` (${pending})` : ''}</button>`;
+  const download=azure ? `<button class="button small" data-action="download-capacity">Descargar capacidad</button>` : '';
+  return `<div class="workspace-controls">${download}${upload}<small class="text-muted">Solo ${escape(iteration.name)}${azure ? ` · Descargar sobrescribe tu copia local con Azure; subir envía tus cambios de capacidad${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}` : ''}</small></div><div id="capacity-download-progress" hidden></div>${capacityNotice}`;
+}
+async function uploadCapacity() {
+  const iteration=selected();
+  capacityNotice='';
+  const data=await importWithProgress($('#capacity-download-progress'),null,{path:'/api/upload-capacity',input:{iterationId:iteration.id},title:`Subiendo la capacidad de ${iteration.name}`});
+  const {successes,failures,conflicts}=data.result;
+  const problems=[...failures.map(f=>`<p class="inline-error">${escape(f.label)}: ${escape(f.error)}</p>`),...conflicts.map(label=>`<p class="inline-error">${escape(label)}: ha cambiado en Azure DevOps desde la importación. No se ha tocado; descarga la capacidad o revísala en Cambios pendientes para elegir.</p>`)].join('');
+  capacityNotice=problems ? `<div class="notice warning capacity-notice"><strong>${successes.length ? `Subidos ${plural(successes.length,'ajuste')}, faltan ${failures.length+conflicts.length}.` : 'No se ha subido la capacidad.'}</strong>${problems}</div>` : '';
+  review=null;render();
+  if(!problems) toast(`Capacidad subida: ${plural(successes.length,'ajuste')} sincronizado${successes.length===1 ? '' : 's'}.`);
+}
 async function downloadCapacity() {
+  capacityNotice='';
   const iteration=selected();
   await importWithProgress($('#capacity-download-progress'),null,{path:'/api/download-capacity',input:{iterationId:iteration.id},title:`Descargando la capacidad de ${iteration.name}`});
   review=null;render();
@@ -1220,6 +1227,7 @@ const actions = {
   },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
+  'upload-capacity':uploadCapacity,
   'download-choice':async el=>{
     const choice=el.dataset.choice;
     await request('/api/capacity-download-choice',{iterationId:selectedIteration,key:el.dataset.owner,choice});review=null;render();
@@ -1251,7 +1259,7 @@ const actions = {
   'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member))expandedLanes.delete(member);else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
-  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
+  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';changesUi={...changesUi,notice:'',error:'',confirmAll:false};if(tab==='planning' && focusedMember)pickerMember=focusedMember;render();},
   review: reviewChanges, sync:synchronize,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
@@ -1266,18 +1274,8 @@ const actions = {
     review=null;render();toast(source ? 'Se mantiene la capacidad de Azure DevOps en ese proyecto.' : 'Cambio de capacidad descartado en local.');
   },
   'discard-one':async el=>{await request('/api/discard',{id:Number(el.dataset.task)});modal.close();render();toast('Cambios de la tarea deshechos.');},
-  'edit-capacity':el=>editCapacity(el.dataset.owner),
-  'capacity-day':el=>toggleCapacityDay(el.dataset.day),
-  'capacity-clear-days':()=>{capacityEditor.daysOff=[];refreshCapacityEditor();},
-  'capacity-preset':el=>{capacityEditor.activities[0].capacityPerDay=Number(el.dataset.hours);$('[data-edit-activity]',modal).value=el.dataset.hours;refreshCapacityEditor();},
-  'add-range':async el=>{
-    const owner=el.dataset.owner,ranges=capacityOf(selectedIteration,owner).daysOff,day=freeDay(ranges,selected());
-    await saveCapacity(owner,{daysOff:[...ranges,{start:day,end:day}]},`[data-focus="range:${owner}:${ranges.length}:start"]`);
-  },
-  'remove-range':async el=>{
-    const owner=el.dataset.owner,index=Number(el.dataset.index);
-    await saveCapacity(owner,{daysOff:capacityOf(selectedIteration,owner).daysOff.filter((_,position)=>position!==index)});
-  },
+  'focus-capacity':el=>{const owner=el.dataset.owner, input=$(owner==='team' ? '[data-owner="team"][data-action="card-day"]' : `[data-focus="hours:${CSS.escape(owner)}:0"]`);input?.focus();input?.select?.();},
+  'card-day':async el=>{const owner=el.dataset.owner;await saveCapacity(owner,{daysOff:toggleDay(capacityOf(selectedIteration,owner).daysOff,el.dataset.day)},`[data-focus="${CSS.escape(el.dataset.focus)}"]`);},
   'discard-capacity':async()=>{await request('/api/discard-capacity',{iterationId:selectedIteration});review=null;render();toast('Cambios de capacidad deshechos.');},
   'discard-capacity-entry':async el=>{await request('/api/discard-capacity',{iterationId:selectedIteration,key:el.dataset.owner});review=null;render();},
   'resolve-capacity-local':el=>resolveCapacity(el.dataset.iteration,el.dataset.owner,'local',el.dataset.source),
@@ -1337,13 +1335,6 @@ document.addEventListener('submit', async event => {
       toast(taskId ? `#${taskId} marcada como completada (${chosen}) en local.` : `«${type}» se completará con el estado ${chosen}.`);
       return;
     }
-    if (event.target.id === 'capacity-editor-form') {
-      const e=capacityEditor;
-      await saveCapacity(e.owner,{...(e.owner==='team' ? {} : {activities:e.activities}),daysOff:e.daysOff});
-      modal.close();capacityEditor=null;
-      $(`[data-action="edit-capacity"][data-owner="${CSS.escape(e.owner)}"]`)?.focus({preventScroll:true});
-      toast('Capacidad guardada en local.');return;
-    }
     if (event.target.id === 'state-rules-form') {
       const choices = [...event.target.querySelectorAll('select[data-state]')].filter(el => el.value).map(el => ({ state: el.dataset.state, action: el.value }));
       const refreshAll=event.target.dataset.refreshAll==='true',section=event.target.dataset.section;
@@ -1372,7 +1363,6 @@ document.addEventListener('change',async event=>{
     if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
-    if(el.dataset.range!==undefined){await saveCapacityRange(el);return;}
     if(el.name==='taskIds'){await saveTaskSelection([Number(el.value)],el.checked);return;}
     if(el.id==='toggle-visible'){
       const ids=[...document.querySelectorAll('#picker-tree input[name="taskIds"]:not(:disabled)')].filter(box=>box.checked!==el.checked).map(box=>Number(box.value));
@@ -1387,7 +1377,6 @@ document.addEventListener('input',event=>{
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
   if (event.target.name === 'other' && event.target.closest('#completed-state-form')) $('[data-other-state]').checked = true;
-  if(event.target.dataset.editActivity!==undefined){capacityEditor.activities[Number(event.target.dataset.editActivity)].capacityPerDay=Number(event.target.value);refreshCapacityEditor();}
   if(event.target.id==='picker-search'){pickerQuery=event.target.value;refreshPicker();}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}

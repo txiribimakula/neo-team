@@ -361,7 +361,10 @@ export function planningWorkspace(workspace) {
   const projectAllocations = projectCapacityPlans(workspace);
   // The same count the review uses, so the interface never offers an empty review.
   const capacityPending = workspace.sources ? projectAllocations.filter(allocationPending).length : Object.values(workspace.capacityDrafts ?? {}).reduce((sum, drafts) => sum + Object.keys(drafts).length, 0);
-  return {...workspace,projectAllocations,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
+  const capacityPendingByIteration = {};
+  if (workspace.sources) for (const plan of projectAllocations.filter(allocationPending)) capacityPendingByIteration[plan.iterationId] = (capacityPendingByIteration[plan.iterationId] ?? 0) + 1;
+  else for (const [iterationId, drafts] of Object.entries(workspace.capacityDrafts ?? {})) capacityPendingByIteration[iterationId] = Object.keys(drafts).length;
+  return {...workspace,projectAllocations,capacityPendingByIteration,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 export function confirmPerson(workspace, member, iterationId) {
   if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
@@ -439,6 +442,18 @@ export class Planner {
     const plans = planReview(workspace, remoteItems);
     if (unreadable.length) for (const plan of plans) if (!plan.missing) plan.unverified = true;
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
+    const { capacityPlans, incompleteAllocations } = await this.reviewCapacity(workspace, unreadable);
+    const data = structuredClone(this.store.data);
+    data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
+    data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
+    await this.store.save(data);
+    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
+    // Conflicts are informative: synchronizing keeps the local version.
+    return { ...this.review };
+  }
+  // Capacity changes compared with Azure, for every iteration or only one.
+  async reviewCapacity(workspace, unreadable, iterationId) {
+    const capacityIterations = [...new Set([...capacityChanges(workspace).map(change => change.iterationId),...Object.keys(workspace.capacityDrafts ?? {})])];
     const remoteCapacities = {};
     let capacityPlans, incompleteAllocations=[];
     if (workspace.sources) {
@@ -447,7 +462,7 @@ export class Planner {
       // as 0 h and the split is corrected in a later sync once it is defined.
       incompleteAllocations=allocations.filter(p=>p.missingEstimate || p.unavailable).map(p=>({label:p.label,iteration:p.iteration,missingEstimate:p.missingEstimate,unavailable:p.unavailable}));
       capacityPlans=[];
-      for (const plan of allocations.filter(allocationPending)) {
+      for (const plan of allocations.filter(p=>allocationPending(p) && (!iterationId || p.iterationId===iterationId))) {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
         // A capacity that cannot be read does not stop the review: the local copy
         // stands in and Azure is read again just before writing it.
@@ -459,20 +474,34 @@ export class Planner {
       }
     } else {
       const unverified = new Set();
-      for (const iterationId of capacityIterations) remoteCapacities[iterationId] = workspace.mode === 'demo' ? workspace.capacities?.[iterationId] : await this.azure.capacity(workspace.config, iterationId).catch(error => {
-        unverified.add(iterationId);
-        unreadable.push(`Capacidad de ${workspace.iterations.find(i => i.id === iterationId)?.name ?? iterationId}: ${error.message}`);
-        return workspace.capacities?.[iterationId];
+      for (const id of capacityIterations.filter(id => !iterationId || id === iterationId)) remoteCapacities[id] = workspace.mode === 'demo' ? workspace.capacities?.[id] : await this.azure.capacity(workspace.config, id).catch(error => {
+        unverified.add(id);
+        unreadable.push(`Capacidad de ${workspace.iterations.find(i => i.id === id)?.name ?? id}: ${error.message}`);
+        return workspace.capacities?.[id];
       });
-      capacityPlans = planCapacityReview(workspace, remoteCapacities).map(plan => unverified.has(plan.iterationId) ? { ...plan, unverified: true, applied: false } : plan);
+      capacityPlans = planCapacityReview(workspace, remoteCapacities).filter(plan => !iterationId || plan.iterationId === iterationId).map(plan => unverified.has(plan.iterationId) ? { ...plan, unverified: true, applied: false } : plan);
     }
-    const data = structuredClone(this.store.data);
-    data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
-    data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
-    await this.store.save(data);
-    this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
-    // Conflicts are informative: synchronizing keeps the local version.
-    return { ...this.review };
+    return { capacityPlans, incompleteAllocations };
+  }
+  // Uploads one iteration's capacity without a full review. A value someone changed
+  // in Azure since the import is not overwritten: it is left as a conflict to decide.
+  async uploadCapacity(iterationId) {
+    const workspace = this.workspace();
+    if (!workspace) throw new Error('Importa una planificación primero.');
+    if (!workspace.iterations.some(i => i.id === iterationId)) throw new Error('Elige una iteración del equipo.');
+    if (workspace.mode === 'azure') await this.azure.open(workspace.config);
+    const { capacityPlans } = await this.reviewCapacity(workspace, [], iterationId);
+    if (!capacityPlans.length) throw new Error('No hay cambios de capacidad pendientes en esta iteración.');
+    const conflicts = capacityPlans.filter(plan => plan.conflict);
+    const result = await this.syncCapacity({ capacityPlans: capacityPlans.filter(plan => !plan.conflict), scope: iterationId }, workspace);
+    if (conflicts.length) {
+      const data = structuredClone(this.store.data), next = data[data.mode];
+      next.capacityConflicts ??= {};
+      for (const plan of conflicts) next.capacityConflicts[plan.iterationId] = { ...next.capacityConflicts[plan.iterationId], [plan.key]: plan.remote };
+      await this.store.save(data);
+    }
+    this.review = null;
+    return { ...result, conflicts: conflicts.map(plan => `${plan.iteration} · ${plan.label}`) };
   }
   async sync(token) {
     const review = this.review;
@@ -570,8 +599,12 @@ export class Planner {
     }
     if (workspace.sources && !failures.length) {
       const data=structuredClone(this.store.data), next=data[data.mode];
-      for (const iteration of next.iterations) next.capacities[iteration.id]=effectiveCapacity(next,iteration.id);
-      next.capacityDrafts={}; next.capacityConflicts={}; await this.store.save(data);
+      // An upload of one iteration leaves the drafts of the others untouched.
+      for (const iteration of next.iterations.filter(i=>!review.scope || i.id===review.scope)) {
+        next.capacities[iteration.id]=effectiveCapacity(next,iteration.id);
+        delete next.capacityDrafts?.[iteration.id]; delete next.capacityConflicts?.[iteration.id];
+      }
+      await this.store.save(data);
     }
     return { successes, failures };
   }
