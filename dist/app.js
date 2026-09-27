@@ -835,10 +835,7 @@ function capacityView() {
   const known=ws.members.filter(m=>hours[m.id]!=null), total=known.reduce((sum,m)=>sum+hours[m.id],0);
   const team=capacityBreakdown('team',capacityOf(iteration.id,'team'));
   return `<section class="capacity-step">
-    <header class="capacity-hero"><div><p class="eyebrow">PRIMERO, EL TIEMPO REAL</p><h2>El tiempo con el que cuenta el equipo.</h2><p>${escape(iteration.name)} · ${date(iteration.attributes?.startDate)} — ${date(iteration.attributes?.finishDate)}</p><span class="capacity-save-note">${ws.mode==='demo' ? 'Modo de ejemplo' : 'Guardado local · revisarás los cambios antes de enviarlos a Azure'}</span></div><div class="capacity-total"><strong>${number(total)}<small> h</small></strong><span>de capacidad${known.length<ws.members.length ? ' conocida' : ' del equipo'}</span><small>${known.length} de ${ws.members.length} personas con capacidad definida</small></div></header>
-    <div class="capacity-section-title"><div><h3>Días y horas del equipo</h3><p>Pulsa un día para marcarlo libre o disponible. La fila del equipo marca los descansos de todos.</p></div>${Object.keys(drafts).length ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : ''}</div>
     ${capacityGrid(ws,iteration,drafts,conflicts,hours,total,team)}
-    <div class="capacity-next"><span>${known.length<ws.members.length ? `${ws.members.length-known.length} personas con capacidad pendiente de definir` : 'La disponibilidad está lista. Puedes empezar a repartir el trabajo.'}</span><button class="button primary" data-action="tab" data-tab="planning">Elegir tareas →</button></div>
   </section>`;
 }
 async function saveCapacity(owner, change, focus) {
@@ -1064,10 +1061,11 @@ let capacityNotice='';
 function capacityControls() {
   const ws=state.workspace, iteration=selected(), azure=ws?.mode==='azure';
   if(!ws || !iteration) return '';
-  const pending=ws.capacityPendingByIteration?.[iteration.id] ?? 0, at=ws.refreshedAt?.capacity;
+  const pending=ws.capacityPendingByIteration?.[iteration.id] ?? 0;
   const upload=`<button class="button small ${pending ? 'primary' : ''}" data-action="upload-capacity" ${pending ? '' : 'disabled'} title="${pending ? `Envía a Azure DevOps los ${pending} ajustes de capacidad de ${escape(iteration.name)}` : 'No hay cambios de capacidad pendientes en esta iteración'}">${azure ? 'Subir capacidad' : 'Simular subida'}${pending ? ` (${pending})` : ''}</button>`;
-  const download=azure ? `<button class="button small" data-action="download-capacity">Descargar capacidad</button>` : '';
-  return `<div class="workspace-controls">${download}${upload}<small class="text-muted">Solo ${escape(iteration.name)}${azure ? ` · Descargar sobrescribe tu copia local con Azure; subir envía tus cambios de capacidad${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}` : ''}</small></div><div id="capacity-download-progress" hidden></div>${capacityNotice}`;
+  const download=azure ? `<button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button>` : '';
+  const undo=ws.capacityDrafts?.[iteration.id] ? '<button class="button small" data-action="discard-capacity">Deshacer ajustes</button>' : '';
+  return `<div class="workspace-controls">${download}${upload}${undo}</div><div id="capacity-download-progress" hidden></div>${capacityNotice}`;
 }
 async function uploadCapacity() {
   const iteration=selected();

@@ -128,19 +128,18 @@
 .review-section{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:24px 0 10px}
 
 
-/* Capacity: overview first, focused editing on demand. */
-.capacity-hero{display:flex;align-items:center;justify-content:space-between;gap:32px;padding:30px 34px;border:1px solid #dce6d5;border-radius:16px;background:linear-gradient(110deg,#f0f6e8,#e8f0dd)}
-.capacity-hero .eyebrow{font-size:10px;color:#5b754b;margin-bottom:12px}
-.capacity-hero h2{font-size:clamp(22px,2.4vw,32px);max-width:460px;margin:0 0 12px;line-height:1.2}
-.capacity-hero p:not(.eyebrow){font-size:14px;color:#5d7056;margin-bottom:16px}
-.capacity-save-note{font-size:12px;color:#5e7056}
-.capacity-total{display:flex;flex-direction:column;flex-shrink:0;gap:6px;text-align:right;color:#294c32}
-.capacity-total strong{font:750 56px/1 'Manrope',sans-serif;letter-spacing:-.055em}.capacity-total strong small{font-size:26px;font-weight:400}
-.capacity-total>span{font-size:14px}.capacity-total>small{font-size:12px;color:#68805d}
+/* Capacity: overview first{display:flex;align-items:center;justify-content:space-between;gap:32px;padding:30px 34px;border:1px solid #dce6d5;border-radius:16px;background:linear-gradient(110deg,#f0f6e8,#e8f0dd)}
 
 
 
-.capacity-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.capacity-section-title h3{font-size:18px;margin:0 0 5px}.capacity-section-title p{font-size:13px;color:var(--muted);margin:0}
+
+
+
+
+
+
+
+
 
 
 
@@ -156,7 +155,7 @@
 
 .weekday{text-align:center;font-size:11px;color:var(--muted);padding-bottom:4px}
 
-@media(max-width:700px){.capacity-hero{padding:22px;align-items:start;flex-direction:column;gap:22px}.capacity-total{text-align:left}.capacity-total strong{font-size:44px}.capacity-next{align-items:stretch;flex-direction:column}.capacity-section-title{align-items:start}}
+@media(max-width:700px){.capacity-next{align-items:stretch;flex-direction:column}}
 
 .planning-view-switch{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px;flex-wrap:wrap}.planning-view-switch h2{font-size:20px;margin:0 0 5px}.planning-view-switch p{font-size:13px;color:var(--muted);margin:0}.planning-view-options{display:flex;gap:4px;padding:4px;background:#eaf0e7;border-radius:9px}.planning-view-options button{border:0;border-radius:6px;padding:9px 14px;color:var(--muted);background:transparent;font-size:13px;font-weight:600}.planning-view-options button[aria-pressed="true"]{background:white;color:var(--green);box-shadow:0 1px 4px #20351e15}
 
@@ -279,7 +278,7 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .previous-tasks[hidden]{display:none}
 .capacity-notice{margin:0 0 18px}.capacity-notice .inline-error{margin:8px 0 0}
 /* Capacity grid: one row per person, one column per working day, the team row first. */
-.capacity-grid-wrap{overflow-x:auto;background:white;border:1px solid var(--line);border-radius:14px;margin-top:14px;scrollbar-width:thin}
+.capacity-grid-wrap{overflow-x:auto;background:white;border:1px solid var(--line);border-radius:14px;margin-top:0;scrollbar-width:thin}
 .capacity-grid{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
 .capacity-grid th,.capacity-grid td{padding:8px 4px;border-top:1px solid #edf0ec;background:white;text-align:center;vertical-align:middle;letter-spacing:0}
 .capacity-grid thead th{border-top:0;background:#f9fbf8;color:var(--muted);font-weight:600;font-size:12px;padding:10px 4px;position:sticky;top:0;z-index:2}
