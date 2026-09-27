@@ -629,16 +629,22 @@ function stepTabs(changes) {
   return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}<button class="step-tab ${tab==='changes' ? 'active' : ''}" data-action="tab" data-tab="changes" ${tab==='changes' ? 'aria-current="step"' : ''} ${changes || tab==='changes' ? '' : 'disabled'}><span>${steps.length+1}</span>Cambios pendientes${changes ? `<small aria-label="${changes} sin sincronizar">${changes}</small>` : ''}</button></nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
-function timeFrameLabel(iteration) {
-  const frame=String(iteration.attributes?.timeFrame ?? '').toLowerCase();
-  return ['1','current'].includes(frame) ? 'Actual' : ['2','future'].includes(frame) ? 'Próxima' : 'Iteración';
+// Current, the one right after it, and later ones, each with its own colour.
+function iterationKinds(iterations) {
+  const today=new Date().toISOString().slice(0,10), day=value=>String(value ?? '').slice(0,10);
+  const isCurrent=i=>['1','current'].includes(String(i.attributes?.timeFrame ?? '').toLowerCase()) || (day(i.attributes?.startDate) && day(i.attributes.startDate)<=today && today<=day(i.attributes?.finishDate));
+  const ordered=[...iterations].sort((a,b)=>day(a.attributes?.startDate).localeCompare(day(b.attributes?.startDate)));
+  const current=ordered.find(isCurrent), after=current ? ordered.slice(ordered.indexOf(current)+1) : ordered.filter(i=>day(i.attributes?.startDate)>today);
+  return new Map(iterations.map(i=>[i.id,i===current ? 'current' : i===after[0] ? 'next' : after.includes(i) ? 'future' : 'other']));
 }
+const iterationKindLabel={current:'Actual',next:'Siguiente',future:'Futura',other:'Iteración'};
 function iterationView() {
-  const ws=state.workspace, current=selected();
-  if (!current) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
-  return `<section class="iteration-step"><header class="step-heading"><h2>¿Qué iteración vas a planificar?</h2><p>Después revisarás el trabajo que quedó abierto en la iteración anterior.</p></header><div class="iteration-options">${planningIterations().map(i=>{
-    const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, previous=previousIteration(ws.iterations,i.id);
-    return `<button class="iteration-option ${i.id===current.id ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${i.id===current.id}"><span class="iteration-when">${timeFrameLabel(i)}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} ya planificada${planned===1 ? '' : 's'} · ${previous ? `revisarás ${escape(previous.name)}` : 'sin iteración anterior'}</small></button>`;
+  const ws=state.workspace, selectedOne=selected();
+  if (!selectedOne) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
+  const iterations=planningIterations(), kinds=iterationKinds(iterations);
+  return `<section class="iteration-step"><div class="iteration-options">${iterations.map(i=>{
+    const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne.id;
+    return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
   }).join('')}</div></section>`;
 }
 // Step 2: each open task of the previous iteration moves to the one being
