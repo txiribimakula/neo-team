@@ -17,7 +17,9 @@ let changesUi = { loading: false, syncing: false, error: '', notice: '', confirm
 let focusedMember='', pickerMember='', pickerQuery='', backlogQuery='', onlyAvailable=true;
 const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
-const expandedLanes = new Set();
+const expandedLanes = new Set(), expandedPrevious = new Set();
+// Elegir tareas works on the previous iteration (decide what is left) or the current one.
+let planningPeriod = null;
 const modal = $('#modal');
 // Measure real row heights so wrapped parent titles never overlap.
 let stickyFrame;
@@ -615,7 +617,6 @@ function stepContent() {
   const iteration=selected();
   if (tab==='changes') return changesView();
   if (tab==='iteration') return iterationView();
-  if (tab==='previous') return previousView();
   if (tab==='capacity') return capacityView();
   if (tab==='planning') return plannerView();
   if (!iteration) return hierarchyView();
@@ -623,7 +624,7 @@ function stepContent() {
 }
 function stepTabs(changes) {
   const open=previousTasks().tasks.filter(t=>t.status==='open').length;
-  const steps=[['iteration','Iteración'],...(state.workspace.iterations.some(i=>i.past) ? [['previous','Revisar anterior',open]] : []),['capacity','Capacidad'],['planning','Elegir tareas']];
+  const steps=[['iteration','Iteración'],['capacity','Capacidad'],['planning','Elegir tareas',open]];
   return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}<button class="step-tab ${tab==='changes' ? 'active' : ''}" data-action="tab" data-tab="changes" ${tab==='changes' ? 'aria-current="step"' : ''} ${changes || tab==='changes' ? '' : 'disabled'}><span>${steps.length+1}</span>Cambios pendientes${changes ? `<small aria-label="${changes} sin sincronizar">${changes}</small>` : ''}</button></nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
@@ -664,27 +665,29 @@ function previousTaskRow({item,base,status},iteration) {
 }
 function previousPerson(group,iteration) {
   const open=group.tasks.filter(t=>t.status==='open'), hours=open.reduce((sum,t)=>sum+(t.item.remainingWork ?? 0),0), decided=group.tasks.length-open.length;
-  return `<section class="previous-person"><header class="person">${group.avatar ? `<span class="avatar ${group.avatar}">${escape(initials(group.name))}</span>` : ''}<div class="person-detail"><h3>${escape(group.name)}</h3><p>${open.length} sin decidir · ${number(hours)} h pendientes${decided ? ` · ${decided} decidida${decided===1 ? '' : 's'}` : ''}</p></div></header><ul class="previous-tasks">${group.tasks.map(task=>previousTaskRow(task,iteration)).join('')}</ul></section>`;
+  const expanded=expandedPrevious.has(group.id), id=`previous-${group.id.replace(/[^a-z0-9]/gi,'-')}`;
+  const status=open.length ? `<span class="previous-pending">${open.length} sin decidir · ${number(hours)} h</span>` : '<span class="previous-done">✓ Todo decidido</span>';
+  return `<section class="previous-person ${open.length ? 'has-open' : 'all-decided'} ${expanded ? '' : 'collapsed'}"><button type="button" class="previous-toggle" data-action="toggle-previous" data-group="${escape(group.id)}" aria-expanded="${expanded}" aria-controls="${id}"><span class="person">${group.avatar ? `<span class="avatar ${group.avatar}">${escape(initials(group.name))}</span>` : ''}<span class="person-detail"><strong>${escape(group.name)}</strong><small>${plural(group.tasks.length,'tarea')}${decided ? ` · ${decided} decidida${decided===1 ? '' : 's'}` : ''}</small></span></span>${status}<span class="lane-chevron" aria-hidden="true">›</span></button><ul class="previous-tasks" id="${id}" ${expanded ? '' : 'hidden'}>${group.tasks.map(task=>previousTaskRow(task,iteration)).join('')}</ul></section>`;
 }
 function previousView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration) return '<div class="empty-result">Elige primero la iteración que vas a planificar.</div>';
   const {previous,tasks}=previousTasks(iteration);
-  const next='<button class="button primary" data-action="tab" data-tab="capacity">Continuar con la capacidad →</button>';
-  if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza los datos para traer la última iteración terminada.' : ''}</p>${next}</div>`;
+  const next='<button class="button primary" data-action="planning-period" data-period="current">Ir a la iteración actual →</button>';
+  if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza los datos para traer la última iteración terminada.' : ''}</p></div>`;
   const open=tasks.filter(t=>t.status==='open'), owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
   const groups=[
-    ...ws.members.map((member,index)=>({name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
-    {name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
-    {name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
+    ...ws.members.map((member,index)=>({id:key(member),name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
+    {id:'unassigned',name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
+    {id:'outside',name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
   ].filter(group=>group.tasks.length);
   const idle=ws.members.filter(member=>!owned(member).length), types=[...new Set(tasks.map(t=>t.item.type))];
   const kinds=[...new Map(tasks.map(t=>[`${t.item.sourceId ?? ''}\n${t.item.type}`,t.item])).values()];
   const completion=types.length ? `<p class="completed-states">Al completar: ${kinds.map(item=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(item.type)}" data-source="${escape(item.sourceId ?? '')}" title="Cambiar el estado completado de ${escape(item.type)}">${ws.sources ? `${escape(item.project)} · ` : ''}${escape(item.type)} → ${escape(completedState(item,ws) || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
-  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Lo que sigue abierto de cada persona. Pásalo a ${escape(iteration.name)}, márcalo como completado o mándalo al backlog.</p>${completion}</div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
+  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Abre a cada persona resaltada para decidir lo que le queda: pasarlo a ${escape(iteration.name)}, marcarlo como completado o mandarlo al backlog.</p>${completion}</div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
     ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
     ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
-    <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes continuar y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
+    <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes seguir con ${escape(iteration.name)} y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
 }
 // Which state closes a type is decided by the person. The list starts with what
 // is known locally; the complete workflow can be read from Azure on demand.
@@ -874,7 +877,13 @@ let planningMode = 'team';
 function plannerView() {
   const iteration=selected();
   if (!iteration) return '<div class="empty-result">Selecciona una iteración para elegir tareas.</div>';
-  return `<div class="planning-view-switch"><div><h2>Elegir tareas</h2><p>Organiza el plan del equipo o elige las tareas de una persona.</p></div><div class="planning-view-options" role="group" aria-label="Vista de planificación"><button type="button" data-action="planning-view" data-view="team" aria-pressed="${planningMode==='team'}">Vista del equipo</button><button type="button" data-action="planning-view" data-view="person" aria-pressed="${planningMode==='person'}">Por persona</button></div></div>${planningMode==='team' ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : personPlannerView()}`;
+  const {previous,tasks}=previousTasks(iteration), open=tasks.filter(t=>t.status==='open').length;
+  // The previous iteration comes first while something there is still undecided.
+  if (!previous) planningPeriod='current';
+  else planningPeriod ??= open ? 'previous' : 'current';
+  const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>Iteración anterior</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>Iteración actual</small><span>${escape(iteration.name)}</span></button></div>` : '';
+  if (planningPeriod==='previous') return periods+previousView();
+  return `${periods}<div class="planning-view-switch"><div><h2>Elegir tareas</h2><p>Organiza el plan del equipo o elige las tareas de una persona.</p></div><div class="planning-view-options" role="group" aria-label="Vista de planificación"><button type="button" data-action="planning-view" data-view="team" aria-pressed="${planningMode==='team'}">Vista del equipo</button><button type="button" data-action="planning-view" data-view="person" aria-pressed="${planningMode==='person'}">Por persona</button></div></div>${planningMode==='team' ? board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path)) : personPlannerView()}`;
 }
 function personPlannerView() {
   ensureSelection();const ws=state.workspace,iteration=selected();
@@ -1223,7 +1232,9 @@ const actions = {
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   'pick-tasks': el=>pickTasks(el.dataset.member),
-  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;tab='previous';render();window.scrollTo({top:0});},
+  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;tab='capacity';render();window.scrollTo({top:0});},
+  'planning-period': el=>{planningPeriod=el.dataset.period;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
+  'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
