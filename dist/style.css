@@ -332,3 +332,11 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .task-estimates:has(.task-field:only-child){grid-template-columns:1fr}
 .task-field input::-webkit-inner-spin-button,.task-field input::-webkit-outer-spin-button,.capacity-inline-hours input::-webkit-inner-spin-button,.capacity-inline-hours input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.task-field input,.capacity-inline-hours input{-moz-appearance:textfield;appearance:textfield}
 .backlog-download{width:100%;margin:6px 0 12px}#backlog-progress{margin:0 0 12px}
+/* Current sprint: one person per row; the left panel alternates backlog / unassigned. */
+.board .members-grid{grid-template-columns:1fr}
+.panel-switch{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:4px;padding:4px;background:#dfe6e0;border-radius:10px;margin-bottom:12px}
+.panel-switch button{display:flex;align-items:center;justify-content:space-between;gap:8px;border:0;background:transparent;border-radius:7px;padding:8px 10px;font-weight:650;font-size:13px;color:var(--muted);cursor:pointer;min-width:0}
+.panel-switch button>span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel-switch button[aria-pressed="true"]{background:white;color:var(--ink);box-shadow:0 1px 3px #1f352722}
+.panel-switch .count{min-width:26px;text-align:center;font-variant-numeric:tabular-nums;flex-shrink:0}
+.unassigned-list .task-card{margin-bottom:10px}
