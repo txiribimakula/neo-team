@@ -3,6 +3,13 @@ export const memberKey = member => (member.uniqueName || member.id || member.dis
 export const isExecutable = item => !item.contextOnly && ['task', 'bug', 'tarea'].includes(item.type.toLowerCase());
 export const completedState = (item, workspace) => (workspace.sources ? workspace.sources.find(s=>s.id===item.sourceId)?.completedStates : workspace.completedStates)?.[item.type];
 export const isCompleted = (item, workspace) => !!completedState(item,workspace) && item.state === completedState(item,workspace);
+// The hour fields a task can be edited with, named as in Azure DevOps. Types read
+// from Azure say which fields they have; otherwise the usual Task/Bug fields apply.
+export function estimateFields(workspace, item) {
+  const known=(workspace.sources ? workspace.sources.find(s=>s.id===item.sourceId)?.estimateFields : workspace.estimateFields)?.[item.type];
+  if (known) return known;
+  return {originalEstimate:item.originalEstimate!=null || item.type==='Task' ? 'Original Estimate' : null, remainingWork:item.canEstimateHours ? 'Remaining Work' : null};
+}
 // The iteration that starts right before the given one. Dates decide when they
 // exist; undated iterations keep the order in which Azure DevOps listed them.
 export function previousIteration(iterations, iterationId) {
@@ -14,10 +21,10 @@ export function previousIteration(iterations, iterationId) {
   return earlier[0] ?? (before && !(start && startOf(before)) ? before : null);
 }
 export const typeRank = item => ({epic:0,feature:1,'user story':2,'product backlog item':2,requirement:2,task:3,tarea:3,bug:3}[item.type.toLowerCase()] ?? 4);
-// The snapshots received by the interface are never edited, so their trees and
-// eligible tasks are computed once per snapshot instead of once per person.
+// The snapshots received by the interface are never edited, so their trees are
+// computed once per snapshot.
 // Plans edited in place (the server's working copy) are never cached.
-const snapshots = new WeakSet(), trees = new WeakMap(), eligibleCache = new WeakMap();
+const snapshots = new WeakSet(), trees = new WeakMap();
 export function markSnapshot(workspace) {
   if (workspace) { snapshots.add(workspace); if (workspace.effectiveItems) snapshots.add(workspace.effectiveItems); }
   return workspace;
@@ -58,40 +65,9 @@ export function ancestors(id, tree) {
   return result;
 }
 
-export function capacityStatus(summary) {
-  const {plannedHours:hours,capacity,unknownPlanned:unknown}=summary;
-  const percent=capacity===null ? 0 : capacity===0 ? (hours>0 ? 100 : 0) : Math.min(100,hours/capacity*100);
-  const status=capacity!==null && hours>capacity+0.005 ? 'over' : capacity===null || unknown>0 ? 'unknown' : capacity===0 ? 'zero' : Math.abs(hours-capacity)<0.005 ? 'full' : 'open';
-  return {status,percent,hours,capacity,unknown};
-}
-export function personPlanningStatus(workspace, member, iterationId) {
-  const summary=selectionSummary(workspace,member,iterationId), meter=capacityStatus(summary);
-  const covered=['full','over'].includes(meter.status);
-  const signature=JSON.stringify([summary.capacity,summary.planned.map(i=>[i.id,i.remainingWork ?? null,i.title,i.priority]).sort((a,b)=>a[0]-b[0])]);
-  const canConfirm=covered && meter.unknown===0;
-  return {covered,canConfirm,signature,confirmed:canConfirm && workspace.confirmations?.[iterationId]?.[member]===signature};
-}
 export function hasPlanningCapacity(workspace, member, iterationId) {
   const person=workspace.members.find(m=>memberKey(m)===member);
   return !person || workspace.capacityHours?.[iterationId]?.[person.id] !== 0;
-}
-export function orderedPlanningMembers(workspace, iterationId) {
-  return workspace.members.filter(member=>hasPlanningCapacity(workspace,memberKey(member),iterationId)).map((member,index)=>({member,index,...personPlanningStatus(workspace,memberKey(member),iterationId)}))
-    .sort((a,b)=>Number(a.covered)-Number(b.covered) || a.index-b.index);
-}
-export function eligibleTasks(workspace, member, iterationId) {
-  if (!snapshots.has(workspace)) return findEligibleTasks(workspace, member, iterationId);
-  let cache = eligibleCache.get(workspace);
-  if (!cache) eligibleCache.set(workspace, cache = new Map());
-  const cacheKey = `${member}\n${iterationId ?? ''}`;
-  if (!cache.has(cacheKey)) cache.set(cacheKey, findEligibleTasks(workspace, member, iterationId));
-  return cache.get(cacheKey);
-}
-function findEligibleTasks(workspace, member, iterationId) {
-  if(iterationId && !hasPlanningCapacity(workspace,member,iterationId)) return [];
-  const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
-  // Every open task in the backlog can be chosen for anyone with capacity.
-  return items.filter(item=>isExecutable(item) && !isCompleted(item,workspace));
 }
 export function filterHierarchy(roots, predicate) {
   return roots.flatMap(node=>{
@@ -100,20 +76,3 @@ export function filterHierarchy(roots, predicate) {
   });
 }
 
-export function selectionSummary(workspace, member, iterationId, selectedIds = []) {
-  const iteration=workspace.iterations.find(i=>i.id===iterationId);
-  const person=workspace.members.find(m=>memberKey(m)===member);
-  const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
-  const planned=items.filter(i=>isExecutable(i) && i.assignedTo===member && i.iterationPath===iteration?.path);
-  const eligible=eligibleTasks(workspace,member,iterationId);
-  const available=eligible.filter(i=>(!i.assignedTo || i.assignedTo===member) && !(i.assignedTo===member && i.iterationPath===iteration?.path));
-  const wanted=new Set(selectedIds), selected=available.filter(i=>wanted.has(i.id));
-  const hours=list=>list.reduce((sum,i)=>sum+(i.remainingWork ?? 0),0);
-  const unknown=list=>list.filter(i=>i.remainingWork===null || i.remainingWork===undefined).length;
-  const capacity=person ? workspace.capacityHours?.[iterationId]?.[person.id] ?? null : null;
-  const plannedHours=hours(planned), selectedHours=hours(selected), projectedHours=plannedHours+selectedHours;
-  return {planned,available,eligible,selected,plannedHours,selectedHours,projectedHours,capacity,
-    unknownPlanned:unknown(planned),unknownSelected:unknown(selected),
-    freeHours:capacity===null ? null : capacity-projectedHours,
-    invalidIds:[...wanted].filter(id=>!selected.some(i=>i.id===id))};
-}

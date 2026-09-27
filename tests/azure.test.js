@@ -189,3 +189,10 @@ test('a team without capacity in the iteration reads as empty instead of failing
   gateway.call=async()=>{throw new Error('HTTP 403');};
   await assert.rejects(()=>gateway.capacity({project:'P',team:'T'},'s1'),/403/);
 });
+test('estimates are written to their real Azure fields',async()=>{
+  const gateway=new AzureGateway();let call;
+  gateway.call=async(name,args)=>{call={name,args};return {id:42,rev:9,fields:{'System.Title':'Task','Microsoft.VSTS.Scheduling.OriginalEstimate':8,'Microsoft.VSTS.Scheduling.RemainingWork':5}};};
+  const item=await gateway.update({project:'Project'},42,null,{originalEstimate:8,remainingWork:5});
+  assert.deepEqual(call.args.updates,[{op:'add',path:'/fields/Microsoft.VSTS.Scheduling.OriginalEstimate',value:8},{op:'add',path:'/fields/Microsoft.VSTS.Scheduling.RemainingWork',value:5}]);
+  assert.equal(item.originalEstimate,8);assert.equal(item.remainingWork,5);
+});

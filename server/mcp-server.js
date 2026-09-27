@@ -97,13 +97,15 @@ server.tool('neo_work_item_types', 'List project work item types before selectin
   project: z.string().min(1),
 }, async ({project}) => {
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
-  return {content:[{type:'text',text:JSON.stringify((await api.getWorkItemTypes(project)).filter(t=>!t.isDisabled).map(t=>({name:t.name})))}]};
+  // The estimate fields each type really has, with the names Azure shows for them.
+  const estimates=['Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Scheduling.RemainingWork'];
+  return {content:[{type:'text',text:JSON.stringify((await api.getWorkItemTypes(project)).filter(t=>!t.isDisabled).map(t=>({name:t.name,...(Array.isArray(t.fields) ? {fields:t.fields.filter(f=>estimates.includes(f.referenceName)).map(f=>({referenceName:f.referenceName,name:f.name}))} : {})})))}]};
 });
 server.tool('neo_work_items_batch', 'Read complete work item fields in batches of up to 200.', {
   project:z.string().min(1), ids:z.array(z.number().int().positive()).max(200),
 }, async ({project,ids}) => {
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
-  const items=ids.length ? await api.getWorkItemsBatch({ids,errorPolicy:OMIT_MISSING,fields:['System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.IterationPath', 'System.AreaPath', 'System.Parent', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Scheduling.RemainingWork', 'Microsoft.VSTS.Scheduling.StoryPoints', 'Microsoft.VSTS.Scheduling.Effort', 'Microsoft.VSTS.Scheduling.Size']},project) : [];
+  const items=ids.length ? await api.getWorkItemsBatch({ids,errorPolicy:OMIT_MISSING,fields:['System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.IterationPath', 'System.AreaPath', 'System.Parent', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Scheduling.RemainingWork', 'Microsoft.VSTS.Scheduling.OriginalEstimate', 'Microsoft.VSTS.Scheduling.StoryPoints', 'Microsoft.VSTS.Scheduling.Effort', 'Microsoft.VSTS.Scheduling.Size']},project) : [];
   return {content:[{type:'text',text:JSON.stringify((items ?? []).filter(Boolean))}]};
 });
 

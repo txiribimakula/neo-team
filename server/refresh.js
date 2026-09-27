@@ -13,8 +13,8 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
   if(section==='tasks') {
     next.items=refreshed.flatMap((data,index)=>data.items.map(item=>planningItem(next,item,originals[index])));
     next.conflicts={};
-    if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.completedStates={...refreshed[index].completedStates,...source.completedStates};});
-    else {next.backlogLevels=refreshed[0].backlogLevels;next.completedStates={...refreshed[0].completedStates,...next.completedStates};}
+    if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
+    else {next.backlogLevels=refreshed[0].backlogLevels;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}
     next.warnings=[...new Set([...(next.warnings ?? []),...refreshed.flatMap(data=>data.warnings ?? [])])];
   } else if(section==='capacity') {
     if(!next.sources) next.capacities=refreshed[0].capacities;

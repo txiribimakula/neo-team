@@ -1,8 +1,8 @@
 import { sourcesOf, sourceFor, planningItem, remoteFields } from './multi-project.js';
 import { randomUUID } from 'node:crypto';
-import { eligibleTasks, isExecutable, completedState, personPlanningStatus } from '../dist/hierarchy.js';
+import { isExecutable, completedState, estimateFields } from '../dist/hierarchy.js';
 
-export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', remainingWork: 'Horas pendientes', state: 'Estado' };
+export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', originalEstimate: 'Original Estimate', remainingWork: 'Remaining Work', state: 'Estado' };
 export function identityKey(identity) {
   if (!identity) return '';
   if (typeof identity === 'object') return (identity.uniqueName || identity.id || identity.displayName || '').toLowerCase();
@@ -17,6 +17,7 @@ export function normalizeItem(raw) {
     iterationPath: f['System.IterationPath'] || '', areaPath: f['System.AreaPath'] || '',
     priority: f['Microsoft.VSTS.Common.Priority'] ?? null,
     remainingWork: f['Microsoft.VSTS.Scheduling.RemainingWork'] ?? null,
+    originalEstimate: f['Microsoft.VSTS.Scheduling.OriginalEstimate'] ?? null,
     points: f['Microsoft.VSTS.Scheduling.StoryPoints'] ?? f['Microsoft.VSTS.Scheduling.Effort'] ?? f['Microsoft.VSTS.Scheduling.Size'] ?? null,
     canEstimateHours: 'Microsoft.VSTS.Scheduling.RemainingWork' in f || f['System.WorkItemType'] === 'Task',
     canPrioritize: 'Microsoft.VSTS.Common.Priority' in f,
@@ -54,31 +55,6 @@ export function discardLocal(workspace,id) {
   }
   else {delete workspace.drafts[id];delete workspace.conflicts[id];}
 }
-export function planTasks(workspace, member, ids, iterationId) {
-  if (!workspace || !workspace.members.some(m=>identityKey(m) === member)) throw new Error('Elige una persona del equipo.');
-  const iteration = workspace.iterations.find(i=>i.id === iterationId);
-  if (!iteration) throw new Error('Elige una iteración del equipo.');
-  if (!memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
-  if (!Array.isArray(ids) || !ids.length || ids.length > 200 || new Set(ids).size !== ids.length) throw new Error('Selecciona entre 1 y 200 tareas distintas.');
-  const eligible = new Map(eligibleTasks(planningWorkspace(workspace),member,iterationId).map(i=>[i.id,i]));
-  for (const id of ids) {
-    const item = eligible.get(id);
-    if (!item || !isExecutable(item)) throw new Error(`La tarea #${id} no forma parte del trabajo de esta persona.`);
-    if (item.assignedTo && item.assignedTo !== member) throw new Error(`La tarea #${id} ya tiene otro responsable. Abre su ficha para reasignarla expresamente.`);
-  }
-  for (const id of ids) stageChanges(workspace,id,{assignedTo:member,iterationPath:iteration.path});
-}
-export function selectTasks(workspace, member, ids, iterationId, selected) {
-  if (typeof selected!=='boolean') throw new Error('Selección no válida.');
-  if (selected) {planTasks(workspace,member,ids,iterationId);return;}
-  if (!workspace || !workspace.members.some(m=>identityKey(m)===member)) throw new Error('Elige una persona del equipo.');
-  const iteration=workspace.iterations.find(i=>i.id===iterationId);
-  if (!iteration || !Array.isArray(ids) || !ids.length || ids.length>200 || new Set(ids).size!==ids.length) throw new Error('Selección no válida.');
-  const items=effectiveItems(workspace);
-  const tasks=ids.map(id=>items.find(i=>i.id===id));
-  for (const item of tasks) if (!item || !isExecutable(item) || item.assignedTo!==member || item.iterationPath!==iteration.path) throw new Error('Solo puedes desmarcar tareas de esta persona en esta iteración.');
-  for (const item of tasks) stageChanges(workspace,item.id,{assignedTo:'',iterationPath:workspace.settings.backlogIteration.path});
-}
 export function stageChanges(workspace, id, changes) {
   const item = workspace.items.find(i => i.id === id);
   if (!item) throw new Error('La tarea no pertenece a esta planificación.');
@@ -95,7 +71,8 @@ export function stageChanges(workspace, id, changes) {
     if (field === 'assignedTo' && (typeof value !== 'string' || (value !== '' && !workspace.members.some(m => identityKey(m) === value) && value !== item.assignedTo))) throw new Error('Elige una persona del equipo.');
     if (field === 'iterationPath' && ![workspace.settings.backlogIteration.path, ...workspace.iterations.map(i => i.path), item.iterationPath].includes(value)) throw new Error('Elige una iteración del equipo.');
     if (field === 'priority' && (!item.canPrioritize || !Number.isInteger(value) || value < 1 || value > 4)) throw new Error('La prioridad debe estar entre 1 y 4.');
-    if (field === 'remainingWork' && (!item.canEstimateHours || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido.');
+    if (field === 'originalEstimate' && (!estimateFields(workspace,item).originalEstimate || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido para la estimación original.');
+    if (field === 'remainingWork' && (!estimateFields(workspace,item).remainingWork || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido.');
     // The only state change is closing a task or bug with its type's completed state.
     if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !completedState(item,workspace) || value !== completedState(item,workspace))))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
     if (same(item[field], value)) delete draft[field]; else draft[field] = value;
@@ -144,12 +121,6 @@ export function workingCapacity(iteration, capacity, memberId, workingDays = [1,
     if (days.includes(date.getUTCDay()) && !off.some(r => key >= r.start.slice(0,10) && key <= r.end.slice(0,10))) count++;
   }
   return Math.round(count * (record.activities ?? []).reduce((sum, a) => sum + (a.capacityPerDay ?? 0), 0) * 100) / 100;
-}
-function memberHasCapacity(workspace, member, iterationId) {
-  const person=workspace.members.find(m=>identityKey(m)===member);
-  const iteration=workspace.iterations.find(i=>i.id===iterationId);
-  if(!person || !iteration) return false;
-  return workingCapacity(iteration,effectiveCapacity(workspace,iterationId),person.id,workspace.settings.workingDays) !== 0;
 }
 
 // Capacity is staged like a work item: only what differs from the imported copy
@@ -362,25 +333,6 @@ export function planningWorkspace(workspace) {
   if (workspace.sources) for (const plan of projectAllocations.filter(allocationPending)) capacityPendingByIteration[plan.iterationId] = (capacityPendingByIteration[plan.iterationId] ?? 0) + 1;
   else for (const [iterationId, drafts] of Object.entries(workspace.capacityDrafts ?? {})) capacityPendingByIteration[iterationId] = Object.keys(drafts).length;
   return {...workspace,projectAllocations,capacityPendingByIteration,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
-}
-export function confirmPerson(workspace, member, iterationId) {
-  if (!workspace?.members.some(m=>identityKey(m)===member) || !workspace.iterations.some(i=>i.id===iterationId)) throw new Error('Persona o iteración no válida.');
-  if (!memberHasCapacity(workspace,member,iterationId)) throw new Error('Esta persona tiene capacidad 0 y queda fuera del reparto de esta iteración.');
-  const status=personPlanningStatus(planningWorkspace(workspace),member,iterationId);
-  if (!status.canConfirm) throw new Error('Completa las horas y estima las tareas antes de confirmar.');
-  workspace.confirmations ??= {};
-  workspace.confirmations[iterationId] ??= {};
-  workspace.confirmations[iterationId][member]=status.signature;
-}
-export function invalidateConfirmations(workspace) {
-  if (!workspace?.confirmations) return;
-  const current=planningWorkspace(workspace);
-  for (const [iterationId,members] of Object.entries(workspace.confirmations)) {
-    for (const member of Object.keys(members)) {
-      if (!personPlanningStatus(current,member,iterationId).confirmed) delete members[member];
-    }
-    if (!Object.keys(members).length) delete workspace.confirmations[iterationId];
-  }
 }
 
 // The person planning decides which state closes each type of task. Tasks

@@ -1,4 +1,4 @@
-export const IMPORT_FIELDS = ['System.Id','System.Title','System.WorkItemType','System.State','System.TeamProject','System.AssignedTo','System.IterationPath','System.AreaPath','System.Parent','System.Tags','Microsoft.VSTS.Common.Priority','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.StoryPoints','Microsoft.VSTS.Scheduling.Effort','Microsoft.VSTS.Scheduling.Size'];
+export const IMPORT_FIELDS = ['System.Id','System.Title','System.WorkItemType','System.State','System.TeamProject','System.AssignedTo','System.IterationPath','System.AreaPath','System.Parent','System.Tags','Microsoft.VSTS.Common.Priority','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Scheduling.StoryPoints','Microsoft.VSTS.Scheduling.Effort','Microsoft.VSTS.Scheduling.Size'];
 export const wiqlQuote = value => `'${String(value).replace(/'/g,"''")}'`;
 const key = value => String(value ?? '').trim().toLowerCase();
 export function stateAction(config,type,state,rules=[]) {

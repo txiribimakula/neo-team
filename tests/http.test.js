@@ -47,25 +47,9 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:26}}]});
   await post('/api/mode',{mode:'azure'});assert.equal(state.workspace,null);
   await post('/api/mode',{mode:'demo'});assert.equal(state.workspace.drafts[1042].remainingWork,26,'switching workspaces retains the draft');
-  result=await post('/api/task-selection',{member:'ana@example.test',ids:[1053],iterationId:'sprint-24',selected:true});assert.equal(result.response.status,200);
-  state=await getState();assert.equal(state.workspace.effectiveItems.find(i=>i.id===1053).assignedTo,'ana@example.test');
-  result=await post('/api/task-selection',{member:'marcos@example.test',ids:[1053],iterationId:'sprint-24',selected:true});
-  assert.equal(result.response.status,400,'choosing a task never silently takes another owner task');
-  result=await post('/api/task-selection',{member:'ana@example.test',ids:[1053],iterationId:'sprint-24',selected:false});assert.equal(result.response.status,200);
-  state=await getState();assert.equal(state.workspace.effectiveItems.find(i=>i.id===1053).assignedTo,'');
-  result=await post('/api/participants',{assignments:[{id:1001,members:['ana@example.test']}]});assert.equal(result.response.status,404,'branch sharing no longer exists');
+  for (const removed of ['/api/participants','/api/task-selection','/api/confirm-person']) { result=await post(removed,{}); assert.equal(result.response.status,404,`${removed} no longer exists`); }
   const moduleResponse=await fetch(url+'/hierarchy.js');assert.equal(moduleResponse.status,200);
   const saved=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));assert.equal(saved.demo.drafts[1042].remainingWork,26);assert.equal(saved.config.project,'Project');
-  const member='ana@example.test',iterationId='sprint-24';
-  result=await post('/api/confirm-person',{member,iterationId});assert.equal(result.response.status,400);
-  const capacity=state.workspace.capacityHours[iterationId][state.workspace.members.find(m=>m.uniqueName===member).id];
-  await post('/api/stage',{edits:[{id:1042,changes:{assignedTo:member,iterationPath:state.workspace.iterations[0].path,remainingWork:capacity}}]});
-  result=await post('/api/confirm-person',{member,iterationId});assert.equal(result.response.status,200);
-  state=await getState();assert.ok(state.workspace.confirmations[iterationId][member]);
-  const confirmedDisk=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));
-  assert.equal(confirmedDisk.demo.confirmations[iterationId][member],state.workspace.confirmations[iterationId][member]);
-  await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:capacity+1}}]});
-  assert.equal(state.workspace.confirmations[iterationId]?.[member],undefined);
 
   result=await post('/api/create',{type:'Task',title:'Created through HTTP',parent:1001,remainingWork:4});
   assert.equal(result.response.status,200);
@@ -80,7 +64,6 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   const baseHours=state.workspace.capacityHours[sprint.id].ana;
   result=await post('/api/capacity',{iterationId:sprint.id,key:'ana',activities:[{name:'Development',capacityPerDay:10}]});
   assert.equal(result.response.status,200);assert.equal(state.workspace.capacityHours[sprint.id].ana,baseHours*2);
-  assert.equal(state.workspace.confirmations[sprint.id]?.[member],undefined,'a capacity change reopens the confirmation');
   result=await post('/api/capacity',{iterationId:sprint.id,key:'team',daysOff:[{start:firstDay,end:firstDay}]});
   assert.equal(result.response.status,200);assert.equal(state.workspace.capacityHours[sprint.id].ana,baseHours*2-10);
   result=await post('/api/capacity',{iterationId:sprint.id,key:'ana',activities:[{name:'Development',capacityPerDay:99}]});

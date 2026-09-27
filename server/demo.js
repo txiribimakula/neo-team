@@ -32,12 +32,13 @@ export function createDemo() {
     'System.TeamProject': 'Neo Platform', 'System.AreaPath': 'Neo Platform\\Producto',
     'System.IterationPath': scheduled ? iterations[0].path : 'Neo Platform',
     'System.AssignedTo': members[person] || '', 'Microsoft.VSTS.Common.Priority': priority,
-    ...(hours !== null ? { 'Microsoft.VSTS.Scheduling.RemainingWork': hours } : {}),
+    ...(hours !== null ? { 'Microsoft.VSTS.Scheduling.RemainingWork': hours, ...(type === 'Task' ? { 'Microsoft.VSTS.Scheduling.OriginalEstimate': hours } : {}) } : {}),
     ...(type === 'User Story' ? { 'Microsoft.VSTS.Scheduling.StoryPoints': 5 } : {}), 'System.Tags': tag,
   } }));
   const capacities = Object.fromEntries(iterations.map(i => [i.id, { daysOff: [], teamMembers: members.map((m, index) => ({ teamMember: m, activities: [{ name: 'Development', capacityPerDay: [5,6,4,6][index] }], daysOff: index === 2 ? [{ start: date(0), end: date(1) }] : [] })) }]));
   const workspace = { mode: 'demo', importedAt: new Date().toISOString(), config: { organization: 'ejemplo', project: 'Neo Platform', team: 'Equipo de producto' },
-    settings: { backlogIteration: { path: 'Neo Platform' }, workingDays: [1,2,3,4,5] }, iterations, members, capacities, items, drafts: {}, conflicts: {}, warnings: [] };
+    settings: { backlogIteration: { path: 'Neo Platform' }, workingDays: [1,2,3,4,5] }, iterations, members, capacities, items, drafts: {}, conflicts: {}, warnings: [],
+    estimateFields: { Task: { originalEstimate: 'Original Estimate', remainingWork: 'Remaining Work' }, Bug: { originalEstimate: null, remainingWork: 'Remaining Work' } } };
   upgradeDemoHierarchy(workspace);
   upgradeDemoPreviousIteration(workspace);
   return workspace;

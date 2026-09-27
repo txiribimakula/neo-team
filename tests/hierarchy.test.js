@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hierarchy, ancestors, eligibleTasks, filterHierarchy } from '../dist/hierarchy.js';
+import { hierarchy, ancestors, filterHierarchy } from '../dist/hierarchy.js';
 import { createDemo, upgradeDemoHierarchy } from '../server/demo.js';
-import { planTasks, stageChanges, planReview } from '../server/planner.js';
+import { stageChanges } from '../server/planner.js';
 const ana='ana@example.test', marcos='marcos@example.test';
 
 test('hierarchy follows real parents through Epic, Feature, Story and Task/Bug',()=>{
@@ -20,30 +20,8 @@ test('orphans, self-parents and cycles remain visible exactly once',()=>{
   assert.deepEqual(ancestors(3,tree),[]);assert.ok(ancestors(1,tree).length<2);
 });
 
-test('the same open leaf is eligible for several people; completed work is not',()=>{
-  const ws=createDemo();
-  for(const person of [ana,marcos]) assert.ok(eligibleTasks(ws,person).some(i=>i.id===1053));
-  ws.completedStates={Task:'Done'};stageChanges(ws,1053,{state:'Done'});
-  assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1053));
-});
-
-test('batch planning only accepts open tasks and writes a unique owner',()=>{
-  const ws=createDemo();
-  planTasks(ws,ana,[1053,1057],'sprint-24');
-  assert.deepEqual(ws.drafts[1053],{assignedTo:ana,iterationPath:ws.iterations[0].path});
-  assert.equal(planReview(ws,ws.items).length,2);
-  const before=structuredClone(ws.drafts);
-  assert.throws(()=>planTasks(ws,ana,[1054,1038],'sprint-24'),/otro responsable/);
-  assert.deepEqual(ws.drafts,before);
-  assert.throws(()=>planTasks(ws,marcos,[1053],'sprint-24'),/otro responsable/);
-  assert.throws(()=>planTasks(ws,ana,[900],'sprint-24'),/no forma parte/);
-  assert.throws(()=>planTasks(ws,ana,[1053,1053],'sprint-24'),/distintas/);
-  assert.throws(()=>planTasks(ws,ana,[1053],'unknown'),/iteración/);
-});
-
-test('ancestor context cannot be planned or sent to Azure',()=>{
+test('ancestor context cannot be edited or sent to Azure',()=>{
   const ws=createDemo();ws.items.find(i=>i.id===1053).contextOnly=true;
-  assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1053));
   assert.throws(()=>stageChanges(ws,1053,{assignedTo:ana}),/contexto/);
 });
 
@@ -55,26 +33,6 @@ test('demo migration enriches the old example without discarding local work',()=
   assert.deepEqual(ws.drafts,{1042:{remainingWork:99}});
   assert.equal(ws.items.find(i=>i.id===1042).parent,1001);
   assert.equal(upgradeDemoHierarchy(ws),false);
-});
-
-test('selection preview counts only new eligible tasks and never turns points into hours',async()=>{
-  const {selectionSummary}=await import('../dist/hierarchy.js');
-  const ws=createDemo();ws.capacityHours={'sprint-24':{ana:24}};
-  const result=selectionSummary(ws,ana,'sprint-24',[1053,1053,1057,1042,1038]);
-  assert.equal(result.plannedHours,20);assert.equal(result.selectedHours,6);assert.equal(result.projectedHours,26);assert.equal(result.freeHours,-2);
-  assert.equal(result.unknownSelected,1,'bug without hours is unknown, not free work');
-  assert.deepEqual(result.selected.map(i=>i.id),[1053,1057]);assert.deepEqual(result.invalidIds,[1042,1038],'already planned and owned by someone else');
-});
-
-test('selection preview uses saved drafts and distinguishes zero from unknown capacity',async()=>{
-  const {selectionSummary}=await import('../dist/hierarchy.js');
-  const ws=createDemo();stageChanges(ws,1042,{remainingWork:30});
-  let result=selectionSummary(ws,ana,'sprint-24',[1053]);
-  assert.equal(result.plannedHours,38);assert.equal(result.capacity,null);assert.equal(result.freeHours,null);
-  ws.capacityHours={'sprint-24':{ana:0}};
-  result=selectionSummary(ws,ana,'sprint-24',[1053]);assert.equal(result.capacity,0);assert.equal(result.freeHours,-38);assert.deepEqual(result.selected,[]);
-  planTasks(ws,ana,[1053],'sprint-24');
-  result=selectionSummary(ws,marcos,'sprint-24',[1053]);assert.deepEqual(result.invalidIds,[1053]);assert.equal(result.selectedHours,0);
 });
 
 test('the previous iteration is the latest that starts earlier, whatever the listed order',async()=>{
@@ -106,4 +64,14 @@ test('each project keeps an independent hierarchy even with parent links across 
   assert.deepEqual(tree.roots.map(n=>n.id),[10,5,21]);
   assert.deepEqual(tree.nodes.get(10).children.map(n=>n.id),[11]);
   assert.deepEqual(ancestors(21,tree),[]);
+});
+test('estimate fields follow each type in Azure, with the usual Task fields when unknown',async()=>{
+  const {estimateFields}=await import('../dist/hierarchy.js');
+  const task={type:'Task',canEstimateHours:true,originalEstimate:null}, bug={type:'Bug',canEstimateHours:false,originalEstimate:null};
+  assert.deepEqual(estimateFields({},task),{originalEstimate:'Original Estimate',remainingWork:'Remaining Work'});
+  assert.deepEqual(estimateFields({},bug),{originalEstimate:null,remainingWork:null});
+  const scrum={estimateFields:{Task:{originalEstimate:null,remainingWork:'Remaining Work'}}};
+  assert.deepEqual(estimateFields(scrum,task),{originalEstimate:null,remainingWork:'Remaining Work'},'a process without Original Estimate does not offer it');
+  const joint={sources:[{id:'a',estimateFields:{Task:{originalEstimate:'Estimación original',remainingWork:'Trabajo restante'}}}]};
+  assert.equal(estimateFields(joint,{...task,sourceId:'a'}).remainingWork,'Trabajo restante','each project uses its own field names');
 });

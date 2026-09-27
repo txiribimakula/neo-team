@@ -7,7 +7,7 @@ const period = iteration => {
   return start && end ? `${start}/${end}` : null;
 };
 export function sourcesOf(workspace) {
-  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates }] : []);
+  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates, estimateFields: workspace.estimateFields }] : []);
 }
 export function sourceFor(workspace, item) {
   const source = sourcesOf(workspace).find(s => s.id === item?.sourceId) ?? (!workspace.sources ? sourcesOf(workspace)[0] : null);
@@ -90,7 +90,7 @@ export function mergeProjects(previous, imported) {
     });
     workspace.capacities[iteration.id] = { teamMembers, daysOff: structuredClone(oldCapacity?.daysOff ?? []) };
   }
-  workspace.capacityDrafts = {}; workspace.capacityConflicts = {}; workspace.confirmations = {};
+  workspace.capacityDrafts = {}; workspace.capacityConflicts = {};
   // Adding a source is only permitted without drafts; participation is local and retained.
   workspace.drafts = {}; workspace.conflicts = {};
   return workspace;

@@ -240,6 +240,8 @@ export class AzureGateway {
     const relevant=new Set(['Task','Bug',...levels.flatMap(l=>(l.workItemTypes ?? []).map(t=>typeof t==='string' ? t : t.name))]);
     if(relevant.size===2) for(const type of ['Epic','Feature','User Story','Product Backlog Item','Requirement','Issue']) relevant.add(type);
     const types=catalog.filter(t=>relevant.has(t.name)), workflows=[], completedStates={};
+    const fieldName=(type,ref)=>type.fields.find(f=>f.referenceName===ref)?.name ?? null;
+    const estimateFields=Object.fromEntries(types.filter(t=>Array.isArray(t.fields)).map(t=>[t.name,{originalEstimate:fieldName(t,'Microsoft.VSTS.Scheduling.OriginalEstimate'),remainingWork:fieldName(t,'Microsoft.VSTS.Scheduling.RemainingWork')}]));
     // Classification is complete before the large queries run. Unknown custom
     // states request a decision, with one example item rather than the backlog.
     for(const {name:type} of types) {
@@ -292,7 +294,7 @@ export class AzureGateway {
       report('capacity',`Capacidad consultada: «${iteration.name}».`,{capacities:Object.keys(capacities).length});
     }
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
-    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, warnings, drafts: {}, conflicts: {}, participants: {} };
+    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   // Pull request review: repositories, pull requests and their changes are read
   // through the local MCP; comments are only added after the person confirms them.
@@ -336,7 +338,7 @@ export class AzureGateway {
     return validateOnly ? raw : normalizeItem(raw);
   }
   async update(config, id, revision, fields) {
-    const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', state: 'System.State' };
+    const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', originalEstimate: 'Microsoft.VSTS.Scheduling.OriginalEstimate', state: 'System.State' };
     const guarded = revision !== null && revision !== undefined;
     try {
       return normalizeItem(await this.call('wit_work_item_write', {

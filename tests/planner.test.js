@@ -36,7 +36,10 @@ test('staging normalizes reversions and rejects foreign assignments and fields',
   stageChanges(ws,1042,{remainingWork:12});assert.equal(ws.drafts[1042],undefined);
   for (const patch of [{assignedTo:'intruder@example.test'},{iterationPath:'Other\\Sprint'},{remainingWork:-1},{remainingWork:Infinity},{priority:5},{state:'Active'},{state:null}]) assert.throws(()=>stageChanges(ws,1042,patch));
   assert.throws(()=>stageChanges(ws,9999,{priority:1}));
-  assert.throws(()=>stageChanges(ws,1047,{remainingWork:1}));
+  assert.throws(()=>stageChanges(ws,1047,{originalEstimate:1}),/estimación original/,'the example Bug has no Original Estimate');
+  stageChanges(ws,1042,{originalEstimate:10});assert.equal(ws.drafts[1042].originalEstimate,10);
+  ws.estimateFields.Bug={originalEstimate:null,remainingWork:null};
+  assert.throws(()=>stageChanges(ws,1047,{remainingWork:1}),'a type without the field in Azure cannot be given hours');
 });
 test('capacity honors working days, overlapping holidays and zero capacity',()=>{
   const iteration={attributes:{startDate:'2026-09-07',finishDate:'2026-09-18'}};
@@ -175,7 +178,6 @@ test('invalid hierarchy and creation fields are rejected; local creation can be 
 });
 
 test('reviewing the previous iteration carries tasks over or closes them with the completed state of their type',async t=>{
-  const {eligibleTasks}=await import('../dist/hierarchy.js');const {planningWorkspace}=await import('../server/planner.js');
   const f=await fixture(t),next=f.workspace().iterations[0].path,previous=f.workspace().iterations.find(i=>i.past);
   assert.equal(f.workspace().items.find(i=>i.id===1030).iterationPath,previous.path);
   await f.stage(1030,{iterationPath:next});await f.stage(1031,{state:'Closed'});
@@ -186,8 +188,7 @@ test('reviewing the previous iteration carries tasks over or closes them with th
   assert.deepEqual(result.failures,[]);
   assert.deepEqual(f.calls.map(c=>[c.id,c.changes]),[[1030,{iterationPath:next}],[1031,{state:'Closed'}]]);
   assert.equal(f.workspace().items.find(i=>i.id===1031).state,'Closed');
-  assert.ok(!eligibleTasks(planningWorkspace(f.workspace()),'marcos@example.test').some(i=>i.id===1031),'a closed task is no longer offered for planning');
-  assert.ok(eligibleTasks(planningWorkspace(f.workspace()),'ana@example.test').some(i=>i.id===1030),'a carried-over task stays with its owner');
+  assert.equal(f.workspace().items.find(i=>i.id===1030).assignedTo,'ana@example.test','a carried-over task stays with its owner');
   await f.stage(1032,{state:'Closed'});await f.stage(1032,{state:'New'});
   assert.equal(f.workspace().drafts[1032],undefined,'undoing restores the imported state');
 });
