@@ -519,7 +519,11 @@ function selected() {
   const ws = state.workspace;
   if (!ws) return null;
   const options = planningIterations();
-  if (!options.some(i => i.id === selectedIteration)) selectedIteration = (options.find(i => i.attributes?.timeFrame === 1 || i.attributes?.timeFrame === 'current') || options[0])?.id || '';
+  // By default the next iteration is planned: the current one is already under way.
+  if (!options.some(i => i.id === selectedIteration)) {
+    const kinds=iterationKinds(options), pick=kind=>options.find(i=>kinds.get(i.id)===kind);
+    selectedIteration=(pick('next') || pick('future') || pick('current') || options[0])?.id || '';
+  }
   return options.find(i => i.id === selectedIteration);
 }
 // The previous iteration is imported only to be reviewed, never planned.
