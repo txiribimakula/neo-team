@@ -356,3 +356,6 @@ section.board-column:not(.backlog){padding-right:4px}
 .mention-option{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:6px 8px;border-radius:6px;text-align:left;font-size:13px;cursor:pointer}.mention-option .avatar{width:24px;height:24px;font-size:10px}
 .mention-option[aria-selected="true"],.mention-option:hover{background:#eef5e3}
 .comment-actions{display:flex;justify-content:flex-end}.mention{color:#2d5a96;font-weight:650}.comment-text{white-space:pre-wrap;font-size:14px;margin:6px 0 0}
+/* People without capacity in the sprint still get a lane: last, dimmed and marked. */
+.member.no-capacity .member-toggle{opacity:.6}.member.no-capacity:hover .member-toggle,.member.no-capacity:not(.collapsed) .member-toggle{opacity:1}
+.no-capacity-badge{display:inline-block;margin-left:8px;background:#fbf1d9;color:#8a6412;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;vertical-align:middle}

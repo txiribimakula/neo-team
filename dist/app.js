@@ -540,13 +540,17 @@ function planningMembers(iterationId=selectedIteration) {
   const ws=state.workspace;
   return ws?.members.filter(member=>hasPlanningCapacity(ws,key(member),iterationId)) ?? [];
 }
-function restrictAssignees(select,current='') {
+// Everyone can be chosen; people without capacity in the iteration are marked.
+function restrictAssignees(select) {
   const allowed=new Set(planningMembers().map(key));
-  for(const option of [...select.options]) {
-    if(!option.value || allowed.has(option.value)) continue;
-    if(option.value===current) option.textContent+=' · capacidad 0';
-    else option.remove();
-  }
+  for(const option of [...select.options]) if(option.value && !allowed.has(option.value) && state.workspace.members.some(m=>key(m)===option.value)) option.textContent+=' · sin capacidad';
+}
+// Assigning to someone without capacity is allowed; it is only flagged.
+function capacityWarning(owner, iteration=selected()) {
+  const member=owner && iteration && state.workspace.members.find(m=>key(m)===owner);
+  if (!member) return '';
+  const capacity=state.workspace.capacityHours?.[iteration.id]?.[member.id];
+  return capacity===0 ? `${member.displayName} no tiene capacidad en ${iteration.name}.` : capacity==null ? `${member.displayName} no tiene capacidad definida en ${iteration.name}.` : '';
 }
 const plain = text => String(text ?? '').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase();
 function matchesTask(item, text) {
@@ -982,9 +986,9 @@ function lane(member, allItems, index, iteration) {
   const capacity = state.workspace.capacityHours[iteration.id]?.[member.id] ?? null;
   const unknown = owned.filter(i=>i.canEstimateHours && i.remainingWork === null).length;
   const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
-  const open=expandedLanes.has(key(member)), id=`lane-${index}`;
+  const open=expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
   const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
-  return `<section class="member ${open ? '' : 'collapsed'}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button><div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
+  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button><div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
 }
 // The left panel alternates between the available backlog and the sprint's
 // unassigned tasks; people take one row each on the right.
@@ -1007,21 +1011,20 @@ function leftPanelCount() {
 }
 function board(iteration, planned) {
   const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)), unassigned=unassignedTasks(iteration);
-  const members=planningMembers(iteration.id), activeKeys=new Set(members.map(key));
+  const members=ws.members, available=new Set(planningMembers(iteration.id).map(key));
   const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
-  const excluded=planned.filter(i=>i.assignedTo && ws.members.some(m=>key(m)===i.assignedTo) && !activeKeys.has(i.assignedTo));
-  const considered=planned.length-excluded.length;
   // People whose hours are all assigned go last. The order holds while assigning and
   // is refreshed on entering the step or closing someone, so rows never jump.
   const full=member=>{const capacity=ws.capacityHours[iteration.id]?.[member.id] ?? null, hours=planned.filter(i=>i.assignedTo===key(member)).reduce((sum,i)=>sum+(i.remainingWork || 0),0);return capacity!==null && capacity>0 && hours>=capacity-0.005;};
   const orderKey=`${iteration.id}|${members.map(key).join(',')}`;
-  if (laneOrder?.key!==orderKey) laneOrder={key:orderKey,ids:members.map((m,index)=>({id:key(m),index,full:full(m)})).sort((a,b)=>Number(a.full)-Number(b.full) || a.index-b.index).map(m=>m.id)};
+  // Available first, then those with every hour assigned, then those without capacity.
+  if (laneOrder?.key!==orderKey) laneOrder={key:orderKey,ids:members.map((m,index)=>({id:key(m),index,rank:!available.has(key(m)) || ws.capacityHours[iteration.id]?.[m.id]==null ? 2 : full(m) ? 1 : 0})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(m=>m.id)};
   const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop=""${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i)).join('')}</div></section>` : '';
-  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${considered} tareas${excluded.length ? ` · ${excluded.length} fuera del reparto` : ''}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Fuera del reparto','Tareas asignadas a personas con capacidad 0',excluded,'zero-capacity')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
+  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
 function render() {
@@ -1500,7 +1503,9 @@ document.addEventListener('submit', async event => {
       const values = Object.fromEntries(new FormData(event.target));
       if ('priority' in values) values.priority = Number(values.priority);
       if ('remainingWork' in values) { if (values.remainingWork === '') delete values.remainingWork; else values.remainingWork = Number(values.remainingWork); }
-      await stage(Number(event.target.dataset.task),values); modal.close(); toast('Tarea guardada en local.');
+      await stage(Number(event.target.dataset.task),values); modal.close();
+      const iteration=state.workspace.iterations.find(i=>i.path===values.iterationPath), warning=values.assignedTo && iteration && capacityWarning(values.assignedTo,iteration);
+      toast(warning ? `Tarea guardada en local. ${warning}` : 'Tarea guardada en local.', warning ? 'warning' : 'info');
     }
   } catch (error) { errorInModal(error); }
 });
@@ -1559,7 +1564,11 @@ document.addEventListener('drop',async event => {
   const id=Number(event.dataTransfer.getData('application/x-neo-task')); if (!id) return;
   const target=zone.dataset.drop, iteration=selected();
   if (!iteration) return;
-  try { await stage(id,target === 'backlog' ? {iterationPath:state.workspace.settings.backlogIteration.path} : {assignedTo:target,iterationPath:iteration.path});toast('Planificación guardada en local.'); } catch(error){toast(error.message,'error');}
+  try {
+    await stage(id,target === 'backlog' ? {iterationPath:state.workspace.settings.backlogIteration.path} : {assignedTo:target,iterationPath:iteration.path});
+    const warning=target!=='backlog' && capacityWarning(target,iteration);
+    toast(warning ? `Asignada en local. ${warning}` : 'Planificación guardada en local.', warning ? 'warning' : 'info');
+  } catch(error){toast(error.message,'error');}
 });
 
 // Optional WebMCP access shares the same local staging path as the UI.
