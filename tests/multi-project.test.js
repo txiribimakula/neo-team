@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mergeProjects,sourceFor,remoteFields,planningItem} from '../server/multi-project.js';
-import {Planner,projectCapacityPlans,stageCapacity,stageChanges,planningWorkspace,createLocalItem} from '../server/planner.js';
+import {Planner,projectCapacityPlans,stageCapacity,stageChanges,planningWorkspace,createLocalItem,discardLocal,discardAllocation,allocationPending} from '../server/planner.js';
 const member={id:'ana',displayName:'Ana',uniqueName:'ana@example.test'};
 function project(name,id,hours=0) {
   return {mode:'azure',config:{organization:'org',project:name,team:name+' team'},settings:{backlogIteration:{path:name},workingDays:[1,2,3,4,5]},members:[member],iterations:[{id:'iteration-'+name,name:'Sprint '+name,path:name+'\\Sprint',attributes:{startDate:'2026-09-14T00:00:00Z',finishDate:'2026-09-18T00:00:00Z'}}],capacities:{['iteration-'+name]:{daysOff:[],teamMembers:[{teamMember:member,activities:[{name:'Development',capacityPerDay:8}],daysOff:[]}]}},items:[{id,rev:1,type:'Task',title:'Task '+name,state:'Active',assignedTo:member.uniqueName,iterationPath:hours ? name+'\\Sprint' : name,remainingWork:hours,canEstimateHours:true,areaPath:name}],drafts:{},conflicts:{},warnings:[],completedStates:{Task:'Closed'},participants:{}};
@@ -126,4 +126,38 @@ test('capacity or task reads that fail do not stop writing the local changes; un
  assert.deepEqual(result.failures,[]);assert.deepEqual(result.capacity.failures,[]);
  assert.deepEqual(writes,[['task','A',1,ws.items.find(i=>i.id===1).rev],['capacity','A','ana'],['capacity','B','ana']]);
  assert.ok(review.unreadable.length,'the review says what could not be read');
+});
+test('a recalculated project split can be discarded: Azure keeps its value until the split changes again',()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10));
+ const iterationId=ws.iterations[0].id;
+ stageCapacity(ws,iterationId,{key:'ana',activities:[{name:'Development',capacityPerDay:6}]});
+ assert.equal(planningWorkspace(ws).pendingChanges,2);
+ discardLocal(ws);
+ assert.deepEqual(ws.capacityDrafts,{});
+ const pending=planningWorkspace(ws).pendingChanges;
+ // Whatever the imported split does not match is kept as Azure has it.
+ assert.equal(pending,0,'discarding everything leaves nothing pending');
+ stageChanges(ws,2,{assignedTo:''});
+ assert.ok(planningWorkspace(ws).pendingChanges>1,'a later change proposes the split again');
+ const plan=projectCapacityPlans(ws).find(p=>allocationPending(p));
+ discardAllocation(ws,plan.sourceId,plan.iterationId,plan.key);
+ assert.ok(!allocationPending(projectCapacityPlans(ws).find(p=>p.sourceId===plan.sourceId)));
+ assert.throws(()=>discardAllocation(ws,plan.sourceId,plan.iterationId,plan.key),/No hay cambios/);
+});
+test('an imported split that differs from the task hours is pending and can be discarded',()=>{
+ const ws=mergeProjects(project('A',1,30),project('B',2,10));
+ ws.sources[0].capacities['iteration-A'].teamMembers[0].activities[0].capacityPerDay=1;
+ assert.ok(planningWorkspace(ws).pendingChanges>0);
+ discardLocal(ws);
+ assert.equal(planningWorkspace(ws).pendingChanges,0);
+});
+test('downloading a joint iteration rebuilds the single budget from every project',async()=>{
+ const {downloadCapacity}=await import('../server/refresh.js');
+ const ws=mergeProjects(project('A',1,30),project('B',2,10)), iterationId=ws.iterations[0].id;
+ stageCapacity(ws,iterationId,{key:'ana',activities:[{name:'Development',capacityPerDay:9}]});
+ const remotes={A:project('A',1,30),B:project('B',2,10)}, read=[];
+ const next=await downloadCapacity(ws,iterationId,{open:async()=>{},capacity:async(c,id)=>{read.push([c.project,id]);return structuredClone(remotes[c.project].capacities[id]);}});
+ assert.deepEqual(read,[['A','iteration-A'],['B','iteration-B']]);
+ assert.deepEqual(next.capacityDrafts,{});
+ assert.equal(next.capacityDownloads[iterationId].local.ana.activities[0].capacityPerDay,9);
 });

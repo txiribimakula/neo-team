@@ -1,4 +1,4 @@
-import {refreshSection} from './refresh.js';
+import {refreshSection,downloadCapacity} from './refresh.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
+import { Planner, createLocalItem, discardLocal, stageChanges, resolveConflict, planningWorkspace, confirmPerson, setParticipants, selectTasks, toggleParticipation, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -109,7 +109,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/confirm-person', '/api/task-selection', '/api/participation', '/api/plan-tasks', '/api/undo-plan', '/api/participants', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/discard-allocation', '/api/capacity-download-choice', '/api/confirm-person', '/api/task-selection', '/api/participation', '/api/plan-tasks', '/api/undo-plan', '/api/participants', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -162,7 +162,7 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
       operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // On demand, cancellable: the person chooses the completed state from this list.
@@ -356,6 +356,14 @@ const server = http.createServer(async (req, res) => {
             if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;operation={...operation,stateReview};}
             throw error;
           }
+        } else if(path==='/api/download-capacity') {
+          const workspace=await downloadCapacity(store.data.azure,input.iterationId,azure,progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
+          const data=structuredClone(store.data);data.azure=workspace;
+          step('Guardando la copia local…');await store.save(data);planner.review=null;
+        } else if (path === '/api/capacity-download-choice') {
+          const data = structuredClone(store.data);
+          chooseDownloadedCapacity(data[data.mode], input.iterationId, input.key, input.choice);
+          await store.save(data); planner.review = null;
         } else if (path === '/api/import') {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
           if (Object.keys(store.data.azure?.drafts ?? {}).length || Object.keys(store.data.azure?.capacityDrafts ?? {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de importar proyectos.');
@@ -451,6 +459,11 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('No hay planificación.');
           discardCapacity(workspace, input.iterationId, input.key);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/discard-allocation') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace?.sources) throw fail('No hay reparto de capacidad entre proyectos.');
+          discardAllocation(workspace, input.sourceId, input.iterationId, input.key);
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve-capacity') {
           const data = structuredClone(store.data);

@@ -168,3 +168,34 @@ test('a capacity that could not be read during the review is checked again befor
   assert.deepEqual(written.capacity.failures,[]);
   assert.equal(remote[iteration.id].teamMembers.find(m=>m.teamMember.id==='ana').activities[0].capacityPerDay,7);
 });
+
+test('downloading one iteration overwrites local capacity and keeps each local difference to choose from',async()=>{
+  const { downloadCapacity } = await import('../server/refresh.js');
+  const { chooseDownloadedCapacity } = await import('../server/planner.js');
+  const { workspace, iteration } = demo();
+  workspace.mode='azure';
+  const remote=structuredClone(workspace.capacities[iteration.id]);
+  remote.teamMembers.find(m=>m.teamMember.id==='marcos').activities=[{name:'Development',capacityPerDay:2}];
+  const other=workspace.iterations[1];
+  stageCapacity(workspace,iteration.id,{key:'ana',activities:[{name:'Development',capacityPerDay:7}]});
+  if(other) stageCapacity(workspace,other.id,{key:'ana',activities:[{name:'Development',capacityPerDay:3}]});
+  const calls=[];
+  const azure={open:async()=>{},capacity:async(config,id)=>{calls.push(id);return structuredClone(remote);}};
+  const next=await downloadCapacity(workspace,iteration.id,azure);
+  assert.deepEqual(calls,[iteration.id],'only the chosen iteration is read');
+  assert.equal(next.capacityDrafts[iteration.id],undefined,'Azure replaces the local drafts of that iteration');
+  if(other) assert.ok(next.capacityDrafts[other.id],'other iterations keep their drafts');
+  assert.deepEqual(Object.keys(next.capacityDownloads[iteration.id].local).sort(),['ana','marcos']);
+  assert.equal(next.capacityDownloads[iteration.id].local.ana.activities[0].capacityPerDay,7);
+  chooseDownloadedCapacity(next,iteration.id,'ana','local');
+  assert.equal(next.capacityDrafts[iteration.id].ana.activities[0].capacityPerDay,7,'keeping mine stages it to sync');
+  chooseDownloadedCapacity(next,iteration.id,'marcos','azure');
+  assert.equal(next.capacityDownloads[iteration.id],undefined,'every difference validated');
+  assert.equal(capacityEntry(next.capacities[iteration.id],'marcos').activities[0].capacityPerDay,2);
+  assert.throws(()=>chooseDownloadedCapacity(next,iteration.id,'marcos','azure'),/No hay diferencias/);
+  // Setting another value also settles the difference.
+  const again=await downloadCapacity(next,iteration.id,azure);
+  assert.ok(again.capacityDownloads[iteration.id].local.ana);
+  stageCapacity(again,iteration.id,{key:'ana',activities:[{name:'Development',capacityPerDay:6}]});
+  assert.equal(again.capacityDownloads[iteration.id],undefined);
+});

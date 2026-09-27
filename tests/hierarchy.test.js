@@ -20,20 +20,11 @@ test('orphans, self-parents and cycles remain visible exactly once',()=>{
   assert.deepEqual(ancestors(3,tree),[]);assert.ok(ancestors(1,tree).length<2);
 });
 
-test('shared branches inherit additively and the same leaf is eligible for several people',()=>{
-  const ws=createDemo();ws.participants={};
-  setParticipants(ws,[{id:900,members:[ana,ana]},{id:910,members:[marcos]}]);
-  assert.deepEqual(ws.participants[900],[ana]);
-  for(const person of [ana,marcos])assert.ok(eligibleTasks(ws,person).some(i=>i.id===1053));
-  assert.ok(!eligibleTasks(ws,marcos).some(i=>i.id===1059));
-  const sources=participantSources(ws.items.find(i=>i.id===1053),ws);
-  assert.equal(sources.get(ana)[0].id,900);assert.equal(sources.get(marcos)[0].id,910);
-  assert.deepEqual(ws.drafts,{},'local participation never stages Azure fields');
-  setParticipants(ws,[{id:1059,members:[ana,marcos]}]);
-  assert.ok(eligibleTasks(ws,marcos).some(i=>i.id===1059),'a task itself can be shared');
-  setParticipants(ws,[{id:900,members:[]}]);
+test('the same open leaf is eligible for several people; completed work is not',()=>{
+  const ws=createDemo();
+  for(const person of [ana,marcos]) assert.ok(eligibleTasks(ws,person).some(i=>i.id===1053));
+  ws.completedStates={Task:'Done'};stageChanges(ws,1053,{state:'Done'});
   assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1053));
-  assert.ok(eligibleTasks(ws,ana).some(i=>i.id===1042),'the current task owner remains eligible');
 });
 
 test('invalid participant batches cannot partially alter the local sharing map',()=>{
@@ -42,15 +33,15 @@ test('invalid participant batches cannot partially alter the local sharing map',
   assert.deepEqual(ws.participants,before);
 });
 
-test('batch planning only accepts eligible tasks, retains sharing and writes a unique owner',()=>{
-  const ws=createDemo();setParticipants(ws,[{id:910,members:[ana,marcos]}]);
+test('batch planning only accepts open tasks and writes a unique owner',()=>{
+  const ws=createDemo();
   const sharing=structuredClone(ws.participants);
   planTasks(ws,ana,[1053,1057],'sprint-24');
   assert.deepEqual(ws.drafts[1053],{assignedTo:ana,iterationPath:ws.iterations[0].path});
   assert.deepEqual(ws.participants,sharing);
   assert.equal(planReview(ws,ws.items).length,2);
   const before=structuredClone(ws.drafts);
-  assert.throws(()=>planTasks(ws,ana,[1054,1042],'sprint-24'),/no forma parte/);
+  assert.throws(()=>planTasks(ws,ana,[1054,1038],'sprint-24'),/otro responsable/);
   assert.deepEqual(ws.drafts,before);
   assert.throws(()=>planTasks(ws,marcos,[1053],'sprint-24'),/otro responsable/);
   assert.throws(()=>planTasks(ws,ana,[900],'sprint-24'),/no forma parte/);
@@ -77,11 +68,10 @@ test('demo migration enriches the old example without discarding local work',()=
 test('selection preview counts only new eligible tasks and never turns points into hours',async()=>{
   const {selectionSummary}=await import('../dist/hierarchy.js');
   const ws=createDemo();ws.capacityHours={'sprint-24':{ana:24}};
-  setParticipants(ws,[{id:1057,members:[ana]}]);
-  const result=selectionSummary(ws,ana,'sprint-24',[1053,1053,1057,1042,1054]);
+  const result=selectionSummary(ws,ana,'sprint-24',[1053,1053,1057,1042,1038]);
   assert.equal(result.plannedHours,20);assert.equal(result.selectedHours,6);assert.equal(result.projectedHours,26);assert.equal(result.freeHours,-2);
   assert.equal(result.unknownSelected,1,'bug without hours is unknown, not free work');
-  assert.deepEqual(result.selected.map(i=>i.id),[1053,1057]);assert.deepEqual(result.invalidIds,[1042,1054]);
+  assert.deepEqual(result.selected.map(i=>i.id),[1053,1057]);assert.deepEqual(result.invalidIds,[1042,1038],'already planned and owned by someone else');
 });
 
 test('selection preview uses saved drafts and distinguishes zero from unknown capacity',async()=>{

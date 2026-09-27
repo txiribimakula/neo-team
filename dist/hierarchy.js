@@ -103,8 +103,8 @@ export function eligibleTasks(workspace, member, iterationId) {
 function findEligibleTasks(workspace, member, iterationId) {
   if(iterationId && !hasPlanningCapacity(workspace,member,iterationId)) return [];
   const items=workspace.effectiveItems || workspace.items.map(i=>({...i,...workspace.drafts?.[i.id]}));
-  const tree=hierarchy(items);
-  return items.filter(item=>isExecutable(item) && !isCompleted(item,workspace) && participantSources(item,workspace,tree).has(member));
+  // Every open task in the backlog can be chosen for anyone with capacity.
+  return items.filter(item=>isExecutable(item) && !isCompleted(item,workspace));
 }
 export function filterHierarchy(roots, predicate) {
   return roots.flatMap(node=>{

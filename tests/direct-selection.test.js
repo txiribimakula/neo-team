@@ -35,29 +35,15 @@ test('bulk unchecking validates the entire set before changing any task',()=>{
   assert.throws(()=>selectTasks(ws,ana,[1042],'sprint-24','false'));
 });
 
-test('removing a shared branch releases only that person current iteration tasks',()=>{
-  const ws=createDemo();selectTasks(ws,ana,[1053],'sprint-24',true);
-  toggleParticipation(ws,1053,marcos,true,'sprint-24');
-  assert.throws(()=>selectTasks(ws,marcos,[1053],'sprint-24',false));
-  const otherBefore=item(ws,1038);
-  toggleParticipation(ws,1001,ana,false,'sprint-24');
-  for(const id of [1042,1045,1053]){assert.equal(item(ws,id).assignedTo,'');assert.equal(item(ws,id).iterationPath,ws.settings.backlogIteration.path);}
-  assert.deepEqual(item(ws,1038),otherBefore);
-  assert.ok(!eligibleTasks(ws,ana).some(i=>[1042,1045,1053].includes(i.id)));
-  assert.ok(eligibleTasks(ws,marcos).some(i=>i.id===1053));
-  assert.ok(ws.participantExclusions[1001].includes(ana));
+test('every open task in the backlog can be chosen for anyone with capacity, without sharing branches first',()=>{
+  const ws=createDemo();
+  for(const person of [ana,marcos]) for(const id of [1053,1054,1057,1059]) assert.ok(eligibleTasks(ws,person,'sprint-24').some(i=>i.id===id),`${person} #${id}`);
+  selectTasks(ws,marcos,[1059],'sprint-24',true);
+  assert.equal(item(ws,1059).assignedTo,marcos);
+  assert.throws(()=>selectTasks(ws,ana,[1059],'sprint-24',true),/otro responsable/);
+  assert.ok(!eligibleTasks(ws,ana,'sprint-24').some(i=>i.type==='Epic' || i.type==='User Story'),'only tasks and bugs are chosen');
 });
 
-test('removing a parent suppresses nested memberships; a child can be explicitly included again',()=>{
-  const ws=createDemo();toggleParticipation(ws,900,ana,true,'sprint-24');toggleParticipation(ws,1001,ana,true,'sprint-24');
-  toggleParticipation(ws,900,ana,false,'sprint-24');
-  assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1053));
-  toggleParticipation(ws,1001,ana,true,'sprint-24');
-  assert.ok(eligibleTasks(ws,ana).some(i=>i.id===1053));
-  assert.ok(!eligibleTasks(ws,ana).some(i=>i.id===1059));
-  const current=JSON.parse(JSON.stringify(ws));
-  assert.ok(participantSources(item(current,1053),current,hierarchy(effectiveItems(current))).has(ana));
-});
 
 test('branch exclusion preserves assignments from other iterations and does not restore selected tasks when re-enabled',()=>{
   const ws=createDemo();stageChanges(ws,1042,{iterationPath:ws.iterations[1].path});

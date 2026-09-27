@@ -1,5 +1,5 @@
 import {sourcesOf,sourceFor,planningItem,remoteFields,mergeProjects} from './multi-project.js';
-import {capacityEntry,workingCapacity} from './planner.js';
+import {capacityEntry,workingCapacity,effectiveCapacity,sameCapacity} from './planner.js';
 export async function refreshSection(workspace,section,azure,rules,report=()=>{}) {
   if(!workspace || workspace.mode!=='azure') throw new Error('Importa proyectos de Azure DevOps primero.');
   if(!['iterations','capacity','tasks'].includes(section)) throw new Error('Sección no válida.');
@@ -20,31 +20,7 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     if(!next.sources) next.capacities=refreshed[0].capacities;
     else {
       next.sources.forEach((source,index)=>{source.capacities=refreshed[index].capacities;});
-      // Azure holds the split budget: reconstruct availability by summing each
-      // activity across projects, and union personal/project holidays.
-      for(const iteration of next.iterations) {
-        const teamMembers=next.members.map(member=>{
-          const activities=new Map();let commonDays=null;
-          for(const source of next.sources) {
-            const remoteIteration=source.iterations.find(i=>i.id===iteration.sourceIterations[source.id]);
-            const capacity=source.capacities?.[remoteIteration?.id];
-            if(!capacity || !source.members.some(m=>m.id===member.id)) continue;
-            const entry=capacityEntry(capacity,member.id), dates=new Set();
-            for(const activity of entry.activities) {
-              const hours=workingCapacity(remoteIteration,{...capacity,teamMembers:[{teamMember:member,...entry,activities:[activity]}]},member.id,source.settings.workingDays);
-              if(hours===null) throw new Error('La iteración necesita fechas para reunir la capacidad de los proyectos.');
-              activities.set(activity.name,(activities.get(activity.name) ?? 0)+hours);
-            }
-            for(const range of [...entry.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) dates.add(date.toISOString().slice(0,10));
-            commonDays=commonDays===null ? dates : new Set([...commonDays].filter(day=>dates.has(day)));
-          }
-          const daysOff=[...(commonDays ?? [])].sort().map(day=>({start:day,end:day}));
-          const days=workingCapacity(iteration,{daysOff:[],teamMembers:[{teamMember:member,daysOff,activities:[{name:'',capacityPerDay:1}]}]},member.id,next.settings.workingDays);
-          if(!days && [...activities.values()].some(hours=>hours>0)) throw new Error('El calendario global no permite representar la capacidad de Azure. Revisa los días laborables.');
-          return {teamMember:member,activities:[...activities].map(([name,hours])=>({name,capacityPerDay:days ? Math.round(hours/days*100)/100 : 0})),daysOff};
-        });
-        next.capacities[iteration.id]={daysOff:[],teamMembers};
-      }
+      for(const iteration of next.iterations) next.capacities[iteration.id]=jointCapacity(next,iteration);
     }
     next.capacityConflicts={};
   } else if(!next.sources) next.iterations=refreshed[0].iterations;
@@ -68,5 +44,63 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     next.capacities=remapped;
   }
   next.refreshedAt={...next.refreshedAt,[section]:new Date().toISOString()};
+  return next;
+}
+// Azure holds the split budget: reconstruct availability by summing each
+// activity across projects, and union personal/project holidays.
+function jointCapacity(next,iteration) {
+  const teamMembers=next.members.map(member=>{
+    const activities=new Map();let commonDays=null;
+    for(const source of next.sources) {
+      const remoteIteration=source.iterations.find(i=>i.id===iteration.sourceIterations[source.id]);
+      const capacity=source.capacities?.[remoteIteration?.id];
+      if(!capacity || !source.members.some(m=>m.id===member.id)) continue;
+      const entry=capacityEntry(capacity,member.id), dates=new Set();
+      for(const activity of entry.activities) {
+        const hours=workingCapacity(remoteIteration,{...capacity,teamMembers:[{teamMember:member,...entry,activities:[activity]}]},member.id,source.settings.workingDays);
+        if(hours===null) throw new Error('La iteración necesita fechas para reunir la capacidad de los proyectos.');
+        activities.set(activity.name,(activities.get(activity.name) ?? 0)+hours);
+      }
+      for(const range of [...entry.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) dates.add(date.toISOString().slice(0,10));
+      commonDays=commonDays===null ? dates : new Set([...commonDays].filter(day=>dates.has(day)));
+    }
+    const daysOff=[...(commonDays ?? [])].sort().map(day=>({start:day,end:day}));
+    const days=workingCapacity(iteration,{daysOff:[],teamMembers:[{teamMember:member,daysOff,activities:[{name:'',capacityPerDay:1}]}]},member.id,next.settings.workingDays);
+    if(!days && [...activities.values()].some(hours=>hours>0)) throw new Error('El calendario global no permite representar la capacidad de Azure. Revisa los días laborables.');
+    return {teamMember:member,activities:[...activities].map(([name,hours])=>({name,capacityPerDay:days ? Math.round(hours/days*100)/100 : 0})),daysOff};
+  });
+  return {daysOff:[],teamMembers};
+}
+// Download one iteration's capacity: Azure replaces the local copy, including
+// local drafts. What the person had locally is kept beside it, per person, so they
+// can keep Azure's value, go back to theirs or set another one.
+export async function downloadCapacity(workspace,iterationId,azure,report=()=>{}) {
+  if(!workspace || workspace.mode!=='azure') throw new Error('Importa proyectos de Azure DevOps primero.');
+  const iteration=workspace.iterations.find(i=>i.id===iterationId);
+  if(!iteration) throw new Error('Elige una iteración del equipo.');
+  const before=effectiveCapacity(workspace,iterationId), next=structuredClone(workspace);
+  if(next.sources) {
+    for(const [index,source] of next.sources.entries()) {
+      const remoteId=iteration.sourceIterations?.[source.id];
+      if(!remoteId) continue;
+      report({phase:'capacity',message:`${source.config.project} (${index+1}/${next.sources.length}) · Descargando la capacidad de la iteración…`});
+      await azure.open(source.config);
+      source.capacities={...source.capacities,[remoteId]:await azure.capacity(source.config,remoteId)};
+    }
+    next.capacities={...next.capacities,[iterationId]:jointCapacity(next,iteration)};
+  } else {
+    report({phase:'capacity',message:`Descargando la capacidad de «${iteration.name}»…`});
+    await azure.open(next.config);
+    next.capacities={...next.capacities,[iterationId]:await azure.capacity(next.config,iterationId)};
+  }
+  delete next.capacityDrafts?.[iterationId];delete next.capacityConflicts?.[iterationId];
+  const local={};
+  for(const key of ['team',...next.members.map(m=>m.id)]) {
+    const mine=capacityEntry(before,key);
+    if(!sameCapacity(mine,capacityEntry(next.capacities[iterationId],key))) local[key]=mine;
+  }
+  next.capacityDownloads={...next.capacityDownloads,[iterationId]:{at:new Date().toISOString(),local}};
+  if(!Object.keys(local).length) delete next.capacityDownloads[iterationId];
+  next.refreshedAt={...next.refreshedAt,capacity:new Date().toISOString()};
   return next;
 }

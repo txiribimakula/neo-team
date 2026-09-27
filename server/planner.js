@@ -47,7 +47,11 @@ export function discardLocal(workspace,id) {
   if (ids.some(id=>workspace.creationAttempts?.[id])) throw new Error('Hay una creación enviada sin confirmar. Revisa y recupera su resultado antes de descartarla.');
   if (id<0 && workspace.items.some(i=>i.parent===id)) throw new Error('Descarta primero los elementos hijos nuevos.');
   workspace.items=workspace.items.filter(i=>!(i.localOnly && ids.includes(i.id)));
-  if(id===undefined){workspace.drafts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};}
+  if(id===undefined){
+    workspace.drafts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};
+    // What remains is the project split recalculated from the imported data: keep Azure's.
+    for(const plan of projectCapacityPlans(workspace).filter(allocationPending)) markAllocationDiscarded(workspace,plan);
+  }
   else {delete workspace.drafts[id];delete workspace.conflicts[id];}
   for(const localId of ids) if(localId<0){delete workspace.participants?.[localId];delete workspace.participantExclusions?.[localId];}
 }
@@ -254,6 +258,21 @@ export function stageCapacity(workspace, iterationId, change) {
   if (sameCapacity(next, base)) delete drafts[key]; else drafts[key] = next;
   if (Object.keys(drafts).length) workspace.capacityDrafts[iterationId] = drafts; else delete workspace.capacityDrafts[iterationId];
   clearCapacityConflict(workspace, iterationId, key);
+  clearDownloadedDifference(workspace, iterationId, key);
+}
+// After downloading capacity, each difference with what was local waits for a decision.
+function clearDownloadedDifference(workspace, iterationId, key) {
+  const download = workspace.capacityDownloads?.[iterationId];
+  if (!download?.local?.[key]) return;
+  delete download.local[key];
+  if (!Object.keys(download.local).length) delete workspace.capacityDownloads[iterationId];
+}
+export function chooseDownloadedCapacity(workspace, iterationId, key, choice) {
+  const mine = workspace?.capacityDownloads?.[iterationId]?.local?.[key];
+  if (!mine) throw new Error('No hay diferencias de capacidad por validar para esta persona.');
+  if (!['azure', 'local'].includes(choice)) throw new Error('Elige la capacidad de Azure DevOps o la local.');
+  if (choice === 'local') stageCapacity(workspace, iterationId, { key, daysOff: mine.daysOff, ...(key === 'team' ? {} : { activities: mine.activities }) });
+  clearDownloadedDifference(workspace, iterationId, key);
 }
 function clearCapacityConflict(workspace, iterationId, key) {
   const conflicts = workspace.capacityConflicts?.[iterationId];
@@ -273,7 +292,7 @@ export function discardCapacity(workspace, iterationId, key) {
   clearCapacityConflict(workspace, iterationId, key);
 }
 export function capacityChanges(workspace) {
-  if (workspace?.sources) return projectCapacityPlans(workspace).filter(p=>!sameCapacity(p.original,p.entry));
+  if (workspace?.sources) return projectCapacityPlans(workspace).filter(allocationPending);
   return Object.entries(workspace?.capacityDrafts ?? {}).flatMap(([iterationId, drafts]) => Object.entries(drafts).map(([key, entry]) => ({ iterationId, key, entry })));
 }
 export function effectiveCapacity(workspace, iterationId) {
@@ -325,6 +344,18 @@ export function resolveCapacityConflict(workspace, iterationId, key, choice) {
   if (choice === 'local' && mine) stageCapacity(workspace, iterationId, { key, ...mine });
 }
 
+// A project split is derived, not a draft: discarding it records the value that was
+// proposed, so Azure's value is kept until something changes the split again.
+const allocationKey = plan => JSON.stringify([plan.sourceId, plan.remoteIterationId, plan.key]);
+export const allocationPending = plan => !plan.discarded && !sameCapacity(plan.original, plan.entry);
+function markAllocationDiscarded(workspace, plan) {
+  workspace.allocationDiscards = { ...workspace.allocationDiscards, [allocationKey(plan)]: plan.entry };
+}
+export function discardAllocation(workspace, sourceId, iterationId, key) {
+  const plan = projectCapacityPlans(workspace ?? {}).find(p => p.sourceId === sourceId && p.iterationId === iterationId && p.key === key);
+  if (!plan || !allocationPending(plan)) throw new Error('No hay cambios de capacidad pendientes para esta persona en ese proyecto.');
+  markAllocationDiscarded(workspace, plan);
+}
 // Allocate the single availability budget by estimated work, including zeroing
 // old project allocations when the person no longer has tasks there.
 export function projectCapacityPlans(workspace) {
@@ -359,7 +390,8 @@ export function projectCapacityPlans(workspace) {
       const unit={daysOff:source.capacities?.[remoteIterationId]?.daysOff ?? [],teamMembers:[{teamMember:member,activities:[{name:'',capacityPerDay:1}],daysOff}]};
       const days=workingCapacity(remoteIteration,unit,member.id,source.settings.workingDays) ?? 0;
       const entry={daysOff,activities:global.activities.map(a=>({name:a.name,capacityPerDay:Math.round((days && globalDaily ? available*ratio/days*a.capacityPerDay/globalDaily : 0)*100)/100}))};
-      plans.push({iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && !days});
+      const kept=workspace.allocationDiscards?.[allocationKey({sourceId:source.id,remoteIterationId,key:member.id})], discarded=!!kept && sameCapacity(kept,entry);
+      plans.push({discarded,iterationId:iteration.id,remoteIterationId,sourceId:source.id,config:source.config,key:member.id,entry,original,iteration:`${source.config.project} · ${remoteIteration.name}`,label:member.displayName,hours,ratio,available,allocated:Math.round(days*entry.activities.reduce((n,a)=>n+a.capacityPerDay,0)*100)/100,missingEstimate:tasks.some(i=>i.remainingWork==null),unavailable:hours>0 && !days});
     }
     }
   }
@@ -370,7 +402,7 @@ export function planningWorkspace(workspace) {
   const capacities = Object.fromEntries(workspace.iterations.map(i => [i.id, effectiveCapacity(workspace, i.id)]));
   const projectAllocations = projectCapacityPlans(workspace);
   // The same count the review uses, so the interface never offers an empty review.
-  const capacityPending = workspace.sources ? projectAllocations.filter(p => !sameCapacity(p.original, p.entry)).length : Object.values(workspace.capacityDrafts ?? {}).reduce((sum, drafts) => sum + Object.keys(drafts).length, 0);
+  const capacityPending = workspace.sources ? projectAllocations.filter(allocationPending).length : Object.values(workspace.capacityDrafts ?? {}).reduce((sum, drafts) => sum + Object.keys(drafts).length, 0);
   return {...workspace,projectAllocations,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending,capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 export function confirmPerson(workspace, member, iterationId) {
@@ -477,7 +509,7 @@ export class Planner {
       // as 0 h and the split is corrected in a later sync once it is defined.
       incompleteAllocations=allocations.filter(p=>p.missingEstimate || p.unavailable).map(p=>({label:p.label,iteration:p.iteration,missingEstimate:p.missingEstimate,unavailable:p.unavailable}));
       capacityPlans=[];
-      for (const plan of allocations.filter(p=>!sameCapacity(p.original,p.entry))) {
+      for (const plan of allocations.filter(allocationPending)) {
         const cacheKey=JSON.stringify([plan.sourceId,plan.remoteIterationId]);
         // A capacity that cannot be read does not stop the review: the local copy
         // stands in and Azure is read again just before writing it.
