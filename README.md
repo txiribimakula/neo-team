@@ -51,7 +51,7 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
 - **Qué recibe Copilot:** solo el diff del pull request, su descripción y los comentarios existentes, tratados como datos no confiables. Se ejecuta sin herramientas (ni terminal, ni archivos, ni MCP), en una carpeta vacía, sin leer la configuración ni las instrucciones personales de Copilot, y la sesión se borra al terminar.
 - **Límites del diff:** los archivos binarios o de más de 400 KB, y los que superan el tamaño total del diff, no se envían; la revisión lo indica para que los revises a mano.
 
-**Iniciar sesión en GitHub.** Una sola vez, con tu cuenta de la empresa: `gh auth login` (GitHub CLI) o `copilot` y después `/login` (Copilot CLI). También puedes definir `COPILOT_GITHUB_TOKEN` con un token *fine-grained* con el permiso «Copilot Requests». **Comprobar** en la sección indica qué cuenta se usará. La organización debe permitir el uso de Copilot CLI/SDK a tu asiento. Para elegir un modelo concreto, define `NEO_TEAM_COPILOT_MODEL`; si no, se usa el predeterminado de tu plan.
+**Iniciar sesión en GitHub.** Una sola vez, con tu cuenta de la empresa: `gh auth login --web` (GitHub CLI) o `copilot` y después `/login` (Copilot CLI). Copilot no acepta los tokens clásicos (`ghp_…`): si `gh auth status` muestra una sesión con uno de ellos, la sección seguirá indicando que no hay sesión hasta que vuelvas a iniciarla con `--web`. También puedes definir `COPILOT_GITHUB_TOKEN` con un token *fine-grained* con el permiso «Copilot Requests» antes de arrancar Neo Team. Al abrir la sección se comprueba la sesión, aunque no haya un proyecto conectado; sin sesión se muestran los comandos para copiarlos y **Comprobar**. Una revisión comprueba la sesión antes de leer el pull request, así que sin ella no se descarga nada de Azure DevOps. La organización debe permitir el uso de Copilot CLI/SDK a tu asiento. Para elegir un modelo concreto, define `NEO_TEAM_COPILOT_MODEL`; si no, se usa el predeterminado de tu plan.
 
 En el ejemplo, los pull requests, la revisión y la publicación se simulan: no se contacta con Azure DevOps ni con GitHub.
 
@@ -60,11 +60,14 @@ En el ejemplo, los pull requests, la revisión y la publicación se simulan: no 
 1. En **Conectar Azure DevOps**, introduce tu organización o cualquier URL suya copiada del navegador (`https://dev.azure.com/organización/…` o `https://organización.visualstudio.com`).
 2. Elige **Iniciar sesión con Microsoft**. **Buscar proyectos** abre el acceso de Microsoft cuando sea necesario y carga las opciones del campo. Puedes escribir los nombres directamente. **Buscar equipos** carga los equipos del proyecto indicado.
 3. Pulsa **Conectar e importar**. También puedes guardar la configuración sin conectar. El modo **Azure CLI** utiliza una sesión previamente autenticada; el tenant de Entra es opcional.
-4. En **1 · Iteración**, elige la iteración que vas a planificar. Los pasos siguientes trabajan sobre ella; el botón de la cabecera vuelve a este paso para cambiarla.
-5. En **Capacidad**, define las horas diarias y las ausencias de cada persona, y los días libres comunes. Con varios proyectos es una única disponibilidad, que se conserva al actualizar.
-6. En **Repartir ramas**, busca personas y marca su participación. Se guarda en local y se hereda a las tareas descendientes.
-7. En **Elegir tareas**, utiliza la vista del equipo o por persona, estima las horas pendientes y asigna las tareas. Cada tarea indica su proyecto. La persona debe pertenecer al equipo de ese proyecto.
-8. En **Revisar y sincronizar**, comprueba los cambios de tareas y capacidad antes de enviarlos. Se comparan con Azure para detectar conflictos. La revisión de la iteración anterior solo aparece en copias antiguas o en el ejemplo; las nuevas importaciones excluyen todas las iteraciones pasadas.
+4. En **1 · Iteración**, elige el período que vas a planificar. Los pasos siguientes trabajan sobre él; el botón de la cabecera permite cambiarlo.
+5. En **2 · Capacidad**, define las horas diarias, las ausencias personales y los días libres comunes. Con varios proyectos es una única disponibilidad.
+6. En **3 · Elegir tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
+7. En **4 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
+
+La barra de secciones permite cambiar entre Inicio, Planificación, Mantenimiento, Revisión de PRs y Permisos. Al volver a Planificación se conserva el paso abierto durante la sesión. **Revisar N cambios** abre directamente los cambios pendientes desde cualquier sección. El aviso **Modo de ejemplo** permanece visible en todas las secciones; los permisos, si hay un proyecto real configurado, se consultan en Azure y se indican expresamente como una consulta real.
+
+Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar con un botón. La revisión de PRs muestra cuántos comentarios se publicarán y solo habilita la publicación cuando hay una selección pendiente y el pull request está activo.
 
 **Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
 
@@ -123,11 +126,15 @@ npm test
 
 Las pruebas cubren persistencia, aislamiento del ejemplo, validación del borrador, capacidad/calendarios, conflictos, revisiones concurrentes, sincronización parcial, recuperación de confirmaciones inciertas, protección HTTP y los contratos del MCP. Se comprueba el arranque real del MCP y sus esquemas sin autenticarse. Las operaciones contra Azure se prueban con respuestas controladas: **la conexión y sincronización con una organización real requieren configurarla e iniciar sesión desde la aplicación y no se han verificado en esta entrega**.
 
-La interfaz incluye herramientas WebMCP opcionales para leer el plan y preparar borradores cuando el navegador las soporte. No permiten sincronizar directamente. No se ha realizado validación en un navegador con WebMCP ni pruebas visuales de navegador.
+La interfaz incluye herramientas WebMCP opcionales para leer el plan y preparar borradores cuando el navegador las soporte. No permiten sincronizar directamente. Se han comprobado los flujos de ejemplo en navegador, incluyendo vistas de escritorio y móvil. No se ha validado WebMCP en navegador.
 
 ### Creaciones y cambios pendientes
 
-Usa **+ Crear** o el **+** de una rama para crear épicas, features, historias, tareas y bugs en local. Los elementos nuevos y editados se señalan como pendientes; el paso 6 muestra el total. Los títulos también se pueden editar. Las creaciones se envían después de revisar, con los padres antes que los hijos.
+Usa **+ Crear** o el **+** de una rama para crear épicas, features, historias, tareas y bugs en local. Los elementos nuevos y editados se señalan como pendientes; el paso 4 muestra el total. Los títulos también se pueden editar. Las creaciones se envían después de revisar, con los padres antes que los hijos.
+
+**Duplicar** copia también la descripción del original (en los bugs, *Repro Steps*). Se lee de Azure DevOps al crear la copia, así que refleja la versión actual; el duplicado de un duplicado la toma del mismo original.
+
+Al revisar los cambios, cada creación se valida en Azure DevOps sin guardarse. Si el proceso del proyecto exige una descripción y no la tiene, la creación muestra un aviso y un campo para escribirla allí mismo: se guarda en local y se envía con la creación. Otras reglas que Azure no acepte se muestran como aviso en la creación afectada.
 
 Cada creación incluye una etiqueta técnica única `neo-create-…` que permite recuperar su resultado sin duplicar elementos si se pierde la respuesta. Se valida en Azure antes de enviar. Una creación enviada con resultado incierto no se reenvía ni se descarta automáticamente: la siguiente revisión y sincronización intentan localizarla. Si sigue sin aparecer o difiere del borrador, se conserva bloqueada para comprobarla en Azure. No elimines esta etiqueta mientras se recupera una creación incierta.
 

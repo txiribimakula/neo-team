@@ -4,6 +4,8 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&a
 const categoryLabels = { proposed: 'Sin empezar', inprogress: 'En curso', resolved: 'Resuelto', completed: 'Completado', removed: 'Retirado' };
 const day = value => value ? new Date(value).toLocaleDateString('es', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 let filters = { text: '', state: 'all' };
+const normalize = value => String(value ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase('es').trim();
+export function resetMaintenanceFilters() { filters = { text: '', state: 'all' }; }
 
 export function maintenanceView(snapshot, state, setup) {
   const settings = state.maintenanceSettings, demo = state.mode === 'demo';
@@ -21,7 +23,7 @@ export function maintenanceView(snapshot, state, setup) {
   if (filters.state !== 'all' && !byState.has(filters.state)) filters.state = 'all';
   return page(`<div class="maintenance-stats"><div><strong>${issues.length}</strong><span>no cerrados</span></div><div><strong>${issues.filter(i => !i.assignedTo).length}</strong><span>sin responsable</span></div>${[...byState].map(([name, count]) => `<div><strong>${count}</strong><span>${escape(name)}</span></div>`).join('')}</div>
     ${snapshot.limited ? `<div class="notice warning">Se muestran los primeros ${issues.length}. Hay más elementos no cerrados en Azure DevOps.</div>` : ''}
-    <div class="maintenance-filters"><input type="search" data-maintenance-filter="text" aria-label="Buscar elementos" placeholder="Buscar por título, responsable, área o etiqueta" value="${escape(filters.text)}"><select data-maintenance-filter="state" aria-label="Filtrar por estado"><option value="all">Todos los estados</option>${[...byState.keys()].map(name => `<option value="${escape(name)}" ${filters.state === name ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select></div>
+    <div class="maintenance-filters"><input type="search" data-maintenance-filter="text" aria-label="Buscar elementos" placeholder="Buscar por ID, título, responsable, área o etiqueta" value="${escape(filters.text)}"><select data-maintenance-filter="state" aria-label="Filtrar por estado"><option value="all">Todos los estados</option>${[...byState.keys()].map(name => `<option value="${escape(name)}" ${filters.state === name ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select><button class="button small" data-action="maintenance-clear-filters">Limpiar filtros</button></div>
     <div id="maintenance-rows">${issuesTable(snapshot)}</div>`);
 }
 
@@ -33,14 +35,14 @@ function setupView(settings, setup) {
   if (!states) return `<div class="maintenance-setup"><h2>¿Qué se considera cerrado?</h2><p class="text-muted">Para traer solo los elementos no cerrados necesito saber qué estados cuentan como cerrados. Carga los estados posibles del tipo en el proyecto y elígelos.</p>${typeField}${cancel ? `<div class="actions">${cancel}</div>` : ''}</div>`;
   const chosen = new Set(settings?.type === type ? settings.closedStates : states.filter(s => ['completed', 'removed'].includes(s.category)).map(s => s.name));
   return `<div class="maintenance-setup"><h2>¿Qué estados de «${escape(type)}» se consideran cerrados?</h2><p class="text-muted">La consulta traerá todos los elementos cuyo estado no esté marcado. Vienen propuestos los de categoría Completado y Retirado en Azure DevOps.</p>${typeField}
-    <form id="maintenance-settings-form" data-type="${escape(type)}"><div class="maintenance-states">${states.map(s => `<label class="participant-option"><input type="checkbox" name="closed" value="${escape(s.name)}" ${chosen.has(s.name) ? 'checked' : ''}><span><strong>${escape(s.name)}</strong><small>${escape(categoryLabels[s.category] || 'Sin categoría')}</small></span></label>`).join('')}</div><div class="actions">${cancel}<button class="button primary" type="submit">Guardar y consultar</button></div></form></div>`;
+    <p id="maintenance-type-hint" class="notice" role="status" hidden>Has cambiado el tipo de elemento. Vuelve a cargar sus estados antes de guardar.</p><form id="maintenance-settings-form" data-type="${escape(type)}"><div class="maintenance-states">${states.map(s => `<label class="participant-option"><input type="checkbox" name="closed" value="${escape(s.name)}" ${chosen.has(s.name) ? 'checked' : ''}><span><strong>${escape(s.name)}</strong><small>${escape(categoryLabels[s.category] || 'Sin categoría')}</small></span></label>`).join('')}</div><div class="actions">${cancel}<button class="button primary" type="submit">Guardar y consultar</button></div></form></div>`;
 }
 
 function issuesTable(snapshot) {
   if (!snapshot.issues.length) return `<div class="empty-result">No hay elementos «${escape(snapshot.type)}» no cerrados en el proyecto.</div>`;
-  const text = filters.text.trim().toLowerCase();
-  const rows = snapshot.issues.filter(i => (filters.state === 'all' || i.state === filters.state) && (!text || `${i.id} ${i.title} ${i.assignedTo} ${i.state} ${i.areaPath} ${i.tags.join(' ')}`.toLowerCase().includes(text)));
-  if (!rows.length) return '<div class="empty-result">Ningún elemento coincide con los filtros.</div>';
+  const text = normalize(filters.text);
+  const rows = snapshot.issues.filter(i => (filters.state === 'all' || i.state === filters.state) && (!text || normalize(`${i.id} ${i.title} ${i.assignedTo} ${i.state} ${i.areaPath} ${i.tags.join(' ')}`).includes(text)));
+  if (!rows.length) return '<div class="empty-result" role="status"><p>Ningún elemento coincide con los filtros. Prueba otro texto o vuelve a mostrar todos los estados.</p><button class="button" data-action="maintenance-clear-filters">Mostrar todos los elementos</button></div>';
   const title = issue => snapshot.demo ? escape(issue.title)
     : `<a href="https://dev.azure.com/${encodeURIComponent(snapshot.organization)}/${encodeURIComponent(snapshot.project)}/_workitems/edit/${issue.id}" target="_blank" rel="noopener noreferrer">${escape(issue.title)}</a>`;
   return `<p class="local-note" role="status">${rows.length === snapshot.issues.length ? `${rows.length} elementos` : `${rows.length} de ${snapshot.issues.length} elementos`}</p><div class="table-wrap"><table class="maintenance-table"><thead><tr><th>ID</th><th>Título</th><th>Estado</th><th>Responsable</th><th>Prioridad</th><th>Área</th><th>Actualizado</th></tr></thead><tbody>${rows.map(i => `<tr><td>#${i.id}</td><td><span class="table-title">${title(i)}</span>${i.tags.length ? `<span class="task-tags">${i.tags.slice(0, 3).map(t => `<span class="tag">${escape(t)}</span>`).join('')}</span>` : ''}</td><td><span class="pill maintenance-${escape(i.category || 'none')}" title="${escape(categoryLabels[i.category] || 'Sin categoría')}">${escape(i.state)}</span></td><td>${i.assignedTo ? escape(i.assignedTo) : '<span class="text-muted">Sin asignar</span>'}</td><td>${i.priority ?? '—'}</td><td class="text-muted">${escape(i.areaPath)}</td><td class="text-muted">${day(i.changedAt)}</td></tr>`).join('')}</tbody></table></div>`;

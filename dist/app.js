@@ -1,5 +1,5 @@
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
-import { maintenanceView, filterMaintenance } from './maintenance.js';
+import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
 import { reviewsView, publishConfirmation } from './reviews.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -12,6 +12,7 @@ let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
+let lastPlanningTab = 'iteration', renderedTab;
 // The last step lists the pending changes in the page: its review load, sync and messages.
 let changesUi = { loading: false, syncing: false, error: '', notice: '', confirmAll: false };
 let backlogQuery='';
@@ -59,7 +60,14 @@ function savedStatus() {
   return count ? `${plural(count,'pendiente')} de sincronizar` : 'Sin cambios pendientes';
 }
 // Every snapshot received from the server is read-only in the interface.
-function setState(next) { state = next; markSnapshot(state?.workspace); }
+function setState(next) {
+  const scope = value => JSON.stringify([value?.mode, value?.config?.organization, value?.config?.project]);
+  if (state && scope(state) !== scope(next)) {
+    prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
+    maintenanceSnapshot = null; maintenanceSetup = null; resetMaintenanceFilters();
+  }
+  state = next; markSnapshot(state?.workspace);
+}
 function createItem(parentId) {
   const ws=state.workspace,parent=ws.effectiveItems.find(i=>i.id===parentId);
   const type=parent ? ({Epic:'Feature',Feature:'User Story','User Story':'Task','Product Backlog Item':'Task',Requirement:'Task'})[parent.type] || 'Task' : 'Epic';
@@ -116,7 +124,7 @@ async function request(path, input = {}) {
       ({ response, data } = await send(path, input));
     }
     if (!response.ok) {
-      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { stateReview: data.stateReview, diagnostics: data.diagnostics });
+      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { reason: data.reason, stateReview: data.stateReview, diagnostics: data.diagnostics });
     }
     if (data.state) setState(data.state);
     else if (data.csrf) setState(data);
@@ -143,6 +151,8 @@ function showModal(title, subtitle, body, actions = '') {
   modal.classList.remove('wide-modal', 'connection-modal');
   $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2><p>${escape(subtitle)}</p></div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
   if (!modal.open) modal.showModal();
+  const focus = $('#modal-content [autofocus]') || $('#modal-content input:not(:disabled), #modal-content select:not(:disabled), #modal-content textarea:not(:disabled)');
+  focus?.focus();
 }
 let connectionPickerEvents = new AbortController();
 function connection() {
@@ -347,6 +357,10 @@ async function importWithProgress(target, existing = null, start = null) {
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
+  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status'].includes(start?.path || existing?.path)) {
+    $('.import-progress-phase', target).textContent = 'Preparando la simulación con datos de ejemplo…';
+    $('.import-progress-note', target).textContent = 'Esta operación no contacta con Azure DevOps ni con GitHub.';
+  }
   cancelButton.addEventListener('click', async () => {
     cancelButton.disabled = true;
     try {
@@ -609,7 +623,7 @@ function treeView({ availableOnly = false, search = query } = {}) {
     const leaf=`<div class="hierarchy-leaf ${planned ? 'planned-local' : ''}" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
-  const empty='<div class="empty-result">No hay tareas para esta selección.</div>';
+  const empty=search.trim() ? `<div class="empty-result" role="status"><p>No hay tareas que coincidan con «${escape(search)}».</p><button class="button small" data-action="clear-task-search" data-search="${availableOnly ? 'backlog' : 'hierarchy'}">Limpiar búsqueda</button></div>` : '<div class="empty-result">No hay tareas para esta selección.</div>';
   if (!ws.sources) return roots.map(node=>nodeHtml(node,0)).join('') || empty;
   // With several projects, each project is the top parent of its own backlog.
   const projects=ws.sources.map(source=>{
@@ -631,7 +645,16 @@ function sectionRefreshButton() {
   const at=state.workspace.refreshedAt?.[section];
   return `<div class="workspace-controls"><button class="button small" data-action="refresh-section" data-section="${section}">Actualizar ${label}</button><small class="text-muted">Solo ${label}${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}</small></div>`;
 }
-function stepView() { return sectionRefreshButton()+stepContent(); }
+function stepView() {
+  const steps = {
+    iteration: ['Elige la iteración', 'Selecciona el período que quieres preparar. Después podrás ajustar la capacidad y repartir las tareas.'],
+    capacity: ['Revisa la capacidad del equipo', 'Ajusta las horas diarias y pulsa un día para marcar o quitar una ausencia. La fila «Todo el equipo» define los días libres comunes.'],
+    planning: ['Elige y reparte las tareas', 'Abre una tarea para asignarla o arrástrala a una persona. Revisa las horas pendientes para comparar carga y capacidad.'],
+  };
+  const heading = steps[tab];
+  const next = ({capacity:['planning','Elegir tareas'], planning:['changes','Revisar cambios']})[tab];
+  return `${heading ? `<header class="step-heading"><h1>${heading[0]}</h1><p>${heading[1]}</p></header>` : ''}${sectionRefreshButton()}${stepContent()}${next && selected() ? `<div class="step-next"><span>Los cambios se guardan en este equipo.</span><button class="button primary" data-action="tab" data-tab="${next[0]}">${next[1]} →</button></div>` : ''}`;
+}
 function stepContent() {
   const iteration=selected();
   if (tab==='changes') return changesView();
@@ -863,7 +886,7 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
     return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
   const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total"></colgroup>`;
-  return `<div class="capacity-grid-wrap"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
+  return `<div class="capacity-grid-wrap" tabindex="0" role="region" aria-label="Calendario de capacidad; desplázate horizontalmente para ver todos los días"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
 function capacityView() {
   const ws=state.workspace, iteration=selected();
@@ -999,7 +1022,7 @@ function unassignedTasks(iteration=selected()) {
 function leftPanelContent() {
   if (leftPanel==='unassigned') {
     const tasks=unassignedTasks().filter(i=>matchesTask(i,backlogQuery)).sort((a,b)=>(a.priority ?? 5)-(b.priority ?? 5) || a.id-b.id);
-    return tasks.map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra aquí una tarea para dejarla en el sprint sin responsable</div>';
+    return tasks.map(i=>taskCard(i)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
   }
   return treeView({availableOnly:true,search:backlogQuery});
 }
@@ -1022,17 +1045,35 @@ function board(iteration, planned) {
   const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
-  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop=""${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
+  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i)).join('')}</div></section>` : '';
   return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
 function render() {
   const ws=state.workspace;
-  $('#connection-button').textContent=state.config ? 'Configuración' : 'Conectar Azure DevOps';
+  $('#connection-button').textContent=state.mode==='azure' && ws ? 'Añadir proyecto' : state.config ? 'Configuración' : 'Conectar Azure DevOps';
   $('#save-status').textContent=ws ? savedStatus() : '';
   const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
+  document.title = `${section} · Neo Team`;
+  document.querySelectorAll('[data-section]').forEach(button => {
+    if (button.dataset.section === section) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
+  const shortcut = $('#pending-shortcut'), changesCount = pendingCount(ws);
+  shortcut.hidden = !changesCount;
+  shortcut.textContent = `Revisar ${plural(changesCount, 'cambio')}`;
+  $('#demo-banner').hidden = state.mode !== 'demo';
+  $('#demo-banner span').innerHTML = tab==='permissions' && state.config?.project
+    ? '<strong>Modo de ejemplo</strong> · Permisos consulta el proyecto real conectado, solo en lectura.'
+    : '<strong>Modo de ejemplo</strong> · Los cambios y las publicaciones se simulan.';
+  if (section === 'Planificación') lastPlanningTab = tab;
+  if (renderedTab !== tab) {
+    const firstRender = renderedTab === undefined;
+    renderedTab = tab;
+    if (!firstRender) requestAnimationFrame(() => { if (!modal.open) $('#app').focus({preventScroll:true}); window.scrollTo({top:0}); });
+  }
   $('#app').setAttribute('aria-label', section);
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
   if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
@@ -1048,7 +1089,7 @@ function render() {
   // Redrawing keeps the horizontal position of the capacity grid and the scroll of
   // each column that scrolls on its own.
   const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0, scrolls=keptScrolls();
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}${ws.mode==='demo' ? '<span class="pill demo">Ejemplo</span>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a>${ws.mode==='demo' ? '<button class="button small subtle" data-action="azure">Salir del ejemplo</button>' : ''}</div></div>
+  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a></div></div>
   ${stepTabs(changes)}
   <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
@@ -1080,7 +1121,7 @@ async function loadReview() {
   if (pending) { setTimeout(loadReview,200); return; }
   changesUi.loading=true; render();
   try {
-    review=(await importWithProgress($('#changes-progress'), null, { path: '/api/review', input: {}, title: 'Comparando con Azure DevOps' })).review;
+    review=(await importWithProgress($('#changes-progress'), null, { path: '/api/review', input: {}, title: state.mode==='demo' ? 'Revisando los cambios del ejemplo' : 'Comparando con Azure DevOps' })).review;
   } catch (error) {
     changesUi.error=error.message;
   } finally {
@@ -1118,9 +1159,12 @@ function reviewPlan(p) {
     p.unverified && '<p class="local-note">No se pudo leer en Azure DevOps. Solo se enviará si la tarea no ha cambiado desde la importación; si cambió, quedará pendiente para revisarla.</p>',
     p.conflicts.length && `<p class="local-note warning-text">Alguien la ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, tu versión local sobrescribirá ${p.conflicts.length===1 ? 'ese campo' : 'esos campos'}.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>`,
     !p.missing && !p.unverified && !Object.keys(p.updates).length && '<p class="local-note">Estos valores ya están aplicados en Azure DevOps. Solo se actualizará la copia local.</p>',
+    p.validationError && `<p class="local-note warning-text">Azure DevOps no acepta esta creación: ${escape(p.validationError)}</p>`,
   ].filter(Boolean).join('');
+  // Azure requires a description to create it: it is written here and sent with the creation.
+  const description=p.needsDescription ? `<div class="notice warning">${p.item.description ? `«${escape(p.needsDescription.label)}» se enviará con la creación.` : `Azure DevOps exige «${escape(p.needsDescription.label)}» para crear este elemento. Sin ella no se creará.`}</div><textarea class="review-description" data-description="${p.id}" data-field="${escape(p.needsDescription.field)}" data-focus="description:${p.id}" rows="4" maxlength="20000" aria-label="${escape(p.needsDescription.label)}" placeholder="${escape(p.needsDescription.label)}">${escape(p.item.description ?? '')}</textarea>` : '';
   const discard=`<button class="button small danger" data-action="discard-change" data-task="${p.id}">${p.creation ? 'Descartar creación' : 'Descartar'}</button>`;
-  return `<section class="review-item"><div class="review-item-head"><h3>${heading}</h3>${discard}</div>${rows}${notes}</section>`;
+  return `<section class="review-item"><div class="review-item-head"><h3>${heading}</h3>${discard}</div>${rows}${notes}${description}</section>`;
 }
 function changesView() {
   const notice=changesUi.notice;
@@ -1243,7 +1287,7 @@ async function loadSecurity() {
   securitySnapshot = (await response.json()).security;
 }
 async function securityQuery(descriptor, reauthenticate = false) {
-  showModal(descriptor ? 'Analizar permisos' : 'Cargar grupos de permisos', 'Consulta de seguridad de Azure DevOps.', '<div id="connection-progress"></div>');
+  showModal(descriptor ? 'Analizar permisos' : 'Cargar grupos de permisos', 'Consulta real de Azure DevOps, solo de lectura.', '<div id="connection-progress"></div>');
   try {
     const result = await importWithProgress($('#connection-progress'), null, { path: descriptor ? '/api/security-audit' : '/api/security-groups', input: { descriptor, reauthenticate } });
     securitySnapshot = result.security;
@@ -1293,7 +1337,15 @@ async function runOperation(path, input, title, subtitle) {
 }
 async function startReview(input) {
   const demo = state.mode === 'demo';
-  const data = await runOperation('/api/pr-review', input, 'Revisar con GitHub Copilot', demo ? 'Ejemplo: la revisión se simula y nada sale de este equipo.' : 'Se lee el pull request en Azure DevOps y GitHub Copilot revisa su diff. Todavía no se publica nada.');
+  let data;
+  try { data = await runOperation('/api/pr-review', input, 'Revisar con GitHub Copilot', demo ? 'Ejemplo: la revisión se simula y nada sale de este equipo.' : 'Se lee el pull request en Azure DevOps y GitHub Copilot revisa su diff. Todavía no se publica nada.'); }
+  catch (error) {
+    // Without a GitHub session nothing was read: show how to sign in instead of the error.
+    if (error.reason !== 'copilot-auth') throw error;
+    modal.close(); prUi.copilot = { isAuthenticated: false }; prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
+    toast('GitHub Copilot no tiene sesión en este equipo.', 'error');
+    return;
+  }
   prUi.reviewId = data.reviewId; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
   toast('Revisión lista. Ajusta los comentarios y publica los que quieras.');
 }
@@ -1311,7 +1363,7 @@ async function saveFinding(el, change) {
 }
 const actions = {
   permissions: async () => { await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
-  'security-back': () => { tab = 'capacity'; render(); },
+  'security-back': () => { tab = lastPlanningTab; render(); },
   'security-reconnect': el => securityQuery(el.dataset.descriptor || undefined, true),
   'security-refresh': () => securityQuery(),
   'security-group': el => securityQuery(el.dataset.descriptor),
@@ -1320,22 +1372,32 @@ const actions = {
   'security-diagnostics': async () => { await navigator.clipboard.writeText(JSON.stringify(securitySnapshot.catalog.diagnostics, null, 2)); toast('Diagnóstico copiado. No contiene credenciales ni nombres de usuarios.'); },
   'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
   home: () => { tab = 'home'; render(); window.scrollTo({ top: 0 }); },
-  'open-planning': () => { tab = 'iteration'; render(); },
+  'open-planning': () => { tab = lastPlanningTab; render(); },
   'open-maintenance': async () => {
     await loadMaintenance(); maintenanceSetup = null; tab = 'maintenance'; render();
     if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
   },
   'maintenance-refresh': () => maintenanceQuery(),
-  'open-reviews': () => { prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 }); },
+  'maintenance-clear-filters': () => { resetMaintenanceFilters(); render(); $('[data-maintenance-filter="text"]')?.focus(); },
+  'security-clear-filters': () => { resetPermissionFilters(); render(); $('[data-security-filter="text"]')?.focus(); },
+  'open-reviews': async () => {
+    prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
+    // The sign-in state is checked once, in the background, so the section shows it at once.
+    if (state.mode === 'demo' || prUi.copilot || state.busy) return;
+    const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
+    if (response?.ok && data.copilot) { prUi.copilot = data.copilot; if (tab === 'reviews') render(); }
+  },
+  'pr-copy': async el => { await navigator.clipboard.writeText(el.dataset.copy); toast(`Copiado: ${el.dataset.copy}`); },
   'pr-copilot-status': async () => {
-    prUi.copilot = (await runOperation('/api/copilot-status', {}, 'Comprobar GitHub Copilot', 'Se inicia Copilot con la cuenta de GitHub de este equipo. No se envía ningún código.')).copilot;
+    prUi.copilot = (await request('/api/copilot-status', {})).copilot;
     render(); toast(prUi.copilot.isAuthenticated ? `GitHub Copilot está listo con la cuenta ${prUi.copilot.login || 'de GitHub'}.` : 'No hay una sesión de GitHub con Copilot. Revisa las indicaciones.', prUi.copilot.isAuthenticated ? 'info' : 'error');
   },
   'pr-load-repositories': async () => {
     prUi.repositories = (await runOperation('/api/pr-repositories', {}, 'Buscar repositorios', 'Repositorios de Git del proyecto.')).repositories;
     if (prUi.repositories.length === 1) await loadPullRequests(prUi.repositories[0].name); else render();
   },
-  'pr-review': el => startReview({ repository: el.dataset.repository, pullRequestId: Number(el.dataset.pullRequest) }),
+  'pr-refresh-list': () => loadPullRequests(prUi.repository),
+  'pr-review': el => startReview(el.dataset.url ? { url: el.dataset.url } : { repository: el.dataset.repository, pullRequestId: Number(el.dataset.pullRequest) }),
   'pr-open': el => { prUi.reviewId = el.dataset.review; render(); window.scrollTo({ top: 0 }); },
   'pr-back': () => { prUi.reviewId = null; render(); },
   'pr-delete': el => showModal('Descartar revisión', 'Se borra solo de Neo Team.', '<p>La revisión y sus comentarios sin publicar se eliminan de este equipo. Los comentarios ya publicados en Azure DevOps no se tocan.</p>', `<button class="button" data-action="close">Cancelar</button><button class="button danger" data-action="pr-delete-confirm" data-review="${escape(el.dataset.review)}">Descartar revisión</button>`),
@@ -1373,6 +1435,7 @@ const actions = {
   'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
+  'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
   'upload-capacity':uploadCapacity,
   'download-choice':async el=>{
@@ -1473,6 +1536,7 @@ document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
     if (event.target.id === 'maintenance-settings-form') {
+      if ($('#maintenance-type').value.trim() !== event.target.dataset.type) throw new Error('Vuelve a cargar los estados del tipo de elemento antes de guardar.');
       const closedStates = [...event.target.querySelectorAll('input[name="closed"]:checked')].map(el => el.value);
       await request('/api/maintenance-settings', { type: event.target.dataset.type, states: maintenanceSetup?.states ?? [], closedStates });
       maintenanceSetup = null; maintenanceSnapshot = null; render();
@@ -1516,7 +1580,8 @@ document.addEventListener('change',async event=>{
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
-    if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;return;}
+    if(el.dataset.description){const data=await request('/api/description',{id:Number(el.dataset.description),field:el.dataset.field,description:el.value});review=data.review;render();return;}
+    if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;render();$('#pr-include-summary')?.focus();return;}
     if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
@@ -1533,6 +1598,14 @@ document.addEventListener('change',async event=>{
   }catch(error){render();errorInModal(error);}
 });
 document.addEventListener('input',event=>{
+  if (event.target.id === 'maintenance-type') {
+    const form = $('#maintenance-settings-form');
+    if (form) {
+      const changed = event.target.value.trim() !== form.dataset.type;
+      $('button[type="submit"]', form).disabled = changed;
+      $('#maintenance-type-hint').hidden = !changed;
+    }
+  }
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);

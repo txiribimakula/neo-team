@@ -359,3 +359,50 @@ section.board-column:not(.backlog){padding-right:4px}
 /* People without capacity in the sprint still get a lane: last, dimmed and marked. */
 .member.no-capacity .member-toggle{opacity:.6}.member.no-capacity:hover .member-toggle,.member.no-capacity:not(.collapsed) .member-toggle{opacity:1}
 .no-capacity-badge{display:inline-block;margin-left:8px;background:#fbf1d9;color:#8a6412;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;vertical-align:middle}
+
+/* Shared navigation and clear next steps across every section. */
+.skip-link{position:fixed;top:8px;left:12px;transform:translateY(-180%);z-index:100;background:var(--green);color:white;padding:12px 18px;border-radius:8px}
+.skip-link:focus{transform:none}
+.section-nav{display:flex;align-items:center;gap:6px;padding:8px 24px;background:white;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.section-nav button{border:0;border-radius:7px;background:transparent;padding:10px 14px;color:#526359;font-size:14px;font-weight:600;min-height:40px}
+.section-nav button:hover{background:var(--soft)}
+.section-nav button[aria-current="page"]{background:#e9f1e4;color:var(--green)}
+.section-nav .pending-shortcut{margin-left:auto;background:var(--green);color:white}
+.section-nav .pending-shortcut:hover{background:#356448}
+.demo-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 24px;background:#fff6dd;color:#705624;font-size:13px;border-bottom:1px solid #e8ddbf}
+.demo-banner .link-button{color:inherit;white-space:nowrap}
+.demo-banner[hidden],.pending-shortcut[hidden]{display:none}
+.step-heading{margin:4px 0 22px;max-width:850px}
+.step-heading h1{font-size:26px;margin-bottom:8px}
+.step-heading p{color:#5e6f63;font-size:14px;line-height:1.6;margin:0}
+.step-next{display:flex;align-items:center;justify-content:flex-end;gap:16px;flex-wrap:wrap;padding:20px 0 4px}
+.step-next>span{color:var(--muted);font-size:13px}
+#app:focus{outline:none}
+textarea{font:inherit}
+textarea:focus-visible,summary:focus-visible,.capacity-grid-wrap:focus-visible{outline:3px solid #82b74a;outline-offset:3px}
+#modal-content{display:flex;flex-direction:column;max-height:calc(90dvh - 2px)}
+.modal-head,.modal-footer{flex-shrink:0}
+.modal-body{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.maintenance-filters{flex-wrap:wrap}
+.maintenance-filters input{min-width:180px}
+.security-filters>.button{align-self:end;margin-bottom:14px}
+.pr-list strong,.pr-list small,.pr-detail-heading h2{overflow-wrap:anywhere}
+@media(max-width:740px){
+  .topbar{height:auto;min-height:58px;flex-wrap:wrap;padding:10px 14px;gap:8px}
+  .header-actions{min-width:0;flex-wrap:wrap;justify-content:flex-end}
+  .section-nav{padding:8px 12px;gap:4px}
+  .section-nav button{font-size:12px;padding:9px 10px;min-height:40px}
+  .section-nav .pending-shortcut{margin-left:0}
+  .demo-banner{padding:10px 14px;font-size:12px}
+  .step-heading h1{font-size:23px}
+  .step-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}
+  .step-tab{min-height:44px;padding:10px 0}
+  .step-tab>span{flex-shrink:0}
+  .step-next{justify-content:space-between}
+  .maintenance-filters input,.maintenance-filters select{width:100%;max-width:none}
+  .modal-footer{flex-wrap:wrap}
+  .modal-footer .button{flex:1;min-width:120px}
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+.pr-login-options{list-style:none;padding:0;margin:0 0 16px;display:flex;flex-direction:column;gap:10px}.pr-login-options li{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px}.pr-login-options code{font-variant-ligatures:none;background:#f3f6f1;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+.review-description{width:100%;border:1px solid #d5dfd7;border-radius:7px;padding:10px 12px;font:inherit;font-size:14px;resize:vertical}

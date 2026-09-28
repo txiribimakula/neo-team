@@ -11,8 +11,18 @@ export const pendingFindings = review => review.findings.filter(f => f.selected 
 function copilotLine(ui, demo) {
   if (demo) return '<span class="text-muted">La revisión de Copilot se simula y nada se publica en Azure DevOps.</span>';
   const status = ui.copilot;
-  const text = !status ? 'Usa la cuenta de GitHub con Copilot iniciada en este equipo.' : status.isAuthenticated ? `GitHub Copilot listo · cuenta ${escape(status.login || 'de GitHub')}` : escape(status.message);
-  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span><button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
+  const text = !status ? 'GitHub Copilot' : status.isAuthenticated ? `GitHub Copilot · ${escape(status.login || 'cuenta de GitHub')}` : 'GitHub Copilot sin sesión';
+  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span> <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
+}
+
+// Copilot uses the GitHub session of this computer; the app never asks for a token.
+export const LOGIN_OPTIONS = [
+  { command: 'gh auth login --web', title: 'GitHub CLI con el navegador. Si ya usas gh con un token clásico (ghp_…), Copilot no lo acepta: vuelve a iniciar sesión así.' },
+  { command: 'copilot', then: '/login', title: 'Copilot CLI: ábrelo y escribe /login.' },
+];
+function loginView(ui) {
+  if (ui.copilot?.isAuthenticated !== false) return '';
+  return `<section class="pr-card pr-login"><h2>Iniciar sesión en GitHub Copilot</h2><ul class="pr-login-options">${LOGIN_OPTIONS.map(o => `<li title="${escape(o.title)}"><code>${escape(o.command)}</code>${o.then ? ` → <code>${escape(o.then)}</code>` : ''}<button class="button small" data-action="pr-copy" data-copy="${escape(o.command)}">Copiar</button></li>`).join('')}</ul><button class="button primary" data-action="pr-copilot-status">Comprobar</button></section>`;
 }
 
 function pickerView(state, ui) {
@@ -20,9 +30,9 @@ function pickerView(state, ui) {
   const repositorySelect = repositories ? `<label class="form-field">Repositorio<select id="pr-repository" aria-label="Repositorio"><option value="">Elige un repositorio…</option>${repositories.map(r => `<option value="${escape(r.name)}" ${r.name === ui.repository ? 'selected' : ''}>${escape(r.name)}</option>`).join('')}</select></label>` : `<button class="button" data-action="pr-load-repositories">Ver repositorios de ${escape(state.mode === 'demo' ? 'Neo Platform' : state.config?.project)}</button>`;
   const list = ui.pullRequests ? (ui.pullRequests.length ? `<ul class="pr-list">${ui.pullRequests.map(pr => `<li><div><strong>!${pr.pullRequestId} · ${escape(pr.title)}</strong>${pr.isDraft ? ' <span class="pill">Borrador</span>' : ''}<small>${escape(pr.createdBy?.displayName ?? '')} · ${escape(branch(pr.sourceRefName))} → ${escape(branch(pr.targetRefName))}</small></div><button class="button small primary" data-action="pr-review" data-repository="${escape(ui.repository)}" data-pull-request="${pr.pullRequestId}">Revisar</button></li>`).join('')}</ul>` : '<p class="empty-result">No hay pull requests activos en este repositorio.</p>') : '';
   return `<section class="pr-card"><h2>Nueva revisión</h2>
-    <form id="pr-url-form" class="pr-url"><label class="form-field">URL del pull request<input name="url" required placeholder="https://dev.azure.com/organización/proyecto/_git/repositorio/pullrequest/123" autocomplete="off"></label><button class="button primary" type="submit">Revisar con Copilot</button></form>
-    <p class="pr-or">o elige uno de la lista</p>${repositorySelect}${list}
-    <p class="local-note">El diff del pull request se envía a GitHub Copilot con tu cuenta de GitHub. Copilot no tiene herramientas ni acceso a archivos. Nada se publica en Azure DevOps hasta que lo confirmes.</p></section>`;
+    <form id="pr-url-form" class="pr-url"><label class="form-field">URL del pull request<input name="url" type="url" required placeholder="https://dev.azure.com/organización/proyecto/_git/repositorio/pullrequest/123" autocomplete="off"></label><button class="button primary" type="submit">Revisar con Copilot</button></form>
+    <p class="pr-or">o elige uno de la lista</p>${repositorySelect}${ui.repository ? '<button class="button small" data-action="pr-refresh-list">Actualizar pull requests</button>' : ''}${list}
+    <p class="local-note">${state.mode === 'demo' ? 'Estás usando datos de ejemplo: no se envía código a Copilot ni se publica en Azure DevOps.' : 'El diff del pull request se envía a GitHub Copilot con tu cuenta de GitHub. Copilot no tiene herramientas ni acceso a archivos. Nada se publica en Azure DevOps hasta que lo confirmes.'}</p></section>`;
 }
 
 function historyView(reviews) {
@@ -44,6 +54,8 @@ function findingView(review, finding) {
 
 function detailView(review, ui) {
   const pending = pendingFindings(review), demo = review.mode === 'demo';
+  const publicationCount = pending.length + Number(!review.summaryPublished && !!ui.includeSummary);
+  const canPublish = publicationCount > 0 && review.pullRequest.status === 'active';
   const notes = [
     review.notes.truncated && `${review.notes.omittedFiles} archivos no se incluyeron por tamaño: revísalos a mano.`,
     review.notes.binaryFiles && `${review.notes.binaryFiles} archivos binarios no revisados.`,
@@ -58,10 +70,10 @@ function detailView(review, ui) {
       <span class="pill verdict-${escape(review.verdict)}">${escape(VERDICT_LABELS[review.verdict])}</span></header>
     ${notes.map(n => `<div class="notice warning">${escape(n)}</div>`).join('')}
     <section class="pr-summary"><h3>Resumen</h3><p>${escape(review.summary)}</p><label class="pr-select"><input type="checkbox" id="pr-include-summary" ${review.summaryPublished ? 'checked disabled' : ui.includeSummary ? 'checked' : ''}>${review.summaryPublished ? `Resumen publicado ${review.mode === 'demo' ? '(simulado)' : 'en Azure'} ✓` : 'Publicar también el resumen como comentario general'}</label></section>
-    <h3 class="review-section">Comentarios propuestos · ${review.findings.length}</h3>
+    <h3 class="review-section">Comentarios propuestos · ${review.findings.length}</h3><p class="local-note" role="status">${publicationCount ? `${publicationCount} comentario${publicationCount === 1 ? '' : 's'} seleccionado${publicationCount === 1 ? '' : 's'} para publicar, incluido el resumen si está marcado.` : 'Marca los comentarios o el resumen que quieras publicar.'}</p>
     ${review.findings.length ? review.findings.map(f => findingView(review, f)).join('') : '<p class="empty-result">Copilot no ha encontrado problemas en este pull request.</p>'}
     <p class="local-note">Revisa y ajusta el texto: los cambios se guardan en local. Marca los comentarios que quieras publicar; los que tienen línea se anclan a esa línea del pull request.</p>
-    <div class="pr-actions"><button class="button danger" data-action="pr-delete" data-review="${escape(review.id)}">Descartar revisión</button><button class="button" data-action="pr-review" data-repository="${escape(review.repository.name)}" data-pull-request="${review.pullRequest.id}">Volver a revisar</button><button class="button primary" data-action="pr-publish" data-review="${escape(review.id)}" ${pending.length || !review.summaryPublished ? '' : 'disabled'}>${demo ? 'Simular publicación' : 'Publicar en Azure DevOps'}…</button></div>
+    <div class="pr-actions"><button class="button danger" data-action="pr-delete" data-review="${escape(review.id)}">Descartar revisión</button><button class="button" data-action="pr-review" data-url="${escape(review.pullRequest.url)}">Volver a revisar</button><button class="button primary" data-action="pr-publish" data-review="${escape(review.id)}" ${canPublish ? '' : 'disabled'}>${demo ? 'Simular publicación' : 'Publicar en Azure DevOps'}${publicationCount ? ` (${publicationCount})` : ''}…</button></div>
   </section>`;
 }
 
@@ -69,8 +81,8 @@ export function reviewsView(state, ui) {
   const demo = state.mode === 'demo', reviews = state.prReviews ?? [];
   const review = reviews.find(r => r.id === ui.reviewId);
   const heading = `<header class="maintenance-heading"><div><p class="eyebrow">REVISIÓN DE PULL REQUESTS</p><h1>Revisión de PRs</h1><p>${escape(demo ? 'Datos de ejemplo' : state.config?.project || 'Conecta un proyecto para revisar sus pull requests.')} · ${copilotLine(ui, demo)}</p></div></header>`;
-  if (!demo && !state.config?.project) return `<section class="maintenance-page">${heading}<div class="empty-panel"><h2>Sin proyecto conectado</h2><p>Conecta Azure DevOps para leer los pull requests de sus repositorios.</p><button class="button primary" data-action="connect">Conectar Azure DevOps</button></div></section>`;
-  return `<section class="maintenance-page">${heading}${review ? detailView(review, ui) : pickerView(state, ui) + historyView(reviews)}</section>`;
+  if (!demo && !state.config?.project) return `<section class="maintenance-page">${heading}${loginView(ui)}<div class="empty-panel"><h2>Sin proyecto conectado</h2><p>Conecta Azure DevOps para leer los pull requests de sus repositorios.</p><button class="button primary" data-action="connect">Conectar Azure DevOps</button></div></section>`;
+  return `<section class="maintenance-page">${heading}${review ? detailView(review, ui) : (demo ? '' : loginView(ui)) + pickerView(state, ui) + historyView(reviews)}</section>`;
 }
 
 // What will be written, shown before anything is sent to Azure DevOps.
