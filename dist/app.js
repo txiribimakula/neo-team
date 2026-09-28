@@ -1490,11 +1490,11 @@ const actions = {
   'resolve-remote':el=>resolveTask(Number(el.dataset.task),'remote'),
 };
 async function resolveCapacity(iterationId,owner,choice,sourceId) {
-  await request('/api/resolve-capacity',{iterationId,key:owner,choice,sourceId}); review=null; render();
+  review=(await request('/api/resolve-capacity',{iterationId,key:owner,choice,sourceId})).review; render();
   toast(choice==='remote' ? 'Se ha conservado la capacidad de Azure DevOps.' : 'Se mantienen tus cambios.');
 }
 async function resolveTask(id,choice) {
-  await request('/api/resolve',{id,choice}); review=null; render();
+  review=(await request('/api/resolve',{id,choice})).review; render();
   toast(choice==='remote' ? 'Se ha conservado la versión de Azure DevOps.' : 'Se mantienen tus cambios.');
 }
 $('#connection-button').onclick = () => { if (state && !pending) connection(); };

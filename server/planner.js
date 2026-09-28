@@ -163,6 +163,22 @@ export function resolveConflict(workspace, id, choice) {
   delete workspace.drafts[id]; delete workspace.conflicts[id];
   if (choice === 'local' && Object.keys(changes).length) stageChanges(workspace, id, changes);
 }
+// Deciding a conflict fixes the change against the Azure version the review already
+// read: nothing is compared again, and only that task or capacity changes in the review.
+export function reviewTaskChoice(review, workspace, id) {
+  const index = review.plans.findIndex(p => !p.creation && p.id === id);
+  if (index < 0) return;
+  const draft = workspace.drafts[id];
+  const plan = draft ? planReview({ ...workspace, drafts: { [id]: draft } }, [workspace.items.find(i => i.id === id)])[0] : null;
+  review.plans.splice(index, 1, ...(plan ? [plan] : []));
+}
+export function reviewCapacityChoice(review, { iterationId, key, sourceId }, choice) {
+  const index = review.capacityPlans.findIndex(p => p.iterationId === iterationId && p.key === key && (p.sourceId ?? '') === (sourceId ?? ''));
+  if (index < 0) return;
+  const plan = review.capacityPlans[index];
+  if (choice === 'remote') review.capacityPlans.splice(index, 1);
+  else review.capacityPlans[index] = { ...plan, original: plan.remote, conflict: false, applied: sameCapacity(plan.remote, plan.after) };
+}
 export function workingCapacity(iteration, capacity, memberId, workingDays = [1,2,3,4,5]) {
   const record = capacity?.teamMembers?.find(m => m.teamMember?.id === memberId);
   if (!record || !iteration.attributes?.startDate || !iteration.attributes?.finishDate) return null;

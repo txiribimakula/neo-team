@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask, setDescription } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -41,6 +41,13 @@ function findReview(data, id) {
   const review = (data.prReviews ?? []).find(r => r.id === id && r.mode === data.mode);
   if (!review) throw fail('La revisión ya no está disponible. Actualiza la página.', 404);
   return review;
+}
+// A decision taken in the review updates that review instead of discarding it, as
+// long as nothing else changed the plan since it was prepared.
+function keepReview(before, update) {
+  if (planner.review?.version !== before) { planner.review = null; return; }
+  update(planner.review);
+  planner.review.version = store.data.version;
 }
 const csrf = randomBytes(32).toString('hex');
 let busy = false;
@@ -453,7 +460,7 @@ const server = http.createServer(async (req, res) => {
           discardAllocation(workspace, input.sourceId, input.iterationId, input.key);
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve-capacity') {
-          const data = structuredClone(store.data);
+          const data = structuredClone(store.data), before = store.data.version;
           if (!data[data.mode]) throw fail('No hay planificación.');
           if (input.sourceId && data[data.mode].sources) {
             const source=data[data.mode].sources.find(s=>s.id===input.sourceId);
@@ -463,16 +470,20 @@ const server = http.createServer(async (req, res) => {
             if(record) Object.assign(record,plan.remote);
             else { source.capacities[plan.remoteIterationId] ??= {teamMembers:[],daysOff:[]}; source.capacities[plan.remoteIterationId].teamMembers.push({teamMember:source.members.find(m=>m.id===input.key),...plan.remote}); }
           } else resolveCapacityConflict(data[data.mode], input.iterationId, input.key, input.choice);
-          await store.save(data); planner.review = null;
+          await store.save(data);
+          keepReview(before, review => reviewCapacityChoice(review, input, input.choice));
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
         } else if (path === '/api/discard') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('No hay planificación.');
           discardLocal(workspace,input.id);
           await store.save(data); planner.review = null;
         } else if (path === '/api/resolve') {
-          const data = structuredClone(store.data);
+          const data = structuredClone(store.data), before = store.data.version;
           resolveConflict(data[data.mode], input.id, input.choice);
-          await store.save(data); planner.review = null;
+          await store.save(data);
+          keepReview(before, review => reviewTaskChoice(review, data[data.mode], input.id));
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
         } else if (path === '/api/description') {
           // Written from the review: that review stays valid, so it is not compared again.
           const data = structuredClone(store.data), before = store.data.version;

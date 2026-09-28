@@ -341,3 +341,25 @@ test('the gateway sends copied texts, and the written description as HTML in its
   await gateway.create({project:'P'},{...item,texts:{'Microsoft.VSTS.TCM.ReproSteps':'<p>Pasos</p>'},description:'1. <Abrir>\n2. Fallo',descriptionField:'Microsoft.VSTS.TCM.ReproSteps'});
   assert.equal(call.args.fields['Microsoft.VSTS.TCM.ReproSteps'],'1. &lt;Abrir&gt;<br>2. Fallo');
 });
+test('deciding a conflict updates that task in the review, without reading Azure again',async t=>{
+  const {reviewTaskChoice}=await import('../server/planner.js');
+  const f=await fixture(t);await f.stage(1042,{remainingWork:18});await f.stage(1045,{priority:1});
+  f.remote.set(1042,{...f.remote.get(1042),remainingWork:6,rev:2});
+  let reads=0;const getItems=f.azure.getItems;f.azure.getItems=async(...args)=>{reads++;return getItems(...args);};
+  const decide=async(id,choice)=>{
+    const data=structuredClone(f.store.data);resolveConflict(data.azure,id,choice);await f.store.save(data);
+    reviewTaskChoice(f.planner.review,f.workspace(),id);f.planner.review.version=f.store.data.version;
+  };
+  let review=await f.planner.prepareReview();assert.equal(reads,1);
+  await decide(1042,'local');
+  const plan=f.planner.review.plans.find(p=>p.id===1042);
+  assert.deepEqual(plan.conflicts,[]);assert.deepEqual(plan.updates,{remainingWork:18});assert.equal(plan.remote.rev,2);
+  assert.ok(f.planner.review.plans.some(p=>p.id===1045),'the other changes stay as reviewed');
+  const result=await f.planner.sync(review.token);
+  assert.equal(reads,1,'Azure is not read again');assert.deepEqual(result.successes.sort(),[1042,1045]);assert.equal(f.remote.get(1042).remainingWork,18);
+
+  await f.stage(1045,{priority:3});f.remote.set(1045,{...f.remote.get(1045),priority:4,rev:f.remote.get(1045).rev+1});
+  review=await f.planner.prepareReview();await decide(1045,'remote');
+  assert.equal(f.planner.review.plans.some(p=>p.id===1045),false,'keeping Azure removes the change from the review');
+  assert.equal(f.workspace().items.find(i=>i.id===1045).priority,4);
+});
