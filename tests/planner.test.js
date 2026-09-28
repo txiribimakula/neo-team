@@ -248,7 +248,7 @@ test('a duplicate is created in Azure with its estimate and tags',async()=>{
   gateway.call=async(name,args)=>{call={name,args};return {id:77,rev:1,fields:{'System.Title':'Copia','System.WorkItemType':'Task'}};};
   await gateway.create({project:'P'},{title:'Copia',type:'Task',creationKey:'k',areaPath:'P',iterationPath:'P',priority:1,assignedTo:'',remainingWork:3,originalEstimate:8,tags:['Frontend'],parent:5});
   assert.equal(call.args.fields['Microsoft.VSTS.Scheduling.OriginalEstimate'],8);
-  assert.equal(call.args.fields['System.Tags'],'neo-create-k; Frontend');
+  assert.equal(call.args.fields['System.Tags'],'Frontend');
   assert.equal(call.args.parent,5);
 });
 
@@ -362,4 +362,15 @@ test('deciding a conflict updates that task in the review, without reading Azure
   review=await f.planner.prepareReview();await decide(1045,'remote');
   assert.equal(f.planner.review.plans.some(p=>p.id===1045),false,'keeping Azure removes the change from the review');
   assert.equal(f.workspace().items.find(i=>i.id===1045).priority,4);
+});
+test('creations carry no marker: a new one is not searched, and a duplicate drops old markers',async t=>{
+  const {createLocalItem,duplicateItem,effectiveItems}=await import('../server/planner.js');
+  const ws=createDemo();ws.items.find(i=>i.id===1042).tags=['Frontend','neo-create-1234'];
+  const copyId=duplicateItem(ws,1042), copy=effectiveItems(ws).find(i=>i.id===copyId);
+  assert.deepEqual(copy.tags,['Frontend']);assert.equal('creationKey' in copy,false);
+  const f=await fixture(t);let searches=0;
+  f.azure.findCreation=async()=>{searches++;return null;};f.azure.create=async(_c,item,validate)=>validate ? {} : {...item,id:9100,rev:1};
+  const data=structuredClone(f.store.data);createLocalItem(data.azure,{type:'Task',title:'Nueva',parent:1001});await f.store.save(data);
+  const result=await f.planner.sync((await f.planner.prepareReview()).token);
+  assert.deepEqual(result.failures,[]);assert.equal(searches,0,'Azure is only searched after a lost answer');
 });

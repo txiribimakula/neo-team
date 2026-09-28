@@ -39,7 +39,7 @@ export function createLocalItem(workspace, input, { duplicate = false } = {}) {
   const id=Math.min(0,...workspace.items.map(i=>i.id),workspace.nextLocalId || 0)-1;
   const origin=workspace.sources ? (parent ? sourceFor(workspace,parent) : workspace.sources.find(s=>s.id===input.sourceId)) : null;
   if(workspace.sources && !origin) throw new Error('Elige el proyecto del nuevo elemento.');
-  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true,...(duplicate ? {areaPath:input.areaPath ?? parent?.areaPath,tags:[...(input.tags ?? [])],...(input.copyFrom ? {copyFrom:input.copyFrom} : {})} : {})};
+  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true,...(duplicate ? {areaPath:input.areaPath ?? parent?.areaPath,tags:[...(input.tags ?? [])],...(input.copyFrom ? {copyFrom:input.copyFrom} : {})} : {})};
   workspace.items.push(item);workspace.nextLocalId=id;
   stageChanges(workspace,id,{title:item.title,...(input.assignedTo ? {assignedTo:input.assignedTo} : {}),...(input.iterationPath ? {iterationPath:input.iterationPath} : {}),...(input.remainingWork!==undefined ? {remainingWork:input.remainingWork} : {})});
   return id;
@@ -53,7 +53,7 @@ export function duplicateItem(workspace, id) {
   if (!item || !isExecutable(item) || item.contextOnly) throw new Error('Solo se pueden duplicar tareas y bugs.');
   const member = item.assignedTo && workspace.members.some(m => identityKey(m) === item.assignedTo) ? item.assignedTo : undefined;
   const copyFrom = item.id > 0 ? item.id : item.copyFrom;
-  const copy = createLocalItem(workspace, { type: item.type, title: item.title, parent: item.parent, sourceId: item.sourceId, areaPath: item.areaPath, tags: item.tags, copyFrom,
+  const copy = createLocalItem(workspace, { type: item.type, title: item.title, parent: item.parent, sourceId: item.sourceId, areaPath: item.areaPath, tags: item.tags.filter(tag => !/^neo-create-/i.test(tag)), copyFrom,
     ...(member ? { assignedTo: member } : {}), iterationPath: item.iterationPath, ...(item.remainingWork != null ? { remainingWork: item.remainingWork } : {}) }, { duplicate: true });
   const extra = {};
   if (item.canPrioritize && item.priority != null && item.priority !== 2) extra.priority = item.priority;
@@ -561,12 +561,17 @@ export class Planner {
           let updated;
           if(workspace.mode==='demo') updated={...item,id:Math.max(0,...this.workspace().items.map(i=>i.id))+1,rev:1};
           else {
-            updated=await this.azure.findCreation(config,item.creationKey);
-            // An uncertain earlier send is searched again (Azure may index it late) before sending it again.
-            for(let check=0;!updated && this.workspace().creationAttempts?.[plan.id] && check<3;check++) {await new Promise(resolve=>setTimeout(resolve,this.retryDelay ?? 3000));updated=await this.azure.findCreation(config,item.creationKey);}
+            // Only a send whose answer was lost is searched (Azure may index it late)
+            // before sending it again; a new creation goes straight to Azure.
+            const sent=this.workspace().creationAttempts?.[plan.id];
+            if(sent) {
+              const known=new Set(this.workspace().items.map(i=>i.id));
+              updated=await this.azure.findCreation(config,remoteItem,sent.sentAt ?? Date.now(),known);
+              for(let check=0;!updated && check<3;check++) {await new Promise(resolve=>setTimeout(resolve,this.retryDelay ?? 3000));updated=await this.azure.findCreation(config,remoteItem,sent.sentAt ?? Date.now(),known);}
+            }
             if(!updated) {
               await this.azure.create(config,remoteItem,true);
-              const attempt=structuredClone(this.store.data);attempt[attempt.mode].creationAttempts ??= {};attempt[attempt.mode].creationAttempts[plan.id]=item;await this.store.save(attempt);
+              const attempt=structuredClone(this.store.data);attempt[attempt.mode].creationAttempts ??= {};attempt[attempt.mode].creationAttempts[plan.id]={...item,sentAt:new Date().toISOString()};await this.store.save(attempt);
               updated=await this.azure.create(config,remoteItem,false);
             }
           }

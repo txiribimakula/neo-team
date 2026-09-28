@@ -127,16 +127,25 @@ test('import distinguishes a missing backlog from malformed iterations, members 
     await assert.rejects(()=>backlogGateway({[field]:{value:[]}}).import(config),message);
   }
 });
-test('creation MCP includes a recovery marker and parent, validates first and rejects ambiguous recovery matches',async()=>{
+test('creation MCP sends the parent and no marker, validates first, and finds a lost creation by its content',async()=>{
   const gateway=new AzureGateway(),calls=[];
-  gateway.call=async(name,args)=>{calls.push({name,args});return name==='wit_query' ? {workItems:[{id:1},{id:2}]} : {id:123,rev:1,fields:{'System.Title':'New','System.WorkItemType':'Task','System.Parent':1001}};};
-  const item={title:'New',type:'Task',parent:1001,areaPath:'Project',iterationPath:'Project',priority:2,remainingWork:0,creationKey:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'};
+  const found={1:1001,2:1001,3:2002};
+  gateway.call=async(name,args)=>{calls.push({name,args});
+    if(name==='wit_query') return {workItems:[{id:1},{id:2},{id:3},{id:4}]};
+    if(name==='neo_work_items_batch') return args.ids.map(id=>({id,rev:1,fields:{'System.Title':"It's new",'System.WorkItemType':'Task','System.Parent':found[id]}}));
+    return {id:123,rev:1,fields:{'System.Title':'New','System.WorkItemType':'Task','System.Parent':1001}};};
+  const item={title:"It's new",type:'Task',parent:1001,areaPath:'Project',iterationPath:'Project',priority:2,remainingWork:0,tags:[]};
   await gateway.create({project:'Project'},item,true);
   const result=await gateway.create({project:'Project'},item,false);
   assert.equal(result.parent,1001);assert.equal(calls[0].args.validateOnly,true);assert.equal(calls[1].args.validateOnly,false);
   assert.equal(calls[1].name,'neo_create_item');assert.equal(calls[1].args.fields['Microsoft.VSTS.Scheduling.RemainingWork'],0);
-  assert.equal(calls[1].args.fields['System.Tags'],'neo-create-'+item.creationKey);
-  await assert.rejects(()=>gateway.findCreation({project:'Project'},item.creationKey),/varios/);
+  assert.equal('System.Tags' in calls[1].args.fields,false,'no tag is added');
+  await assert.rejects(()=>gateway.findCreation({project:'Project'},item,'2026-09-28T10:00:00Z',new Set([4])),/Hay 2 elementos/);
+  const wiql=calls.find(c=>c.name==='wit_query').args.wiql;
+  assert.match(wiql,/\[System.Title\] = 'It''s new'/);assert.match(wiql,/\[System.CreatedBy\] = @Me/);assert.match(wiql,/\[System.CreatedDate\] >= '2026-09-27'/);
+  assert.deepEqual(calls.at(-1).args.ids,[1,2,3],'items already in the plan are not candidates');
+  found[2]=2002;
+  assert.equal((await gateway.findCreation({project:'Project'},item,'2026-09-28T10:00:00Z',new Set([4]))).id,1,'only the one with the same parent');
 });
 
 

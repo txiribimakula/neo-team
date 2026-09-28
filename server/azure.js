@@ -328,15 +328,22 @@ export class AzureGateway {
     if (!Number.isInteger(result?.id)) throw new Error('Azure DevOps no confirmó el comentario.');
     return result;
   }
-  async findCreation(config, creationKey) {
-    if(!/^[a-f0-9-]{36}$/.test(creationKey)) throw new Error('Identificador de creación no válido.');
-    const result=await this.call('wit_query',{action:'wiql',project:config.project,top:2,wiql:`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Tags] CONTAINS 'neo-create-${creationKey}'`});
+  // Finds a creation whose response was lost, by what it contains: same type and
+  // title, created by this account since the day it was sent, with the same parent
+  // and not already in the plan. Several matches are left for the person to check.
+  async findCreation(config, item, sentAt, knownIds = new Set()) {
+    const quote = value => `'${String(value).replace(/'/g, "''")}'`;
+    const since = new Date(new Date(sentAt).getTime() - 86400000).toISOString().slice(0, 10);
+    const result=await this.call('wit_query',{action:'wiql',project:config.project,top:20,wiql:`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.WorkItemType] = ${quote(item.type)} AND [System.Title] = ${quote(item.title)} AND [System.CreatedBy] = @Me AND [System.CreatedDate] >= ${quote(since)}`});
     if(!Array.isArray(result.workItems)) throw new Error('No se pudo comprobar si la creación ya existe.');
-    if(result.workItems.length>1) throw new Error('Hay varios elementos con la misma marca de creación. Revisa Azure antes de continuar.');
-    return result.workItems.length ? (await this.getItems(config,[result.workItems[0].id]))[0] : null;
+    const ids=result.workItems.map(w=>w.id).filter(id=>!knownIds.has(id));
+    const found=(ids.length ? await this.getItems(config,ids) : []).filter(candidate=>(candidate.parent ?? null)===(item.parent ?? null));
+    if(found.length>1) throw new Error(`Hay ${found.length} elementos en Azure DevOps que coinciden con esta creación («${item.title}»). Comprueba cuál es y descarta la creación local si ya existe.`);
+    return found[0] ?? null;
   }
   async create(config,item,validateOnly=false) {
-    const fields={'System.Title':item.title,'System.Tags':[`neo-create-${item.creationKey}`,...(item.tags ?? [])].join('; '),'System.AreaPath':item.areaPath,'System.IterationPath':item.iterationPath,'Microsoft.VSTS.Common.Priority':item.priority};
+    const fields={'System.Title':item.title,'System.AreaPath':item.areaPath,'System.IterationPath':item.iterationPath,'Microsoft.VSTS.Common.Priority':item.priority};
+    if(item.tags?.length) fields['System.Tags']=item.tags.join('; ');
     if(item.assignedTo) fields['System.AssignedTo']=item.assignedTo;
     if(item.remainingWork!==null) fields['Microsoft.VSTS.Scheduling.RemainingWork']=item.remainingWork;
     if(item.originalEstimate!=null) fields['Microsoft.VSTS.Scheduling.OriginalEstimate']=item.originalEstimate;
