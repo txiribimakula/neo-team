@@ -292,3 +292,52 @@ test('a comment on a task created in the same synchronization is published on th
   const result=await f.planner.sync((await f.planner.prepareReview()).token);
   assert.deepEqual(result.comments.failures,[]);assert.deepEqual(posted,[5000]);
 });
+test('a duplicate copies the description of its Azure original, also when copying a copy',async t=>{
+  const {duplicateItem,effectiveItems}=await import('../server/planner.js');
+  const {AzureGateway}=await import('../server/azure.js');
+  const ws=createDemo();
+  const copy=duplicateItem(ws,1042), copyOfCopy=duplicateItem(ws,copy);
+  assert.equal(effectiveItems(ws).find(i=>i.id===copy).copyFrom,1042);
+  assert.equal(effectiveItems(ws).find(i=>i.id===copyOfCopy).copyFrom,1042,'a copy of a copy reads the same original');
+  const f=await fixture(t), sent=[];
+  f.azure.findCreation=async()=>null;f.azure.itemTexts=async(_c,id)=>({'System.Description':`<p>Texto de #${id}</p>`});
+  f.azure.create=async(config,item,validate)=>{sent.push({validate,texts:item.texts});return validate ? {} : {...item,id:5001,rev:1,localOnly:undefined};};
+  const data=structuredClone(f.store.data);duplicateItem(data.azure,1042);await f.store.save(data);
+  const result=await f.planner.sync((await f.planner.prepareReview()).token);
+  assert.deepEqual(result.failures,[]);
+  assert.ok(sent.length>=2 && sent.every(s=>s.texts['System.Description']==='<p>Texto de #1042</p>'),'validation and creation carry the copied description');
+});
+test('a creation that needs a description is offered in the review and sent with what the person writes',async t=>{
+  const {createLocalItem,setDescription,requiredDescription}=await import('../server/planner.js');
+  assert.equal(requiredDescription('TF401320: Rule Error for field Description. Error code: Required, InvalidEmpty.'),'System.Description');
+  assert.equal(requiredDescription('TF401320: Rule Error for field Repro Steps. Error code: Required, InvalidEmpty.'),'Microsoft.VSTS.TCM.ReproSteps');
+  assert.equal(requiredDescription('TF401320: Rule Error for field Activity. Error code: Required.'),null);
+  const f=await fixture(t), created=[];
+  f.azure.findCreation=async()=>null;
+  f.azure.create=async(config,item,validate)=>{
+    if(!item.description) throw new Error('TF401320: Rule Error for field Description. Error code: Required, InvalidEmpty.');
+    if(!validate) created.push(item);
+    return validate ? {} : {...item,id:5002,rev:1,localOnly:undefined};
+  };
+  const data=structuredClone(f.store.data);const id=createLocalItem(data.azure,{type:'Task',title:'Nueva',parent:1001});await f.store.save(data);
+  let review=await f.planner.prepareReview();
+  assert.deepEqual(review.plans.find(p=>p.id===id).needsDescription,{field:'System.Description',label:'Description'});
+  const failed=await f.planner.sync(review.token);
+  assert.match(failed.failures[0].error,/Description/);assert.ok(f.workspace().items.some(i=>i.id===id),'it stays pending');
+  const next=structuredClone(f.store.data);setDescription(next.azure,id,'Qué <hay> que hacer\nY cómo');await f.store.save(next);
+  review=await f.planner.prepareReview();
+  assert.equal(review.plans.find(p=>p.id===id).needsDescription,undefined,'once written, Azure accepts it');
+  const result=await f.planner.sync(review.token);
+  assert.deepEqual(result.failures,[]);assert.equal(created[0].description,'Qué <hay> que hacer\nY cómo');
+  assert.throws(()=>setDescription(f.workspace(),1042,'x'),/elemento nuevo/);
+});
+test('the gateway sends copied texts, and the written description as HTML in its field',async()=>{
+  const {AzureGateway}=await import('../server/azure.js');
+  const gateway=new AzureGateway();let call;
+  gateway.call=async(name,args)=>{call={name,args};return {id:78,rev:1,fields:{'System.Title':'Bug','System.WorkItemType':'Bug'}};};
+  const item={title:'Bug',type:'Bug',creationKey:'k',areaPath:'P',iterationPath:'P',priority:2,assignedTo:'',remainingWork:null,tags:[],parent:null};
+  await gateway.create({project:'P'},{...item,texts:{'System.Description':'<p>Original</p>','Microsoft.VSTS.TCM.ReproSteps':'<p>Pasos</p>'}});
+  assert.equal(call.args.fields['System.Description'],'<p>Original</p>');assert.equal(call.args.fields['Microsoft.VSTS.TCM.ReproSteps'],'<p>Pasos</p>');
+  await gateway.create({project:'P'},{...item,texts:{'Microsoft.VSTS.TCM.ReproSteps':'<p>Pasos</p>'},description:'1. <Abrir>\n2. Fallo',descriptionField:'Microsoft.VSTS.TCM.ReproSteps'});
+  assert.equal(call.args.fields['Microsoft.VSTS.TCM.ReproSteps'],'1. &lt;Abrir&gt;<br>2. Fallo');
+});

@@ -39,18 +39,21 @@ export function createLocalItem(workspace, input, { duplicate = false } = {}) {
   const id=Math.min(0,...workspace.items.map(i=>i.id),workspace.nextLocalId || 0)-1;
   const origin=workspace.sources ? (parent ? sourceFor(workspace,parent) : workspace.sources.find(s=>s.id===input.sourceId)) : null;
   if(workspace.sources && !origin) throw new Error('Elige el proyecto del nuevo elemento.');
-  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true,...(duplicate ? {areaPath:input.areaPath ?? parent?.areaPath,tags:[...(input.tags ?? [])]} : {})};
+  const item={...(origin ? {sourceId:origin.id,project:origin.config.project} : {}),id,rev:0,localOnly:true,creationKey:randomUUID(),title:input.title.trim(),type:input.type,parent:parent?.id || null,state:'New',assignedTo:'',iterationPath:workspace.settings.backlogIteration.path,areaPath:parent?.areaPath || origin?.settings.defaultValue || origin?.config.project || workspace.settings.defaultValue || workspace.settings.areaPaths?.[0]?.value || workspace.config.project,remainingWork:null,priority:2,points:null,tags:[],canEstimateHours:['Task','Bug'].includes(input.type),canPrioritize:true,...(duplicate ? {areaPath:input.areaPath ?? parent?.areaPath,tags:[...(input.tags ?? [])],...(input.copyFrom ? {copyFrom:input.copyFrom} : {})} : {})};
   workspace.items.push(item);workspace.nextLocalId=id;
   stageChanges(workspace,id,{title:item.title,...(input.assignedTo ? {assignedTo:input.assignedTo} : {}),...(input.iterationPath ? {iterationPath:input.iterationPath} : {}),...(input.remainingWork!==undefined ? {remainingWork:input.remainingWork} : {})});
   return id;
 }
 // Duplicates a task or bug as a new local item: same parent, project, area, owner,
-// iteration, hours, priority and tags. It is created in Azure when synchronized.
+// iteration, hours, priority, tags and description. It is created in Azure when
+// synchronized; the description is read from the original then (a copy of a copy
+// takes it from the same Azure item).
 export function duplicateItem(workspace, id) {
   const item = workspace && effectiveItems(workspace).find(i => i.id === id);
   if (!item || !isExecutable(item) || item.contextOnly) throw new Error('Solo se pueden duplicar tareas y bugs.');
   const member = item.assignedTo && workspace.members.some(m => identityKey(m) === item.assignedTo) ? item.assignedTo : undefined;
-  const copy = createLocalItem(workspace, { type: item.type, title: item.title, parent: item.parent, sourceId: item.sourceId, areaPath: item.areaPath, tags: item.tags,
+  const copyFrom = item.id > 0 ? item.id : item.copyFrom;
+  const copy = createLocalItem(workspace, { type: item.type, title: item.title, parent: item.parent, sourceId: item.sourceId, areaPath: item.areaPath, tags: item.tags, copyFrom,
     ...(member ? { assignedTo: member } : {}), iterationPath: item.iterationPath, ...(item.remainingWork != null ? { remainingWork: item.remainingWork } : {}) }, { duplicate: true });
   const extra = {};
   if (item.canPrioritize && item.priority != null && item.priority !== 2) extra.priority = item.priority;
@@ -58,6 +61,29 @@ export function duplicateItem(workspace, id) {
   if (Object.keys(extra).length) stageChanges(workspace, copy, extra);
   return copy;
 }
+// Some processes require a description to create an item. Azure only says so when
+// validating the creation; the person then writes it in the review, and it is sent
+// with the creation (bugs keep it in Repro Steps).
+export const DESCRIPTION_FIELDS = { 'System.Description': 'Description', 'Microsoft.VSTS.TCM.ReproSteps': 'Repro Steps' };
+export function requiredDescription(message) {
+  const text = String(message ?? '');
+  if (!/TF401320|\bRequired\b|InvalidEmpty/i.test(text)) return null;
+  if (/Repro ?Steps|Pasos de reproducci[oó]n/i.test(text)) return 'Microsoft.VSTS.TCM.ReproSteps';
+  if (/\bDescrip(tion|ción)\b/i.test(text)) return 'System.Description';
+  return null;
+}
+export function setDescription(workspace, id, text, field = 'System.Description') {
+  const item = workspace?.items.find(i => i.id === id);
+  if (!item?.localOnly) throw new Error('Solo se puede escribir la descripción de un elemento nuevo.');
+  if (workspace.creationAttempts?.[id]) throw new Error('Recupera primero el resultado de la creación enviada antes de editarla.');
+  if (!Object.hasOwn(DESCRIPTION_FIELDS, field)) throw new Error('Campo no editable.');
+  if (typeof text !== 'string' || text.length > 20000) throw new Error('La descripción no puede superar 20000 caracteres.');
+  if (text.trim()) Object.assign(item, { description: text.trim(), descriptionField: field });
+  else { delete item.description; delete item.descriptionField; }
+  return item;
+}
+// Azure stores the description as HTML: the text is escaped and keeps its lines.
+export const descriptionHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]).replace(/\r?\n/g, '<br>');
 // Comments are written locally and published in Azure DevOps when synchronizing.
 // Mentions are kept as @<email>, which Azure turns into a real mention.
 export function addComment(workspace, id, text) {
@@ -423,6 +449,7 @@ export class Planner {
     const plans = planReview(workspace, remoteItems);
     if (unreadable.length) for (const plan of plans) if (!plan.missing) plan.unverified = true;
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','originalEstimate','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
+    if (workspace.mode === 'azure') for (const plan of plans.filter(p => p.creation && !workspace.creationAttempts?.[p.id])) await this.validateCreation(workspace, plan);
     const { capacityPlans, incompleteAllocations } = await this.reviewCapacity(workspace, unreadable);
     const data = structuredClone(this.store.data);
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
@@ -431,6 +458,21 @@ export class Planner {
     this.review = { token: randomUUID(), version: this.store.data.version, mode: workspace.mode, plans, capacityPlans, comments, incompleteAllocations, unreadable: unreadable.map(text => text.slice(0, 300)) };
     // Conflicts are informative: synchronizing keeps the local version.
     return { ...this.review };
+  }
+  // Azure checks the creation without saving it. A missing required description is
+  // offered to be written in the review; any other rule is shown as a warning.
+  async validateCreation(workspace, plan) {
+    const item = plan.item;
+    try {
+      const config = sourceFor(workspace, item).config;
+      const remoteItem = { ...item, ...remoteFields(workspace, item, { iterationPath: item.iterationPath }), parent: item.parent > 0 ? item.parent : null };
+      if (item.copyFrom) remoteItem.texts = await this.azure.itemTexts(config, item.copyFrom);
+      await this.azure.create(config, remoteItem, true);
+    } catch (error) {
+      const field = requiredDescription(error.message);
+      if (field) plan.needsDescription = { field, label: DESCRIPTION_FIELDS[field] };
+      else plan.validationError = String(error.message).slice(0, 300);
+    }
   }
   // Capacity changes compared with Azure, for every iteration or only one.
   async reviewCapacity(workspace, unreadable, iterationId) {
@@ -499,6 +541,7 @@ export class Planner {
           const origin=sourceFor(workspace,item), config=origin.config;
           const remoteItem={...item,...remoteFields(workspace,item,{iterationPath:item.iterationPath})};
           if(item.parent<0) throw new Error('El padre sigue pendiente de creación.');
+          if(workspace.mode!=='demo' && item.copyFrom) remoteItem.texts=await this.azure.itemTexts(config,item.copyFrom);
           let updated;
           if(workspace.mode==='demo') updated={...item,id:Math.max(0,...this.workspace().items.map(i=>i.id))+1,rev:1};
           else {

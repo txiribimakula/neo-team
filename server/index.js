@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask, setDescription } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -109,7 +109,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -473,6 +473,15 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data);
           resolveConflict(data[data.mode], input.id, input.choice);
           await store.save(data); planner.review = null;
+        } else if (path === '/api/description') {
+          // Written from the review: that review stays valid, so it is not compared again.
+          const data = structuredClone(store.data), before = store.data.version;
+          const item = setDescription(data[data.mode], input.id, input.description, input.field);
+          await store.save(data);
+          const plan = planner.review?.version === before && planner.review.plans.find(p => p.creation && p.id === input.id);
+          if (plan) { plan.item = { ...plan.item, description: item.description, descriptionField: item.descriptionField }; planner.review.version = store.data.version; }
+          else planner.review = null;
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
         } else if (path === '/api/review') return json(res, { review: await planner.prepareReview(), state: publicState() });
         else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState() });
         else throw fail('Operación no encontrada.', 404);

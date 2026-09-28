@@ -2,7 +2,7 @@ import { IMPORT_FIELDS, importWiql, stateAction } from './import-query.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
-import { normalizeItem } from './planner.js';
+import { normalizeItem, descriptionHtml } from './planner.js';
 import { isExecutable } from '../dist/hierarchy.js';
 import { activityReader, describeCall, seconds } from './activity.js';
 import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceIssue, maintenanceWiql } from './maintenance.js';
@@ -74,7 +74,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_git_repositories', 'neo_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -340,8 +340,17 @@ export class AzureGateway {
     if(item.assignedTo) fields['System.AssignedTo']=item.assignedTo;
     if(item.remainingWork!==null) fields['Microsoft.VSTS.Scheduling.RemainingWork']=item.remainingWork;
     if(item.originalEstimate!=null) fields['Microsoft.VSTS.Scheduling.OriginalEstimate']=item.originalEstimate;
+    Object.assign(fields,item.texts);
+    // What the person wrote in the review replaces the copied text of that field.
+    if(item.description) fields[item.descriptionField ?? 'System.Description']=descriptionHtml(item.description);
     const raw=await this.call('neo_create_item',{project:config.project,type:item.type,fields,parent:item.parent,validateOnly});
     return validateOnly ? raw : normalizeItem(raw);
+  }
+  // Description fields of an item (only those with content), copied to its duplicate.
+  async itemTexts(config, id) {
+    const result = await this.call('neo_work_item_texts', { project: config.project, id });
+    if (!result || typeof result !== 'object' || Array.isArray(result) || Object.values(result).some(value => typeof value !== 'string')) throw new Error(`No se pudo leer la descripción de #${id}.`);
+    return result;
   }
   async addComment(config, id, text) {
     return this.call('wit_work_item_comment_write', { action: 'add', project: config.project, workItemId: id, text, format: 'Markdown' });

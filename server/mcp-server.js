@@ -180,12 +180,22 @@ server.tool('neo_query_work_items', 'Run a WIQL query and return the requested f
   return { content: [{ type: 'text', text: JSON.stringify({ ids: selected, limited: ids.length > top, workItems: batches.flat().filter(Boolean) }) }] };
 });
 // Atomic creation includes the parent link and a recovery tag in the same request.
+// A duplicate copies the description of its original (bugs keep it in Repro Steps).
+const TEXT_FIELDS=['System.Description','Microsoft.VSTS.TCM.ReproSteps'];
+server.tool('neo_work_item_texts', 'Read the description fields of one work item, to copy them to its duplicate.', {
+  project:z.string().min(1), id:z.number().int().positive(),
+}, async ({project,id})=>{
+  const api=await (await connectionProvider()).getWorkItemTrackingApi();
+  const item=await api.getWorkItem(id,undefined,undefined,undefined,project);
+  if(!item?.fields) throw new Error(`No se pudo leer #${id} en Azure DevOps para copiar su descripción.`);
+  return {content:[{type:'text',text:JSON.stringify(Object.fromEntries(TEXT_FIELDS.filter(name=>typeof item.fields[name]==='string' && item.fields[name].trim()).map(name=>[name,item.fields[name]])))}]};
+});
 server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {
   project:z.string().min(1), type:z.enum(['Epic','Feature','User Story','Task','Bug']),
   fields:z.record(z.union([z.string(),z.number()])), parent:z.number().int().positive().nullable(), validateOnly:z.boolean(),
 }, async ({project,type,fields,parent,validateOnly})=>{
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
-  const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Common.Priority'];
+  const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Common.Priority',...TEXT_FIELDS];
   if(Object.keys(fields).some(k=>!allowed.includes(k))) throw new Error('Campo no permitido.');
   const document=Object.entries(fields).map(([name,value])=>({op:'add',path:`/fields/${name}`,value}));
   if(parent) document.push({op:'add',path:'/relations/-',value:{rel:'System.LinkTypes.Hierarchy-Reverse',url:`https://dev.azure.com/${organization}/_apis/wit/workItems/${parent}`}});
