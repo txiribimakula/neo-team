@@ -204,7 +204,7 @@ export async function publishReview({ azure, config, review, includeSummary, onP
 
 // GitHub CLI only works when its session is an OAuth sign-in: Copilot rejects
 // classic personal access tokens (ghp_…), even when «gh auth status» shows a session.
-export const AUTH_HELP = 'No hay una sesión de GitHub con acceso a Copilot en este equipo. Inicia sesión con tu cuenta de la empresa: «gh auth login --web» (GitHub CLI; si ya lo usas con un token clásico ghp_, Copilot no lo acepta y tienes que volver a iniciar sesión así) o «copilot» y después «/login» (Copilot CLI). También puedes definir COPILOT_GITHUB_TOKEN con un token fine-grained con el permiso «Copilot Requests» antes de arrancar Neo Team.';
+export const AUTH_HELP = 'No hay una sesión de GitHub con acceso a Copilot en este equipo. Copilot se ejecuta en el servidor local de Neo Team y no usa la sesión del navegador. Inicia sesión una vez en una terminal: «copilot» y después «/login» (Copilot CLI) o «gh auth login --web» (GitHub CLI; un token clásico ghp_ no sirve). Autoriza el código en una ventana privada con tu cuenta de la empresa, no con la personal. También puedes definir COPILOT_GITHUB_TOKEN con un token fine-grained con el permiso «Copilot Requests» antes de arrancar Neo Team.';
 const authError = () => Object.assign(fail(AUTH_HELP, 401), { reason: 'copilot-auth' });
 
 // Runs Copilot through its official SDK with the account signed in on this

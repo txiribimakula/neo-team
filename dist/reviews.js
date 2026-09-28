@@ -15,14 +15,17 @@ function copilotLine(ui, demo) {
   return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span> <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
 }
 
-// Copilot uses the GitHub session of this computer; the app never asks for a token.
+// Copilot runs in the local server, not in the browser: it uses the GitHub session
+// saved on this computer (Copilot CLI, GitHub CLI or COPILOT_GITHUB_TOKEN), never the
+// browser's. The browser only authorizes the sign-in code, with the account open in it.
 export const LOGIN_OPTIONS = [
-  { command: 'gh auth login --web', title: 'GitHub CLI con el navegador. Si ya usas gh con un token clásico (ghp_…), Copilot no lo acepta: vuelve a iniciar sesión así.' },
-  { command: 'copilot', then: '/login', title: 'Copilot CLI: ábrelo y escribe /login.' },
+  { command: 'npm install -g @github/copilot', title: 'Instala Copilot CLI si no lo tienes.' },
+  { command: 'copilot', then: '/login', title: 'Copilot CLI guarda la sesión solo para Copilot y no cambia la cuenta de gh.' },
+  { command: 'gh auth login --web', title: 'Alternativa: GitHub CLI. Cambia la cuenta activa de gh a la de la empresa. Copilot no acepta tokens clásicos (ghp_…).' },
 ];
 function loginView(ui) {
   if (ui.copilot?.isAuthenticated !== false) return '';
-  return `<section class="pr-card pr-login"><h2>Iniciar sesión en GitHub Copilot</h2><ul class="pr-login-options">${LOGIN_OPTIONS.map(o => `<li title="${escape(o.title)}"><code>${escape(o.command)}</code>${o.then ? ` → <code>${escape(o.then)}</code>` : ''}<button class="button small" data-action="pr-copy" data-copy="${escape(o.command)}">Copiar</button></li>`).join('')}</ul><button class="button primary" data-action="pr-copilot-status">Comprobar</button></section>`;
+  return `<section class="pr-card pr-login"><h2>Iniciar sesión en GitHub Copilot</h2><ul class="pr-login-options">${LOGIN_OPTIONS.map(o => `<li title="${escape(o.title)}"><code>${escape(o.command)}</code>${o.then ? ` → <code>${escape(o.then)}</code>` : ''}<button class="button small" data-action="pr-copy" data-copy="${escape(o.command)}">Copiar</button></li>`).join('')}</ul><p class="local-note">Abre en una ventana privada el enlace que muestra, entra con tu cuenta de la empresa (github.com/enterprises/…) y escribe el código.</p><button class="button primary" data-action="pr-copilot-status">Comprobar</button></section>`;
 }
 
 function pickerView(state, ui) {
