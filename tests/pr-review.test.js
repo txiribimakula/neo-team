@@ -125,6 +125,14 @@ test('without a GitHub session the review explains how to sign in and sends noth
   assert.equal((await new CopilotReviewer({ load }).status()).isAuthenticated, false);
 });
 
+test('without a GitHub session the pull request is not read from Azure DevOps', async () => {
+  const { log, load } = fakeSdk({ authenticated: false });
+  let reads = 0;
+  await assert.rejects(() => runReview({ azure: { pullRequest: async () => { reads++; return demoPullRequest(318); } }, reviewer: new CopilotReviewer({ load }), config: { organization: 'o' }, target: { project: 'P', repository: 'r', pullRequestId: 318 }, mode: 'azure' }),
+    error => error.status === 401 && error.reason === 'copilot-auth' && /token clásico/.test(error.message));
+  assert.equal(reads, 0);assert.equal(log.sessions.length, 0);
+});
+
 test('the prompt marks the pull request content as untrusted data', async () => {
   const { log, load } = fakeSdk();
   await runReview({ azure: { pullRequest: async () => demoPullRequest(318) }, reviewer: new CopilotReviewer({ load }), config: { organization: 'o' }, target: { project: 'P', repository: 'r', pullRequestId: 318 }, mode: 'azure' });

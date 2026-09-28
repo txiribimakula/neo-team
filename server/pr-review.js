@@ -156,6 +156,10 @@ export function reviewRecord({ mode, organization, project, target, data, diff, 
 // Reads the pull request, asks Copilot and returns the review to store locally.
 export async function runReview({ azure, reviewer, config, target, mode, onProgress = () => {} }) {
   const scoped = { ...config, project: target.project };
+  // Without a GitHub session the review would read the whole pull request for nothing.
+  onProgress({ phase: 'copilot', message: 'Comprobando la sesión de GitHub Copilot…' });
+  const auth = await reviewer.status();
+  if (!auth.isAuthenticated) throw authError();
   onProgress({ phase: 'pull-request', message: `Leyendo el pull request ${target.pullRequestId} de «${target.repository}»…` });
   const data = await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes });
   const diff = buildDiff(data.files);
@@ -198,7 +202,10 @@ export async function publishReview({ azure, config, review, includeSummary, onP
   return { published, failures };
 }
 
-const AUTH_HELP = 'No hay una sesión de GitHub con acceso a Copilot en este equipo. Inicia sesión una vez con tu cuenta de la empresa usando GitHub CLI («gh auth login») o Copilot CLI («copilot» y después «/login»), o define COPILOT_GITHUB_TOKEN con un token fine-grained con el permiso «Copilot Requests». Después vuelve a intentarlo.';
+// GitHub CLI only works when its session is an OAuth sign-in: Copilot rejects
+// classic personal access tokens (ghp_…), even when «gh auth status» shows a session.
+export const AUTH_HELP = 'No hay una sesión de GitHub con acceso a Copilot en este equipo. Inicia sesión con tu cuenta de la empresa: «gh auth login --web» (GitHub CLI; si ya lo usas con un token clásico ghp_, Copilot no lo acepta y tienes que volver a iniciar sesión así) o «copilot» y después «/login» (Copilot CLI). También puedes definir COPILOT_GITHUB_TOKEN con un token fine-grained con el permiso «Copilot Requests» antes de arrancar Neo Team.';
+const authError = () => Object.assign(fail(AUTH_HELP, 401), { reason: 'copilot-auth' });
 
 // Runs Copilot through its official SDK with the account signed in on this
 // machine. The session gets no tools, runs in an empty folder, reads no user
@@ -230,7 +237,7 @@ export class CopilotReviewer {
     return this.withClient(async (client, directory) => {
       onProgress({ message: 'Comprobando la sesión de GitHub Copilot…' });
       const auth = await client.getAuthStatus();
-      if (!auth.isAuthenticated) throw fail(AUTH_HELP, 401);
+      if (!auth.isAuthenticated) throw authError();
       if (this.aborted) throw fail('Revisión cancelada.');
       const session = await client.createSession({
         ...(this.model ? { model: this.model } : {}),
@@ -252,7 +259,7 @@ export class CopilotReviewer {
       try {
         onProgress({ message: `GitHub Copilot está revisando el pull request${auth.login ? ` con la cuenta ${auth.login}` : ''}…` });
         const reply = await session.sendAndWait({ prompt }, this.timeoutMs).catch(error => {
-          if (/No GitHub OAuth token|Not authenticated|\b401\b/i.test(String(error?.message))) throw fail(AUTH_HELP, 401);
+          if (/No GitHub OAuth token|Not authenticated|\b401\b/i.test(String(error?.message))) throw authError();
           throw error;
         });
         if (this.aborted) throw fail('Revisión cancelada.');
