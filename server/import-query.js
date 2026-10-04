@@ -1,3 +1,4 @@
+import { sourcesOf } from './multi-project.js';
 export const IMPORT_FIELDS = ['System.Id','System.Title','System.WorkItemType','System.State','System.TeamProject','System.AssignedTo','System.IterationPath','System.AreaPath','System.Parent','System.Tags','Microsoft.VSTS.Common.Priority','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Scheduling.StoryPoints','Microsoft.VSTS.Scheduling.Effort','Microsoft.VSTS.Scheduling.Size'];
 export const wiqlQuote = value => `'${String(value).replace(/'/g,"''")}'`;
 const key = value => String(value ?? '').trim().toLowerCase();
@@ -10,6 +11,12 @@ export function stateAction(config,type,state,rules=[]) {
   if(['closed','done','removed'].includes(name)) return 'exclude';
   return null;
 }
+export const isImportType = type => ['task','bug','tarea'].includes(key(type));
+export function availableImportRules(workspace, rules=[]) {
+  return sourcesOf(workspace).flatMap(source=>Object.entries(source.workItemStates ?? {})
+    .filter(([type])=>isImportType(type))
+    .flatMap(([type,states])=>states.map(state=>({organization:source.config.organization,project:source.config.project,type,state:state.name,action:stateAction(source.config,type,state,rules) ?? 'include'}))));
+}
 export function importWiql(config,settings,pastPaths,type,states,after=0,ids=null) {
   const clauses=['[System.TeamProject] = @project',`[System.WorkItemType] = ${wiqlQuote(type)}`,`[System.State] IN (${states.map(wiqlQuote).join(',')})`,`[System.Id] > ${after}`];
   if(ids) clauses.push(`[System.Id] IN (${ids.join(',')})`);
@@ -17,6 +24,6 @@ export function importWiql(config,settings,pastPaths,type,states,after=0,ids=nul
     if(settings.areaPaths?.length) clauses.push(`(${settings.areaPaths.map(a=>`[System.AreaPath] ${a.includeChildren ? 'UNDER' : '='} ${wiqlQuote(a.value)}`).join(' OR ')})`);
     clauses.push(`([System.IterationPath] = ${wiqlQuote(settings.backlogIteration.path)}${(settings.importIterationPaths ?? []).map(path=>` OR [System.IterationPath] UNDER ${wiqlQuote(path)}`).join('')})`);
   }
-  for(const path of pastPaths) clauses.push(`[System.IterationPath] NOT UNDER ${wiqlQuote(path)}`);
+  for(const path of ids ? [] : pastPaths) clauses.push(`[System.IterationPath] NOT UNDER ${wiqlQuote(path)}`);
   return `SELECT [System.Id] FROM WorkItems WHERE ${clauses.join(' AND ')} ORDER BY [System.Id] ASC`;
 }

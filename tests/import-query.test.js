@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {AzureGateway} from '../server/azure.js';
-import {stateAction,importWiql} from '../server/import-query.js';
+import {stateAction,importWiql,availableImportRules} from '../server/import-query.js';
 const config={organization:'org',project:'Project',team:'Team'};
 function gatewayFor({unknown=false,page=false}={}) {
  const gateway=new AzureGateway(),calls=[],progress=[];gateway.open=async()=>{};
@@ -17,7 +17,7 @@ function gatewayFor({unknown=false,page=false}={}) {
    const task=args.wiql.includes("= 'Task'"),sample=args.top===1,parent=args.wiql.includes('[System.Id] IN'),second=args.wiql.includes('[System.Id] > 1');
    if(parent && task || !parent && !task || second && !page) return {workItems:[],limited:false};
    const id=parent ? 10 : second ? 2 : 1;
-   return {workItems:[{id,rev:1,fields:{'System.Title':'Item '+id,'System.State':sample ? 'Custom' : 'Active','System.TeamProject':'Project','System.WorkItemType':task ? 'Task' : 'User Story','System.Parent':task ? 10 : null,'System.IterationPath':'Project\\Now','System.AreaPath':task ? 'Project\\Team' : 'Project\\Portfolio'}}],limited:page && !parent && !second};
+   return {workItems:[{id,rev:1,fields:{'System.Title':'Item '+id,'System.State':sample ? 'Custom' : parent ? 'Closed' : 'Active','System.TeamProject':'Project','System.WorkItemType':task ? 'Task' : 'User Story','System.Parent':task ? 10 : null,'System.IterationPath':'Project\\Now','System.AreaPath':task ? 'Project\\Team' : 'Project\\Portfolio'}}],limited:page && !parent && !second};
   }
   if(name==='work' && args.action==='get_team_capacity')return {teamMembers:[]};
   if(name==='neo_team_days_off')return {daysOff:[]};
@@ -25,14 +25,25 @@ function gatewayFor({unknown=false,page=false}={}) {
  };
  return {gateway,calls,progress};
 }
-test('only open workflow states enter WIQL before batching, including children without downloading closed parents',async()=>{
+test('only leaf types are selected; closed parents are fetched by ID as hierarchy context',async()=>{
  const {gateway,calls,progress}=gatewayFor();
  const ws=await gateway.import(config,p=>progress.push(p));
  assert.deepEqual(ws.items.map(i=>[i.id,i.contextOnly ?? false]),[[1,false],[10,true]]);
  assert.deepEqual(ws.iterations.map(i=>i.id),['now']);assert.deepEqual(Object.keys(ws.capacities),['now']);
  assert.equal(ws.settings.backlogIteration.path,'Project');assert.equal(ws.members[0].id,'ana');assert.deepEqual(ws.completedStates,{Task:'Closed','User Story':'Closed'});
  const queries=calls.filter(c=>c.name==='neo_query_work_items');
- assert.ok(queries.length);for(const {args} of queries){assert.match(args.wiql,/\[System.State\] IN \('Active'\)/);assert.doesNotMatch(args.wiql,/Closed|Discarded|Delivered/);assert.match(args.wiql,/NOT UNDER 'Project\\Old'/);assert.ok(args.fields.includes('System.Parent'));}
+ assert.ok(queries.length);
+ for(const {args} of queries) {
+  if(args.wiql.includes('[System.Id] IN')) {
+    assert.match(args.wiql,/Closed/);assert.doesNotMatch(args.wiql,/NOT UNDER|AreaPath/);
+  } else {
+    assert.match(args.wiql,/WorkItemType\] = 'Task'/);
+    assert.match(args.wiql,/\[System.State\] IN \('Active'\)/);assert.doesNotMatch(args.wiql,/Closed|Discarded|Delivered/);
+    assert.match(args.wiql,/NOT UNDER 'Project\\Old'/);
+  }
+  assert.ok(args.fields.includes('System.Parent'));
+ }
+ assert.equal(ws.items.find(i=>i.id===10).state,'Closed');
  assert.match(queries[0].args.wiql,/\[System.AreaPath\] UNDER 'Project\\Team'/);
  assert.doesNotMatch(queries.find(c=>c.args.wiql.includes('[System.Id] IN')).args.wiql,/AreaPath/);
  assert.ok(!calls.some(c=>c.name==='wit_work_item' || c.args.action==='list_work_items' || c.args.iterationId==='old'));
@@ -46,7 +57,7 @@ test('unknown state requests a sample decision before the import, stored exclusi
  calls.length=0;
  const rules=['Task','User Story'].map(type=>({...config,type,state:'Custom',action:'exclude'}));
  await gateway.import(config,()=>{},rules);
- assert.ok(calls.filter(c=>c.name==='neo_query_work_items').every(c=>!c.args.wiql.includes('Custom')));
+ assert.ok(calls.filter(c=>c.name==='neo_query_work_items' && !c.args.wiql.includes('[System.Id] IN')).every(c=>!c.args.wiql.includes('Custom')));
 });
 test('pages beyond the query cap without silently truncating or fetching closed items',async()=>{
  const {gateway,calls}=gatewayFor({page:true});
@@ -64,4 +75,14 @@ test('state rules respect custom categories, normalization, terminal fallbacks a
  assert.equal(stateAction(config,'Task',{name:'Custom'},[{...config,project:'Other',type:'Task',state:'Custom',action:'exclude'}]),null);
  const q=importWiql(config,{backlogIteration:{path:"Project's"},importIterationPaths:['Project\\Current']},['Project\\Past'],"Task's",["Won't"],5000);
  assert.match(q,/Task''s/);assert.match(q,/Won''t/);assert.match(q,/System.Id\] > 5000/);
+});
+
+test('every available leaf state can be selected, including a terminal state',async()=>{
+ const {gateway,calls}=gatewayFor();
+ const rules=[{...config,type:'Task',state:'Active',action:'exclude'},{...config,type:'Task',state:'Closed',action:'include'}];
+ const ws=await gateway.import(config,()=>{},rules);
+ const available=availableImportRules(ws,rules);
+ assert.deepEqual(available.map(r=>[r.type,r.state,r.action]),[['Task','Active','exclude'],['Task','Closed','include'],['Task','Discarded','exclude'],['Task','Delivered','exclude']]);
+ const primary=calls.filter(c=>c.name==='neo_query_work_items' && !c.args.wiql.includes('[System.Id] IN'));
+ assert.equal(primary.length,1);assert.match(primary[0].args.wiql,/State\] IN \('Closed'\)/);
 });

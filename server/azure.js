@@ -1,4 +1,4 @@
-import { IMPORT_FIELDS, importWiql, stateAction } from './import-query.js';
+import { IMPORT_FIELDS, importWiql, stateAction, isImportType } from './import-query.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
@@ -243,7 +243,7 @@ export class AzureGateway {
     if(!Array.isArray(catalog)) throw new Error('Azure no devolvió los tipos del proyecto.');
     const relevant=new Set(['Task','Bug',...levels.flatMap(l=>(l.workItemTypes ?? []).map(t=>typeof t==='string' ? t : t.name))]);
     if(relevant.size===2) for(const type of ['Epic','Feature','User Story','Product Backlog Item','Requirement','Issue']) relevant.add(type);
-    const types=catalog.filter(t=>relevant.has(t.name)), workflows=[], completedStates={};
+    const types=catalog.filter(t=>relevant.has(t.name)), workflows=[], completedStates={}, workItemStates={};
     const fieldName=(type,ref)=>type.fields.find(f=>f.referenceName===ref)?.name ?? null;
     const estimateFields=Object.fromEntries(types.filter(t=>Array.isArray(t.fields)).map(t=>[t.name,{originalEstimate:fieldName(t,'Microsoft.VSTS.Scheduling.OriginalEstimate'),remainingWork:fieldName(t,'Microsoft.VSTS.Scheduling.RemainingWork')}]));
     // Classification is complete before the large queries run. Unknown custom
@@ -253,16 +253,17 @@ export class AzureGateway {
       const states=await this.workItemStates(config,type), open=[];
       if(!states.length) throw new Error(`No se pudieron clasificar los estados de «${type}». Azure no devolvió su flujo de trabajo.`);
       for(const state of states) {
-        const action=stateAction(config,type,state,stateRules);
+        const action=isImportType(type) ? stateAction(config,type,state,stateRules) : 'include';
         if(action==='include') open.push(state.name);
         else if(!action) {
           const sample=await this.call('neo_query_work_items',{project:config.project,wiql:importWiql(config,querySettings,pastPaths,type,[state.name]),fields:IMPORT_FIELDS,top:1});
           if(sample.workItems?.length) throw Object.assign(new Error(`Indica si «${state.name}» de «${type}» sigue abierto.`),{stateReview:{organization:config.organization,project:config.project,type,state:state.name,states,item:sample.workItems[0]}});
         }
       }
+      workItemStates[type]=states;
       const completed=states.find(s=>s.category==='completed');
       if(completed) completedStates[type]=completed.name;
-      workflows.push({type,open});
+      workflows.push({type,open,states:states.map(s=>s.name)});
     }
     const items=[], warnings=[], capacities={};
     const query=async(type,open,ids=null)=>{
@@ -270,24 +271,24 @@ export class AzureGateway {
       let after=0;const found=[];
       for(;;) {
         const result=await this.call('neo_query_work_items',{project:config.project,wiql:importWiql(config,querySettings,pastPaths,type,open,after,ids),fields:IMPORT_FIELDS,top:5000});
-        if(!Array.isArray(result.workItems)) throw new Error('Azure no devolvió una lista válida de elementos abiertos.');
+        if(!Array.isArray(result.workItems)) throw new Error('Azure no devolvió una lista válida de elementos.');
         found.push(...result.workItems.filter(raw=>open.some(state=>state.trim().toLowerCase()===String(raw.fields?.['System.State'] ?? '').trim().toLowerCase())).map(normalizeItem));
-        report('items',`«${type}»: ${found.length} elementos abiertos leídos por lotes.`,{read:items.length+found.length});
+        report('items',`«${type}»: ${found.length} elementos leídos por lotes.`,{read:items.length+found.length});
         if(!result.limited) return found;
         const next=Math.max(...result.workItems.map(i=>i.id));
         if(!(next>after)) throw new Error('La consulta paginada no avanza. No se guardará una importación incompleta.');
         after=next;
       }
     };
-    for(const {type,open} of workflows) items.push(...await query(type,open));
+    for(const {type,open} of workflows.filter(w=>isImportType(w.type))) items.push(...await query(type,open));
     const included=new Set(items.map(i=>i.id)),attempted=new Set();
     for(;;) {
       const parents=[...new Set(items.map(i=>i.parent).filter(id=>id && !included.has(id) && !attempted.has(id)))];
       if(!parents.length) break;
       parents.forEach(id=>attempted.add(id));
-      report('parents','Completando los padres abiertos, sin descargar los cerrados…');
-      for(let offset=0;offset<parents.length;offset+=200) for(const {type,open} of workflows) {
-        const found=await query(type,open,parents.slice(offset,offset+200));
+      report('parents','Completando la jerarquía de las tareas…');
+      for(let offset=0;offset<parents.length;offset+=200) for(const {type,states} of workflows) {
+        const found=await query(type,states,parents.slice(offset,offset+200));
         for(const item of found) if(!included.has(item.id)) {items.push({...item,contextOnly:true});included.add(item.id);}
       }
     }
@@ -299,7 +300,7 @@ export class AzureGateway {
     }
     if(added.length) warnings.push(`${config.project}: el equipo tiene iteraciones nuevas en Azure DevOps (${added.map(i=>i.name).join(', ')}). Sus tareas ya se han descargado; actualiza las iteraciones para planificarlas.`);
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
-    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
+    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, workItemStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   // Pull request review: repositories, pull requests and their changes are read
   // through the local MCP; comments are only added after the person confirms them.

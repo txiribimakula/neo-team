@@ -20,12 +20,12 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     for(const [id,draft] of Object.entries(next.drafts ?? {})) {
       const item=next.items.find(i=>i.id===Number(id));
       if(!item || item.localOnly) continue;
-      for(const field of Object.keys(draft)) if(same(item[field],draft[field])) delete draft[field];
+      for(const field of Object.keys(draft)) if(same(item[field],draft[field]) && !(field==='state' && next.stateChanges?.[id]?.length)) delete draft[field];
       if(!Object.keys(draft).length) delete next.drafts[id];
     }
     next.conflicts={};
-    if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
-    else {next.backlogLevels=refreshed[0].backlogLevels;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}
+    if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.workItemStates=refreshed[index].workItemStates ?? source.workItemStates;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
+    else {next.backlogLevels=refreshed[0].backlogLevels;next.workItemStates=refreshed[0].workItemStates ?? next.workItemStates;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}
     next.warnings=[...new Set([...(next.warnings ?? []),...refreshed.flatMap(data=>data.warnings ?? [])])];
   } else if(section==='capacity') {
     if(!next.sources) next.capacities=refreshed[0].capacities;

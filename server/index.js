@@ -1,3 +1,4 @@
+import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
@@ -8,9 +9,9 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, setCompletedState, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
@@ -53,6 +54,7 @@ const csrf = randomBytes(32).toString('hex');
 let busy = false;
 let importProgress = null;
 let operation = null;
+planner.onProgress = message => { if (operation) operation = {...operation,message,updatedAt:Date.now()}; };
 let stateReview = null;
 let security = null;
 const securityScope = () => JSON.stringify([store.data.config?.organization, store.data.config?.project]);
@@ -92,9 +94,12 @@ function requireSession(req) {
   if (req.headers['x-neo-csrf'] !== csrf) throw Object.assign(fail('La sesión local ha caducado. Recarga la aplicación para renovarla.', 403), { reason: 'session' });
 }
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
-function publicState() {
+function publicState({ operationComplete = false } = {}) {
+  // Successful POST snapshots describe the state after this operation ends.
+  // GET snapshots still expose running operations for progress and recovery.
+  const active = busy && !operationComplete;
   const workspace = planner.workspace();
-  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), busy, operation: busy ? operation : null, stateReview,
+  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
     workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews() };
 }
 const BODY_LIMIT = 100000;
@@ -116,7 +121,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/completed-state', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -151,10 +156,6 @@ const server = http.createServer(async (req, res) => {
       requireSession(req);
       return json(res, { maintenance: currentMaintenance() });
     }
-    if (req.method === 'GET' && path === '/api/export') {
-      res.setHeader('Content-Disposition', `attachment; filename="neo-team-planificacion-${today()}.json"`);
-      return json(res, { exportedAt: new Date().toISOString(), workspace: planner.workspace() });
-    }
     if (req.method === 'POST' && path.startsWith('/api/')) {
       requireSession(req);
       const input = await body(req);
@@ -172,18 +173,26 @@ const server = http.createServer(async (req, res) => {
       const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
       operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
-        // On demand, cancellable: the person chooses the completed state from this list.
+        // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
           const workspace = planner.workspace();
-          if (!workspace?.items.some(i => i.type === input.type)) throw fail('Elige un tipo de elemento de esta planificación.');
-          if (workspace.mode === 'demo') return json(res, { states: DEMO_STATES });
-          operation = { ...operation, message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.', updatedAt: Date.now() };
-          // Each project has its own workflow for the same type.
-          const config = workspace.sources?.find(s => s.id === input.sourceId)?.config ?? workspace.config;
-          await azure.open(configFrom(config));
+          const scope=workspace?.sources ? workspace.sources.find(s=>s.id===input.sourceId) : workspace;
+          if (!scope || !['task','bug','tarea'].includes(String(input.type).toLowerCase())) throw fail('Elige un proyecto y un tipo de tarea o bug.');
+          let states;
+          if (workspace.mode === 'demo') states=DEMO_STATES;
+          else {
+            const config=scope.config;
+            await azure.open(configFrom(config));
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            operation = { ...operation, message: `Consultando los estados de «${input.type}» en ${config.project}…`, updatedAt: Date.now() };
+            states=await azure.workItemStates(config,input.type);
+          }
           if (operation.cancelRequested) throw fail('Consulta cancelada.');
-          operation = { ...operation, message: `Consultando los estados de «${input.type}» en ${config.project}…`, updatedAt: Date.now() };
-          return json(res, { states: await azure.workItemStates(config, input.type) });
+          const data=structuredClone(store.data), next=data[data.mode];
+          const target=next.sources ? next.sources.find(s=>s.id===input.sourceId) : next;
+          target.workItemStates={...target.workItemStates,[input.type]:states};
+          await store.save(data);planner.review=null;
+          return json(res, {states,state:publicState({ operationComplete: true })});
         }
         if (path === '/api/maintenance') {
           const reportProgress = progress => {
@@ -288,7 +297,7 @@ const server = http.createServer(async (req, res) => {
             const data = structuredClone(store.data);
             data.prReviews = [review, ...(data.prReviews ?? [])].slice(0, REVIEW_LIMITS.reviews);
             await store.save(data);
-            return json(res, { reviewId: review.id, state: publicState() });
+            return json(res, { reviewId: review.id, state: publicState({ operationComplete: true }) });
           }
           const review = findReview(store.data, input.id);
           const result = await publishReview({ azure: gateway, config, review, includeSummary: input.includeSummary === true, onProgress: progress, onPublished: async (itemId, published) => {
@@ -297,7 +306,7 @@ const server = http.createServer(async (req, res) => {
             else saved.findings.find(f => f.id === itemId).published = published;
             await store.save(data);
           } });
-          return json(res, { result, state: publicState() });
+          return json(res, { result, state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/copilot-status') {
           const { reviewer } = reviewTools();
@@ -351,12 +360,12 @@ const server = http.createServer(async (req, res) => {
         } else if(path==='/api/refresh-section') {
           stateReview=null;
           try {
-            const workspace=await refreshSection(store.data.azure,input.section,azure,store.data.stateRules ?? [],progress=>{
+            const workspace=store.data.mode==='demo' ? applyDemoImportRules(structuredClone(store.data.demo),input.section) : await refreshSection(store.data.azure,input.section,azure,store.data.stateRules ?? [],progress=>{
               if(operation.cancelRequested) throw fail('Actualización cancelada.');
               operation={...operation,...progress,step:null,updatedAt:Date.now()};
             });
             if(operation.cancelRequested) throw fail('Actualización cancelada.');
-            const data=structuredClone(store.data);data.azure=workspace;
+            const data=structuredClone(store.data);data[data.mode]=workspace;
             operation={...operation,cancellable:false};step('Calculando la planificación y guardando la copia local…');await store.save(data);planner.review=null;
           } catch(error) {
             explain(error);
@@ -368,7 +377,7 @@ const server = http.createServer(async (req, res) => {
           const data=structuredClone(store.data);data.azure=workspace;
           step('Guardando la copia local…');await store.save(data);planner.review=null;
         } else if (path === '/api/upload-capacity') {
-          return json(res, { result: await planner.uploadCapacity(input.iterationId), state: publicState() });
+          return json(res, { result: await planner.uploadCapacity(input.iterationId), state: publicState({ operationComplete: true }) });
         } else if (path === '/api/capacity-download-choice') {
           const data = structuredClone(store.data);
           chooseDownloadedCapacity(data[data.mode], input.iterationId, input.key, input.choice);
@@ -423,7 +432,10 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/mode') {
           if (!['demo', 'azure'].includes(input.mode)) throw fail('Modo no válido.');
           const data = structuredClone(store.data); data.mode = input.mode;
-          if (input.mode === 'demo' && !data.demo) data.demo = createDemo();
+          if (input.mode === 'demo') {
+            if (!data.demo) data.demo = createDemo();
+            upgradeDemoImportRules(data.demo);
+          }
           await store.save(data); planner.review = null;
         } else if (path === '/api/create') {
           const data=structuredClone(store.data);createLocalItem(data[data.mode],input);await store.save(data);planner.review=null;
@@ -433,16 +445,27 @@ const server = http.createServer(async (req, res) => {
           await store.save(data);planner.review=null;
         } else if (path === '/api/duplicate') {
           const data=structuredClone(store.data);duplicateItem(data[data.mode],input.id);await store.save(data);planner.review=null;
-        } else if (path === '/api/complete-task' || path === '/api/completed-state') {
-          const data = structuredClone(store.data), workspace = data[data.mode];
-          if (path === '/api/complete-task') completeTask(workspace, input.id);
-          else setCompletedState(workspace, input.type, input.state, input.sourceId);
-          await store.save(data); planner.review = null;
+        } else if (path === '/api/import-rule') {
+          const data=structuredClone(store.data), workspace=data[data.mode];
+          if(!workspace) throw fail('Importa datos primero.');
+          const rules=data.mode==='demo' ? (workspace.importRules ??= []) : (data.stateRules ??= []);
+          const matches=r=>r.organization===input.organization && r.project===input.project && r.type===input.type && r.state===input.state;
+          const allowed=availableImportRules(workspace,rules).find(matches);
+          if (!allowed || !['include','exclude'].includes(input.action)) throw fail('Elige un estado disponible para importar.');
+          const rule=rules.find(matches);
+          if(rule) rule.action=input.action; else rules.push({...allowed,action:input.action});
+          await store.save(data);planner.review=null;
+        } else if (path === '/api/complete-task') {
+          const data=structuredClone(store.data);completeTask(data[data.mode],input.id);
+          await store.save(data);planner.review=null;
         } else if (path === '/api/stage') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('Importa datos primero.');
           if (!Array.isArray(input.edits) || !input.edits.length || input.edits.length > 200) throw fail('Cambios no válidos.');
-          for (const edit of input.edits) stageChanges(workspace, edit.id, edit.changes);
+          for (const edit of input.edits) {
+            if (edit.discardStates === true) discardStateChanges(workspace, edit.id);
+            stageChanges(workspace, edit.id, edit.changes);
+          }
           await store.save(data); planner.review = null;
         } else if (path === '/api/capacity') {
           const data = structuredClone(store.data), workspace = data[data.mode];
@@ -472,7 +495,7 @@ const server = http.createServer(async (req, res) => {
           } else resolveCapacityConflict(data[data.mode], input.iterationId, input.key, input.choice);
           await store.save(data);
           keepReview(before, review => reviewCapacityChoice(review, input, input.choice));
-          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState({ operationComplete: true }) });
         } else if (path === '/api/discard') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('No hay planificación.');
@@ -483,7 +506,7 @@ const server = http.createServer(async (req, res) => {
           resolveConflict(data[data.mode], input.id, input.choice);
           await store.save(data);
           keepReview(before, review => reviewTaskChoice(review, data[data.mode], input.id));
-          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState({ operationComplete: true }) });
         } else if (path === '/api/description') {
           // Written from the review: that review stays valid, so it is not compared again.
           const data = structuredClone(store.data), before = store.data.version;
@@ -492,12 +515,12 @@ const server = http.createServer(async (req, res) => {
           const plan = planner.review?.version === before && planner.review.plans.find(p => p.creation && p.id === input.id);
           if (plan) { plan.item = { ...plan.item, description: item.description, descriptionField: item.descriptionField }; planner.review.version = store.data.version; }
           else planner.review = null;
-          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState() });
-        } else if (path === '/api/review') return json(res, { review: await planner.prepareReview(), state: publicState() });
-        else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState() });
+          return json(res, { review: planner.review ? { ...planner.review } : null, state: publicState({ operationComplete: true }) });
+        } else if (path === '/api/review') return json(res, { review: await planner.prepareReview(), state: publicState({ operationComplete: true }) });
+        else if (path === '/api/sync') return json(res, { result: await planner.sync(input.token), state: publicState({ operationComplete: true }) });
         else throw fail('Operación no encontrada.', 404);
         operation = { ...operation, step: 'Preparando la planificación para la interfaz' };
-        return json(res, publicState());
+        return json(res, publicState({ operationComplete: true }));
       } catch (error) {
         explain(error);
         // Local edits fail with validation messages; disk and internal errors keep their report.
@@ -515,7 +538,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

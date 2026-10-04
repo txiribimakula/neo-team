@@ -63,19 +63,28 @@ En el ejemplo, los pull requests, la revisión y la publicación se simulan: no 
 
 ## Uso
 
-1. En **Conectar Azure DevOps**, introduce tu organización o cualquier URL suya copiada del navegador (`https://dev.azure.com/organización/…` o `https://organización.visualstudio.com`).
+1. En modo **Azure DevOps** y sin conexión configurada, la página entera es el formulario **Conectar Azure DevOps** (no hay botón aparte en la cabecera). Introduce tu organización o cualquier URL suya copiada del navegador (`https://dev.azure.com/organización/…` o `https://organización.visualstudio.com`).
 2. Elige **Iniciar sesión con Microsoft**. **Buscar proyectos** abre el acceso de Microsoft cuando sea necesario y carga las opciones del campo. Puedes escribir los nombres directamente. **Buscar equipos** carga los equipos del proyecto indicado.
 3. Pulsa **Conectar e importar**. También puedes guardar la configuración sin conectar. El modo **Azure CLI** utiliza una sesión previamente autenticada; el tenant de Entra es opcional.
-4. En **1 · Iteración**, elige el período que vas a planificar. Los pasos siguientes trabajan sobre él; el botón de la cabecera permite cambiarlo.
-5. En **2 · Capacidad**, define las horas diarias, las ausencias personales y los días libres comunes. Con varios proyectos es una única disponibilidad.
-6. En **3 · Elegir tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
-7. En **4 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
+4. En **1 · Configuración**, marca los estados que se importan para cada tipo de tarea o bug y proyecto. **Sincronizar**, al principio de Configuración, actualiza las tareas; las reglas también se usan en las siguientes importaciones. En Prueba se aplican sobre el ejemplo. La configuración de mantenimiento está en su propia sección.
+5. En **2 · Iteración**, elige el período que vas a planificar. Los pasos siguientes trabajan sobre él.
+6. En **3 · Capacidad**, define las horas diarias, las ausencias personales y los días libres comunes. Con varios proyectos es una única disponibilidad.
+7. En **4 · Tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
+8. En **5 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
 
-La barra de secciones permite cambiar entre Inicio, Planificación, Mantenimiento, Revisión de PRs y Permisos. Al volver a Planificación se conserva el paso abierto durante la sesión. **Revisar N cambios** abre directamente los cambios pendientes desde cualquier sección. El aviso **Modo de ejemplo** permanece visible en todas las secciones; los permisos, si hay un proyecto real configurado, se consultan en Azure y se indican expresamente como una consulta real.
+Inicio muestra cuatro recuadros con el icono y el título de Planificación, Mantenimiento, Revisión de PRs y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Azure DevOps** y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
 
 Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar con un botón. La revisión de PRs muestra cuántos comentarios se publicarán y solo habilita la publicación cuando hay una selección pendiente y el pull request está activo.
 
-**Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior. **Exportar** descarga la planificación completa.
+**Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior.
+
+### Cambios de estado en local
+
+En el editor de tareas y bugs, elige **Estado** y pulsa **Guardar en local**. Cada estado distinto que guardes se añade al historial pendiente de esa tarea. Por ejemplo, guardar **Ready for Test** y después **Closed** prepara dos actualizaciones, en ese orden. Volver al estado inicial también añade un paso; para cancelar el historial usa **Deshacer cambios** o **Descartar**. Guardar otra edición sin cambiar el estado no duplica el paso.
+
+La revisión muestra la secuencia completa antes de enviarla. Al sincronizar, cada transición usa la revisión confirmada de Azure y se guarda individualmente. Si falla un paso, quedan pendientes ese paso y los siguientes. Una respuesta perdida se contrasta con el estado y la revisión de Azure antes de continuar; si no se puede determinar el resultado, se pide elegir qué versión conservar. Los elementos nuevos se crean primero y después recorren los estados guardados. El modo de prueba simula el mismo comportamiento.
+
+No hay configuración de cierre por tipo ni se añaden pasos automáticamente. **Marcar completada** prepara únicamente el estado completado que indica Azure. Si necesitas pasar antes por otro estado, guárdalo en el editor antes de completar la tarea. Las decisiones de importación y los estados cerrados de mantenimiento siguen siendo ajustes independientes.
 
 ### Planificación conjunta
 
@@ -83,7 +92,7 @@ Los proyectos deben pertenecer a la misma organización. Se utiliza un equipo po
 
 La capacidad inicial toma una referencia por persona y nunca suma automáticamente sus capacidades de varios proyectos. Revísala en el paso **Capacidad**. La tabla **Capacidad por proyecto** reparte esa disponibilidad en proporción a las horas pendientes de las tareas asignadas: por ejemplo, 30 h de tareas en A y 10 h en B reparten una capacidad global de 32 h en 24 h para A y 8 h para B. Sin horas de tareas, la disponibilidad queda sin repartir. Las tareas sin estimar impiden enviar el reparto.
 
-Las personas con capacidad efectiva de **0 h** aparecen al final del paso Capacidad, resaltadas en rojo. Quedan fuera de Repartir ramas, Elegir tareas y del cálculo de capacidad por proyecto. Si ya tenían tareas asignadas, estas siguen visibles en un bloque «Fuera del reparto» para poder corregirlas, pero no consumen capacidad ni se distribuyen entre proyectos.
+Las personas con capacidad efectiva de **0 h** aparecen al final del paso Capacidad, resaltadas en rojo. Quedan fuera de Repartir ramas, Tareas y del cálculo de capacidad por proyecto. Si ya tenían tareas asignadas, estas siguen visibles en un bloque «Fuera del reparto» para poder corregirlas, pero no consumen capacidad ni se distribuyen entre proyectos.
 
 La revisión muestra las horas diarias que se enviarán a cada proyecto y persona, considerando su calendario y sus días libres. Los días libres globales se incluyen como ausencias personales en cada proyecto. Azure recibe horas diarias con dos decimales, por lo que pueden aparecer pequeñas diferencias de redondeo. Si falla alguna tarea, se conserva el reparto de capacidad pendiente. Las capacidades confirmadas se guardan individualmente para poder reintentar los fallos sin repetir escrituras confirmadas.
 
@@ -93,13 +102,13 @@ La revisión muestra las horas diarias que se enviarán a cada proyecto y person
 
 - Recupera también los padres que no estén en los niveles visibles o áreas del equipo como contexto, sin recorrer sus tareas hermanas ni permitir escrituras remotas sobre esos padres.
 - Importa integrantes completos del equipo, sus iteraciones, los niveles del backlog, los work items de cada iteración y las tareas hijas accesibles dentro de las áreas del equipo.
-- Sólo guarda elementos abiertos: consulta las categorías de estado de cada tipo y excluye `Completed` y `Removed`, incluidos los estados personalizados y los padres cerrados. Conserva las tareas hijas abiertas y los elementos `Resolved` pendientes de validación. Los estados se filtran en WIQL antes de leer los campos, y el progreso indica los elementos abiertos obtenidos; al actualizar los datos también desaparecen de la copia local los que se hayan cerrado desde la importación anterior.
+- Importa tareas y bugs en los estados seleccionados en Configuración. Inicialmente se incluyen los estados abiertos y `Resolved`, y se excluyen `Completed` y `Removed`; se puede cambiar cualquier estado del catálogo. Los padres se recuperan por ID como contexto, independientemente de su estado, para mantener la jerarquía. Los filtros se aplican en WIQL antes de descargar los elementos. Al actualizar se conservan los cambios locales pendientes.
 - Consulta capacidad, calendario laboral, ausencias personales y días libres del equipo. Una capacidad que no se ha podido consultar se muestra como desconocida, acompañada de un aviso.
 - Mantiene las estimaciones en puntos separadas de las horas. La carga utiliza **RemainingWork**; los puntos se muestran como información. No se convierten puntos a horas.
-- Sincroniza únicamente los campos editados: `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority`, `Microsoft.VSTS.Scheduling.RemainingWork` y `System.State`. El estado solo se cambia al marcar una tarea o bug como completado, con el estado que elijas como completado para su tipo. La importación propone el primer estado de categoría `Completed`. Si no se conoce, al marcar la primera tarea de ese tipo se muestra una lista para elegirlo: los estados de los datos importados, nombres habituales y un nombre libre. Puedes consultar todos los estados del flujo en Azure DevOps bajo demanda; esa consulta muestra su progreso y se puede cancelar. La elección se recuerda al volver a importar y se cambia desde **Al completar**, en el paso 2; las tareas ya marcadas pasan al nuevo estado.
+- Sincroniza únicamente los campos editados: `System.Title`, `System.AssignedTo`, `System.IterationPath`, `Microsoft.VSTS.Common.Priority`, las estimaciones disponibles y `System.State`. El resto de campos conserva su último valor local; los estados guardados se envían secuencialmente por tarea. El editor ofrece el catálogo de estados del proyecto y tipo; **Actualizar estados** vuelve a consultarlo con progreso y cancelación.
 - Las tarjetas se ordenan por prioridad e identificador. Mover una tarjeta cambia su asignación e iteración; no escribe el orden de Azure (`StackRank`). El reparto de participantes no crea cambios remotos en los padres. Solo las tareas y bugs elegidos pasan al borrador de la iteración.
-- Permite crear elementos en local y sincronizarlos con su proyecto de origen; no elimina work items ni modifica fechas de iteración. Los estados solo cambian al marcar tareas y bugs como completados. **Actualizar datos** requiere sincronizar o descartar el borrador previo.
-- La importación excluye todas las iteraciones pasadas, incluidas sus tareas y capacidades. Consulta el backlog sin iteración y las iteraciones actuales o futuras del equipo. Antes de descargar tareas, clasifica los estados por tipo; ante estados personalizados sin categoría pide una decisión con un elemento de muestra y la guarda por proyecto y tipo. `Discarded` se excluye por defecto. Lee campos en lotes de hasta 200, con un máximo de cuatro lotes concurrentes y paginación por ID sin truncamiento silencioso. Los padres abiertos fuera del área se leen como contexto mediante consultas filtradas. Un fallo conserva la copia anterior.
+- Permite crear elementos en local y sincronizarlos con su proyecto de origen; no elimina work items ni modifica fechas de iteración. Las tareas y bugs pueden cambiar a cualquier estado de su catálogo, sujeto a las reglas de Azure al sincronizar. **Actualizar datos** requiere sincronizar o descartar el borrador previo.
+- La importación excluye todas las iteraciones pasadas, incluidas sus tareas y capacidades. Consulta el backlog sin iteración y las iteraciones actuales o futuras del equipo. Antes de descargar tareas, clasifica los estados por tipo; ante estados personalizados sin categoría pide una decisión con un elemento de muestra y la guarda por proyecto y tipo. `Discarded` se excluye por defecto. Lee campos en lotes de hasta 200, con un máximo de cuatro lotes concurrentes y paginación por ID sin truncamiento silencioso. Los padres fuera del área o de las iteraciones consultadas se leen por ID como contexto, incluidos los cerrados. Un fallo conserva la copia anterior.
 
 ## MCP y autenticación
 
@@ -115,7 +124,7 @@ El acceso debe permitir leer proyectos/equipos y work items, y editar los work i
 
 El reparto compartido y las exclusiones de personas por rama son locales y persisten entre recargas, exportaciones, sincronizaciones y actualizaciones de datos del mismo equipo (para elementos y miembros que sigan presentes). Descartar cambios de Azure no borra el reparto ni sus exclusiones. Por eso las tareas ya asignadas en la iteración siempre siguen visibles en el selector, incluso si su participación local está excluida. Cada tarea mantiene un solo `System.AssignedTo` al sincronizar; compartir participantes no duplica tareas ni capacidad.
 
-La configuración y ambas planificaciones se guardan en `.neo-team/workspace.json`, excluido de Git. Se escribe mediante un archivo temporal y reemplazo atómico, con permisos privados en sistemas que los soportan. **Exportar** descarga una copia JSON de la planificación activa; no se incluye una función de restauración desde la interfaz. Para una copia íntegra, conserva el archivo de trabajo con la aplicación detenida.
+La configuración y ambas planificaciones se guardan en `.neo-team/workspace.json`, excluido de Git. Se escribe mediante un archivo temporal y reemplazo atómico, con permisos privados en sistemas que los soportan. Para una copia íntegra, conserva el archivo de trabajo con la aplicación detenida.
 
 Los cambios locales tienen una versión para impedir sobrescrituras desde ventanas desactualizadas. La revisión compara cada campo editado con su valor importado y el remoto: conserva cambios remotos ajenos al borrador y señala los conflictos en el mismo campo. Elegir **Conservar versión de Azure** descarta todos los cambios locales de esa tarea; **Mantener mis cambios** los vuelve a preparar sobre la versión de Azure que ya leyó la revisión. La decisión se aplica al momento: no se vuelve a consultar Azure ni se repasan los demás cambios, y se puede sincronizar sin revisar de nuevo. Lo mismo ocurre con los conflictos de capacidad.
 
@@ -136,7 +145,7 @@ La interfaz incluye herramientas WebMCP opcionales para leer el plan y preparar 
 
 ### Creaciones y cambios pendientes
 
-Usa **+ Crear** o el **+** de una rama para crear épicas, features, historias, tareas y bugs en local. Los elementos nuevos y editados se señalan como pendientes; el paso 4 muestra el total. Los títulos también se pueden editar. Las creaciones se envían después de revisar, con los padres antes que los hijos.
+Usa el **+** de una rama para crear features, historias, tareas y bugs en local. Los elementos nuevos y editados se señalan como pendientes; el paso 5 muestra el total. Los títulos también se pueden editar. Las creaciones se envían después de revisar, con los padres antes que los hijos.
 
 **Duplicar** copia también la descripción del original (en los bugs, *Repro Steps*). Se lee de Azure DevOps al crear la copia, así que refleja la versión actual; el duplicado de un duplicado la toma del mismo original.
 

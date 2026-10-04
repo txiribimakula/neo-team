@@ -1,3 +1,4 @@
+import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
 import { reviewsView, publishConfirmation } from './reviews.js';
@@ -12,23 +13,34 @@ let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
-let lastPlanningTab = 'iteration', renderedTab;
-// The last step lists the pending changes in the page: its review load, sync and messages.
+let lastPlanningTab = 'configuration', renderedTab;
+// Global synchronization drawer: review, progress and results from every project.
 let changesUi = { loading: false, syncing: false, error: '', notice: '', confirmAll: false };
 let backlogQuery='';
 const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
 const expandedLanes = new Set(), expandedPrevious = new Set();
 let previousGroupOrder = null;
-// Elegir tareas works on the previous iteration (decide what is left) or the current one.
+// Tareas works on the previous iteration (decide what is left) or the current one.
 let planningPeriod = null;
 const modal = $('#modal');
+const syncPanel = $('#sync-panel');
+let shownPending = 0;
 // Measure real row heights so wrapped parent titles never overlap.
+// Sticky rows stop below the scroll container's padding; they are lifted by it
+// so nothing scrolling behind shows through above the first row.
+const scrollPadding = element => {
+  for (let el=element.parentElement; el && el!==document.body; el=el.parentElement) {
+    const style=getComputedStyle(el);
+    if (/auto|scroll/.test(style.overflowY)) return parseFloat(style.paddingTop) || 0;
+  }
+  return 0;
+};
 let stickyFrame;
 function layoutStickyHierarchy() {
   cancelAnimationFrame(stickyFrame);
   stickyFrame=requestAnimationFrame(()=>{
-    const offsets=new Map();
+    const offsets=new Map(), paddings=new Map();
     document.querySelectorAll('.hierarchy-branch').forEach(branch=>{
       const summary=branch.querySelector(':scope > summary');
       const parent=branch.parentElement.closest('.hierarchy-branch');
@@ -36,10 +48,12 @@ function layoutStickyHierarchy() {
       const top=previous?.bottom ?? 0;
       const depth=previous ? previous.depth+1 : 0;
       const bottom=top+summary.getBoundingClientRect().height;
-      summary.style.top=`${top}px`;
+      const root=previous ? previous.root : branch;
+      if (!paddings.has(root)) paddings.set(root,scrollPadding(branch));
+      summary.style.top=`${top-paddings.get(root)}px`;
       summary.style.zIndex=String(Math.max(3,30-depth));
       branch.style.setProperty('--sticky-path-height',`${bottom+10}px`);
-      offsets.set(branch,{bottom,depth});
+      offsets.set(branch,{bottom,depth,root});
     });
   });
 }
@@ -109,7 +123,7 @@ async function request(path, input = {}) {
   if (pending) throw new Error('Espera a que termine la operación en curso.');
   pending = true;
   let recover = false;
-  const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]), input:not(:disabled), select:not(:disabled)')];
+  const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]):not([data-action="close-sync"]), input:not(:disabled), select:not(:disabled)')];
   // Local saves answer in a few milliseconds: controls are only disabled when a
   // request takes longer, so quick edits never make the screen flash.
   const busy = setTimeout(() => { enabled.forEach(el => el.disabled = true); $('#save-status').textContent = 'Procesando…'; }, 250);
@@ -149,28 +163,34 @@ async function loadState(renderNow = true) {
 }
 function showModal(title, subtitle, body, actions = '') {
   modal.classList.remove('wide-modal', 'connection-modal');
-  $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2><p>${escape(subtitle)}</p></div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
+  $('#modal-content').innerHTML = `<div class="modal-head"><div><h2 id="modal-title">${escape(title)}</h2>${subtitle ? `<p>${escape(subtitle)}</p>` : ''}</div><button class="close" data-action="close" aria-label="Cerrar">×</button></div><div class="modal-body"><div class="inline-error" id="modal-error" role="alert" hidden></div>${body}</div><div class="modal-footer">${actions || '<button class="button" data-action="close">Cerrar</button>'}</div>`;
   if (!modal.open) modal.showModal();
   const focus = $('#modal-content [autofocus]') || $('#modal-content input:not(:disabled), #modal-content select:not(:disabled), #modal-content textarea:not(:disabled)');
   focus?.focus();
 }
 let connectionPickerEvents = new AbortController();
-function connection() {
-  connectionPickerEvents.abort();
-  connectionPickerEvents = new AbortController();
-  const c = state.config || {}, adding = state.mode === 'azure' && !!state.workspace;
-  showModal(adding ? 'Añadir proyecto' : state.config ? 'Configuración de Azure DevOps' : 'Conectar Azure DevOps', adding ? 'Añade un proyecto a la planificación conjunta. Los ya importados se conservan.' : 'Indica la organización, el proyecto y el equipo que vas a planificar. Solo se leen datos hasta que revises y sincronices.', `
-    <form id="connection-form">
-      <label class="form-field">Organización<input name="organization" required maxlength="150" placeholder="mi-organizacion o https://dev.azure.com/mi-organizacion" value="${escape(c.organization)}" autocomplete="off"></label>
-      <label class="form-field">Acceso<select name="authentication"><option value="interactive">Iniciar sesión con Microsoft</option><option value="azcli" ${c.authentication === 'azcli' ? 'selected' : ''}>Usar mi sesión de Azure CLI</option></select><small>Con Microsoft se abrirá tu navegador para iniciar sesión. La aplicación no solicita tu contraseña.</small></label>
-      ${connectionField('project', 'Proyecto', c.project)}
-      ${connectionField('team', 'Equipo', c.team)}
-      <details><summary class="text-muted" style="font-size:14px;cursor:pointer;margin-bottom:14px">Opciones avanzadas</summary><label class="form-field">Tenant de Microsoft Entra (opcional)<input name="tenant" placeholder="Identificador del directorio" value="${escape(c.tenant)}"><small>Déjalo vacío para detectar el directorio de tu organización.</small></label></details>
-      <div id="connection-progress" hidden></div>
-      <div class="notice">Se importan tareas abiertas e iteraciones actuales y futuras. Los estados personalizados sin categoría se revisan antes de descargar las tareas. Las capacidades se definen una sola vez para todos los proyectos. Podrás preparar cambios en local y revisarlos antes de sincronizarlos.</div>
-    </form>`, `<button class="button" data-action="save-config">Guardar sin importar</button><button class="button primary" type="submit" form="connection-form">${adding ? 'Añadir e importar' : 'Conectar e importar'} ↙</button>`);
+// Azure requires a successfully imported team; saved settings alone do not unlock the app.
+const needsConnection = () => state.mode === 'azure' && (!state.config || !state.workspace);
+async function connection() {
+  if (state.mode === 'demo') await switchMode('azure');
+  if (needsConnection()) { render(); return; }
+  const adding = state.mode === 'azure' && !!state.workspace;
+  showModal(adding ? 'Añadir proyecto' : 'Configuración de Azure DevOps', adding ? 'Los proyectos ya importados se conservan.' : '', connectionForm(state.config), `<button class="button" data-action="save-config">Guardar sin importar</button><button class="button primary" type="submit" form="connection-form">${adding ? 'Añadir e importar' : 'Conectar e importar'} ↙</button>`);
   modal.classList.add('connection-modal');
   setupConnectionPickers();
+}
+function connectionForm(c = {}, footer = '') {
+  return `<form id="connection-form">
+      <label class="form-field">Organización<input name="organization" required maxlength="150" placeholder="mi-organizacion o https://dev.azure.com/mi-organizacion" value="${escape(c.organization)}" autocomplete="off"></label>
+      <label class="form-field">Acceso<select name="authentication"><option value="interactive">Iniciar sesión con Microsoft</option><option value="azcli" ${c.authentication === 'azcli' ? 'selected' : ''}>Usar mi sesión de Azure CLI</option></select></label>
+      ${connectionField('project', 'Proyecto', c.project)}
+      ${connectionField('team', 'Equipo', c.team)}
+      <details><summary class="text-muted" style="font-size:14px;cursor:pointer;margin-bottom:14px">Opciones avanzadas</summary><label class="form-field">Tenant de Microsoft Entra (opcional)<input name="tenant" placeholder="Identificador del directorio" value="${escape(c.tenant)}"></label></details>
+      <div id="connection-progress" hidden></div>${footer}
+    </form>`;
+}
+function connectionPage() {
+  return `<section class="connection-page"><h1>Conectar Azure DevOps</h1>${connectionForm(state.config ?? {}, '<div class="actions"><button class="button primary" type="submit">Conectar e importar ↙</button></div>')}</section>`;
 }
 function connectionField(name, label, value) {
   return `<div class="form-field connection-field" data-picker="${name}">
@@ -192,6 +212,8 @@ function connectionField(name, label, value) {
 }
 const getConfig = () => Object.fromEntries(new FormData($('#connection-form')));
 function setupConnectionPickers() {
+  connectionPickerEvents.abort();
+  connectionPickerEvents = new AbortController();
   const form = $('#connection-form');
   const pickers = {};
   const normalize = value => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('es');
@@ -227,7 +249,7 @@ function setupConnectionPickers() {
       visible = (items || []).filter(item => normalize(item).includes(normalize(filter.trim())));
       list.innerHTML = visible.map((item, i) => `<div id="${name}-option-${i}" class="connection-option" role="option" aria-selected="${item === input.value}" data-index="${i}"><span>${escape(item)}</span>${item === input.value ? '<span aria-hidden="true">✓</span>' : ''}</div>`).join('');
       empty.hidden = visible.length > 0;
-      empty.textContent = items?.length ? 'Sin coincidencias. Prueba otra búsqueda o escribe el nombre completo.' : `No se encontraron ${plural}. Puedes actualizar la lista o escribir el nombre completo.`;
+      empty.textContent = items?.length ? 'Sin coincidencias.' : `No se encontraron ${plural}.`;
       dropdown.hidden = false;
       input.setAttribute('aria-expanded', 'true');
     };
@@ -248,7 +270,7 @@ function setupConnectionPickers() {
       try {
         const data = await request(`/api/${kind}`, { config, operationId });
         items = [...new Set(data[kind].map(item => item.name))].sort((a, b) => a.localeCompare(b, 'es'));
-        message(items.length ? `${items.length} ${plural} disponibles. Escribe para filtrar y selecciona uno.` : `No hay ${plural} disponibles. Comprueba el acceso o introduce el nombre manualmente.`);
+        message(items.length ? '' : `No hay ${plural} disponibles. Comprueba el acceso o escribe el nombre.`);
         input.focus();
         open();
       } catch (error) {
@@ -321,10 +343,7 @@ function setupConnectionPickers() {
       picker.input.disabled = picker.toggle.disabled = pending || !ready;
       if (!ready) {
         picker.close();
-        $(`#${name}-status`, form).textContent = name === 'project' ? 'Indica primero la organización.' : 'Indica primero el proyecto.';
-      } else {
-        const note = $(`#${name}-status`, form);
-        if (!note.textContent || note.textContent.startsWith('Indica primero')) note.textContent = 'Abre el desplegable para buscar o escribe el nombre completo.';
+        $(`#${name}-status`, form).textContent = '';
       }
     }
   }
@@ -334,8 +353,8 @@ function setupConnectionPickers() {
       updateAvailability();
     });
   }
-  // Close on pointer clicks outside a picker, including non-focusable modal text.
-  modal.addEventListener('click', event => {
+  // Close on pointer clicks outside a picker, including non-focusable text.
+  document.addEventListener('click', event => {
     Object.entries(pickers).forEach(([name, picker]) => {
       if (!event.target.closest(`[data-picker="${name}"]`)) picker.close();
     });
@@ -524,10 +543,13 @@ async function resumeOperation() {
 async function saveConfig(importNow) {
   const form = $('#connection-form'); if (!form.reportValidity()) return;
   const config = getConfig();
+  const inline = !modal.open;
   await request('/api/config', { config }); render();
   if (!importNow) { modal.close(); toast('Configuración guardada. Puedes importar los datos cuando quieras.'); return; }
+  // Guardada la conexión, la página deja de ser el formulario: el progreso sigue en un diálogo.
+  if (inline) showModal('Importando equipo', `${config.project} / ${config.team}`, '<div id="connection-progress"></div>');
   await importWithProgress($('#connection-progress'));
-  modal.close(); selectedIteration = ''; tab = 'iteration'; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
+  modal.close(); selectedIteration = ''; tab = 'configuration'; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
 }
 function selected() {
   const ws = state.workspace;
@@ -646,28 +668,21 @@ function sectionRefreshButton() {
   return `<div class="workspace-controls"><button class="button small" data-action="refresh-section" data-section="${section}">Actualizar ${label}</button><small class="text-muted">Solo ${label}${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}</small></div>`;
 }
 function stepView() {
-  const steps = {
-    iteration: ['Elige la iteración', 'Selecciona el período que quieres preparar. Después podrás ajustar la capacidad y repartir las tareas.'],
-    capacity: ['Revisa la capacidad del equipo', 'Ajusta las horas diarias y pulsa un día para marcar o quitar una ausencia. La fila «Todo el equipo» define los días libres comunes.'],
-    planning: ['Elige y reparte las tareas', 'Abre una tarea para asignarla o arrástrala a una persona. Revisa las horas pendientes para comparar carga y capacidad.'],
-  };
-  const heading = steps[tab];
-  const next = ({capacity:['planning','Elegir tareas'], planning:['changes','Revisar cambios']})[tab];
-  return `${heading ? `<header class="step-heading"><h1>${heading[0]}</h1><p>${heading[1]}</p></header>` : ''}${sectionRefreshButton()}${stepContent()}${next && selected() ? `<div class="step-next"><span>Los cambios se guardan en este equipo.</span><button class="button primary" data-action="tab" data-tab="${next[0]}">${next[1]} →</button></div>` : ''}`;
+  return `${sectionRefreshButton()}${stepContent()}`;
 }
 function stepContent() {
   const iteration=selected();
-  if (tab==='changes') return changesView();
+  if (tab==='configuration') return configurationView(state);
   if (tab==='iteration') return iterationView();
   if (tab==='capacity') return capacityView();
   if (tab==='planning') return plannerView();
   if (!iteration) return hierarchyView();
   return board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
 }
-function stepTabs(changes) {
+function stepTabs() {
   const open=previousTasks().tasks.filter(t=>t.status==='open').length;
-  const steps=[['iteration','Iteración'],['capacity','Capacidad'],['planning','Elegir tareas',open]];
-  return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}<button class="step-tab ${tab==='changes' ? 'active' : ''}" data-action="tab" data-tab="changes" ${tab==='changes' ? 'aria-current="step"' : ''} ${changes || tab==='changes' ? '' : 'disabled'}><span>${steps.length+1}</span>Cambios pendientes${changes ? `<small aria-label="${changes} sin sincronizar">${changes}</small>` : ''}</button></nav>`;
+  const steps=[['configuration','Configuración'],['iteration','Iteración'],['capacity','Capacidad'],['planning','Tareas',open]];
+  return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}</nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
 // Current, the one right after it, and later ones, each with its own colour.
@@ -678,7 +693,7 @@ function iterationKinds(iterations) {
   const current=ordered.find(isCurrent), after=current ? ordered.slice(ordered.indexOf(current)+1) : ordered.filter(i=>day(i.attributes?.startDate)>today);
   return new Map(iterations.map(i=>[i.id,i===current ? 'current' : i===after[0] ? 'next' : after.includes(i) ? 'future' : 'other']));
 }
-const iterationKindLabel={current:'Actual',next:'Siguiente',future:'Futura',other:'Iteración'};
+const iterationKindLabel={current:'En curso',next:'Siguiente',future:'Futura',other:'Iteración'};
 function iterationView() {
   const ws=state.workspace, selectedOne=selected();
   if (!selectedOne) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
@@ -716,7 +731,7 @@ function previousTaskRow({item,base,status},iteration) {
   const actions=status==='open'
     ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" title="Marcar como completada">✓ Completada</button><button class="button small" data-action="to-backlog" data-task="${item.id}" title="Mandar al backlog: quita la iteración y conserva el responsable">↩ Backlog</button>${laterIterationSelect(item,iteration)}`
     : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button small subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
-  return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(base.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
+  return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(item.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
 }
 function previousPerson(group,iteration) {
   const open=group.tasks.filter(t=>t.status==='open'), hours=open.reduce((sum,t)=>sum+(t.item.remainingWork ?? 0),0), decided=group.tasks.length-open.length;
@@ -728,9 +743,8 @@ function previousView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration) return '<div class="empty-result">Elige primero la iteración que vas a planificar.</div>';
   const {previous,tasks}=previousTasks(iteration);
-  const next='<button class="button primary" data-action="planning-period" data-period="current">Ir a la iteración actual →</button>';
   if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza los datos para traer la última iteración terminada.' : ''}</p></div>`;
-  const open=tasks.filter(t=>t.status==='open'), owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
+  const owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
   const groups=[
     ...ws.members.map((member,index)=>({id:key(member),name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
     {id:'unassigned',name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
@@ -741,44 +755,26 @@ function previousView() {
   const orderKey=`${previous.id}|${groups.map(g=>g.id).join(',')}`;
   if (previousGroupOrder?.key!==orderKey) previousGroupOrder={key:orderKey,ids:groups.map((g,index)=>({id:g.id,index,done:!g.tasks.some(t=>t.status==='open')})).sort((a,b)=>Number(a.done)-Number(b.done) || a.index-b.index).map(g=>g.id)};
   groups.sort((a,b)=>previousGroupOrder.ids.indexOf(a.id)-previousGroupOrder.ids.indexOf(b.id));
-  const idle=ws.members.filter(member=>!owned(member).length), types=[...new Set(tasks.map(t=>t.item.type))];
-  const kinds=[...new Map(tasks.map(t=>[`${t.item.sourceId ?? ''}\n${t.item.type}`,t.item])).values()];
-  const completion=types.length ? `<p class="completed-states">Al completar: ${kinds.map(item=>`<button class="link-button" data-action="edit-completed-state" data-type="${escape(item.type)}" data-source="${escape(item.sourceId ?? '')}" title="Cambiar el estado completado de ${escape(item.type)}">${ws.sources ? `${escape(item.project)} · ` : ''}${escape(item.type)} → ${escape(completedState(item,ws) || 'sin elegir')}</button>`).join(' · ')}</p>` : '';
-  return `<section class="previous-step"><header class="previous-heading"><div><h2>Revisa ${escape(previous.name)}</h2><p>${date(previous.attributes?.startDate)} — ${date(previous.attributes?.finishDate)} · Abre a cada persona resaltada para decidir lo que le queda: pasarlo a ${escape(iteration.name)}, marcarlo como completado o mandarlo al backlog.</p>${completion}</div><div class="previous-summary"><strong>${open.length}</strong><span>sin decidir</span><small>${tasks.length} en total</small></div></header>
-    ${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
-    ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}
-    <div class="capacity-next"><span>${open.length ? `Quedan ${open.length} por decidir. Puedes seguir con ${escape(iteration.name)} y volver después.` : 'Todo decidido.'} Las decisiones se guardan en local y se envían al sincronizar.</span>${next}</div></section>`;
-}
-// Which state closes a type is decided by the person. The list starts with what
-// is known locally; the complete workflow can be read from Azure on demand.
-let completedStateChoice=null;
-const stateCategoryLabels={proposed:'Sin empezar',inprogress:'En curso',resolved:'Resuelto',completed:'Completado',removed:'Retirado'};
-function knownStates(type, sourceId) {
-  const ws=state.workspace, found=new Map();
-  const add=(name,source)=>{const text=String(name ?? '').trim();if(text && !found.has(text.toLowerCase()))found.set(text.toLowerCase(),{name:text,source});};
-  add(completedState({type,sourceId},ws),'Elegido actualmente');
-  ws.items.filter(i=>i.type===type && (i.sourceId ?? null)===(sourceId ?? null)).forEach(i=>add(i.state,'En los datos importados'));
-  ['Closed','Done','Completed','Resolved','Removed'].forEach(name=>add(name,'Nombre habitual'));
-  return [...found.values()];
-}
-function chooseCompletedState(type, taskId=null, states=null, sourceId=undefined) {
-  completedStateChoice={type,taskId,sourceId};
-  const current=completedState({type,sourceId},state.workspace), project=state.workspace.sources?.find(s=>s.id===sourceId)?.config.project;
-  const options=states ? states.map(s=>({name:s.name,source:stateCategoryLabels[s.category] || 'Sin categoría'})) : knownStates(type,sourceId);
-  const checked=current || options.find(o=>o.source==='Completado')?.name;
-  showModal(`Estado completado de «${type}»${project ? ` en ${project}` : ''}`,'Elige el estado que se asigna al marcar como completada una tarea de este tipo. Se recordará.', `<form id="completed-state-form"><div class="participant-list">${options.map(o=>`<label class="participant-option"><input type="radio" name="state" value="${escape(o.name)}" ${o.name===checked ? 'checked' : ''} required><span><strong>${escape(o.name)}</strong><small>${escape(o.source)}</small></span></label>`).join('')}<label class="participant-option"><input type="radio" name="state" value="" data-other-state><span class="other-state"><strong>Otro estado</strong><input name="other" maxlength="128" placeholder="Nombre exacto en Azure DevOps" aria-label="Otro estado"></span></label></div>${states ? '<p class="form-intro">Estados del flujo de trabajo en Azure DevOps.</p>' : `<p class="form-intro">La lista reúne los estados de los datos importados y nombres habituales.${state.mode==='demo' ? '' : ' Azure DevOps comprobará el estado al sincronizar.'}</p><button type="button" class="button small" data-action="load-work-item-states">Consultar todos los estados en Azure DevOps</button><div id="connection-progress" hidden></div>`}</form>`, `<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="completed-state-form">${taskId ? 'Guardar y marcar completada' : 'Guardar'}</button>`);
-  modal.classList.add('connection-modal');
+  const idle=ws.members.filter(member=>!owned(member).length);
+  return `<section class="previous-step">${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
+    ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}</section>`;
 }
 async function decidePrevious(id, decision, path) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
   if (!item || !base || !iteration) throw new Error('La tarea ya no está disponible.');
   if (decision==='complete') {
-    if (!completedState(item,ws)) { chooseCompletedState(item.type,id,null,item.sourceId); return; }
+    if (!completedState(item,ws)) { await editTask(id); return; }
     await request('/api/complete-task',{id});
   }
-  else await request('/api/stage',{edits:[{id,changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='move' ? {iterationPath:path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath,state:base.state}}]});
+  else await request('/api/stage',{edits:[{id,...(decision==='undo' ? {discardStates:true} : {}),changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='move' ? {iterationPath:path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath}}]});
+  // Deciding someone's last task sends them, closed, to the bottom of the list.
+  const groupOf=assignee=>!assignee ? 'unassigned' : state.workspace.members.some(m=>key(m)===assignee) ? assignee : 'outside';
+  const group=groupOf(item.assignedTo);
+  const finished=decision!=='undo' && !previousTasks(iteration).tasks.some(t=>t.status==='open' && groupOf(t.item.assignedTo)===group);
+  if (finished) { expandedPrevious.delete(group); previousGroupOrder=null; }
   review=null;render();
-  document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
+  if (finished) ($('.previous-person.has-open .previous-toggle') || $(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`))?.focus({preventScroll:true});
+  else document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
   // Allowed, but flagged: the owner has no capacity in the destination or is not in the team.
   const target=decision==='carry' ? iteration : decision==='move' ? ws.iterations.find(i=>i.path===path) : null, owner=item.assignedTo;
   if (target && owner) {
@@ -865,11 +861,11 @@ function toggleDay(ranges, day) {
   return merged;
 }
 let capacityOrder=null;
-function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
+function capacityGrid(ws,iteration,drafts,conflicts,hours,total) {
   const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3, teamOff=capacityOf(iteration.id,'team').daysOff;
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
-  const head=`<tr><th class="cg-person" scope="col">Persona</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
-  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todo el equipo</strong><small>${team.off ? plural(team.off,'día libre','días libres') : 'Sin descansos comunes'}</small></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todo el equipo',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
+  const head=`<tr><th class="cg-person" scope="col">${capacityHistoryButtons(iteration.id)}</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
+  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todos</strong></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todos',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
   // Available people first; then those off every day, those with 0 h and, last,
   // those without capacity in Azure. Everyone without hours is dimmed.
   const rank=member=>{
@@ -883,7 +879,7 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total,team) {
   if (capacityOrder?.key!==orderKey) capacityOrder={key:orderKey,ids:ws.members.map((member,index)=>({id:member.id,index,rank:rank(member)})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(p=>p.id)};
   const rows=capacityOrder.ids.map(id=>ws.members.findIndex(m=>m.id===id)).filter(index=>index>=0).map(index=>({member:ws.members[index],index,rank:rank(ws.members[index])})).map(({member,index,rank})=>{
     const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
-    return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong><small>${capacityBreakdown(member.id,entry).available} días disponibles</small></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
+    return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
   const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total"></colgroup>`;
   return `<div class="capacity-grid-wrap" tabindex="0" role="region" aria-label="Calendario de capacidad; desplázate horizontalmente para ver todos los días"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
@@ -893,9 +889,8 @@ function capacityView() {
   if (!iteration || !ws.members.length) return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para revisar la capacidad.</div>';
   const drafts=ws.capacityDrafts?.[iteration.id] ?? {}, conflicts=ws.capacityConflicts?.[iteration.id] ?? {}, hours=ws.capacityHours?.[iteration.id] ?? {};
   const known=ws.members.filter(m=>hours[m.id]!=null), total=known.reduce((sum,m)=>sum+hours[m.id],0);
-  const team=capacityBreakdown('team',capacityOf(iteration.id,'team'));
   return `<section class="capacity-step">
-    ${capacityGrid(ws,iteration,drafts,conflicts,hours,total,team)}
+    ${capacityGrid(ws,iteration,drafts,conflicts,hours,total)}
   </section>`;
 }
 // 'change' fires before focus moves on: wait for it to land on the next control.
@@ -911,9 +906,34 @@ async function saveCapacity(owner, change, focus) {
   // Saving redraws the step, so the control the person moved to is read first.
   if (!focus) await settledFocus();
   const active=focus || capacityFocus(document.activeElement);
-  await request('/api/capacity',{ iterationId:selectedIteration, key:owner, ...change });
-  review=null; render();
+  await trackCapacity(owner,()=>request('/api/capacity',{ iterationId:selectedIteration, key:owner, ...change }));
   restoreFocus(active);
+}
+// Undo and redo walk this session's capacity edits, per iteration. Each step
+// stages the person's previous or next values, so it is one more local edit.
+const capacityHistory={};
+const historyOf=iterationId=>capacityHistory[`${state.mode}|${iterationId}`] ??= {undo:[],redo:[]};
+async function trackCapacity(owner, action) {
+  const iterationId=selectedIteration, before=capacityOf(iterationId,owner);
+  await action();
+  const after=capacityOf(iterationId,owner), history=historyOf(iterationId);
+  if (JSON.stringify(before)!==JSON.stringify(after)) { history.undo.push({owner,before,after}); history.redo=[]; }
+  review=null; render();
+}
+async function stepCapacityHistory(from, to) {
+  const history=historyOf(selectedIteration), step=history[from].pop();
+  if (!step) return;
+  const entry=from==='undo' ? step.before : step.after;
+  try { await request('/api/capacity',{ iterationId:selectedIteration, key:step.owner, daysOff:entry.daysOff, ...(step.owner==='team' ? {} : {activities:entry.activities}) }); }
+  catch (error) { history[from].push(step); throw error; }
+  history[to].push(step);
+  review=null; render();
+  const button=$(`[data-action="capacity-${from}"]`);
+  (button?.disabled ? $(`[data-action="capacity-${to}"]`) : button)?.focus({preventScroll:true});
+}
+function capacityHistoryButtons(iterationId) {
+  const {undo,redo}=historyOf(iterationId);
+  return `<span class="cg-history"><button type="button" class="cg-undo" data-action="capacity-undo" title="Deshacer" aria-label="Deshacer el último ajuste de capacidad" ${undo.length ? '' : 'disabled'}>↶</button><button type="button" class="cg-undo" data-action="capacity-redo" title="Rehacer" aria-label="Rehacer el ajuste de capacidad" ${redo.length ? '' : 'disabled'}>↷</button></span>`;
 }
 // Saving re-renders the step, so the control the person moved to is restored.
 function capacityFocus(element) { return element?.dataset?.focus ? `[data-focus="${element.dataset.focus}"]` : ''; }
@@ -1052,22 +1072,36 @@ function board(iteration, planned) {
 
 function render() {
   const ws=state.workspace;
-  $('#connection-button').textContent=state.mode==='azure' && ws ? 'Añadir proyecto' : state.config ? 'Configuración' : 'Conectar Azure DevOps';
   $('#save-status').textContent=ws ? savedStatus() : '';
+  const syncButton=$('#sync-button'), changes=pendingCount();
+  // Each new pending change restarts the spin straight away.
+  if (changes>shownPending) { syncButton.classList.remove('has-pending'); void syncButton.offsetWidth; }
+  shownPending=changes;
+  syncButton.classList.toggle('has-pending',changes>0);
+  syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
+  syncButton.title=`Sincronización: ${savedStatus()}`;
+  renderSyncPanel();
   const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
-  document.querySelectorAll('[data-section]').forEach(button => {
-    if (button.dataset.section === section) button.setAttribute('aria-current', 'page');
-    else button.removeAttribute('aria-current');
+  const demo = state.mode === 'demo';
+  document.querySelectorAll('.mode-toggle button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
+    button.disabled = !!state.busy;
   });
-  const shortcut = $('#pending-shortcut'), changesCount = pendingCount(ws);
-  shortcut.hidden = !changesCount;
-  shortcut.textContent = `Revisar ${plural(changesCount, 'cambio')}`;
-  $('#demo-banner').hidden = state.mode !== 'demo';
-  $('#demo-banner span').innerHTML = tab==='permissions' && state.config?.project
-    ? '<strong>Modo de ejemplo</strong> · Permisos consulta el proyecto real conectado, solo en lectura.'
-    : '<strong>Modo de ejemplo</strong> · Los cambios y las publicaciones se simulan.';
+  const connecting = needsConnection();
+  $('#mode-banner').hidden = connecting;
+  if (connecting) {
+    $('.workspace-label').textContent = 'Conexión';
+    document.title = 'Conexión · Neo Team';
+    // Redibujar no debe borrar lo que se está escribiendo ni el progreso de una consulta.
+    if (!$('#app #connection-form')) { $('#app').innerHTML = connectionPage(); setupConnectionPickers(); }
+    return;
+  }
+  $('#mode-banner').classList.toggle('is-demo', demo);
+  $('#mode-banner span').innerHTML = demo
+    ? '<strong>Modo de prueba</strong> · Sin conexión a Azure DevOps. Datos de ejemplo; los cambios y las publicaciones se simulan.'
+    : `<strong>Modo Azure DevOps</strong> · ${ws ? 'Datos reales. Los cambios se guardan en local hasta que confirmas la sincronización.' : state.config ? 'Conexión configurada. Importa el equipo para cargar los datos reales.' : 'Sin conexión configurada. Conecta tu organización para empezar.'}`;
   if (section === 'Planificación') lastPlanningTab = tab;
   if (renderedTab !== tab) {
     const firstRender = renderedTab === undefined;
@@ -1084,13 +1118,12 @@ function render() {
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><p>${state.config ? `Importa ${escape(state.config.project)} / ${escape(state.config.team)} para traer sus iteraciones, capacidad y tareas abiertas. Solo se lee Azure DevOps: nada se modifica hasta que revises y sincronices.` : 'Conecta tu organización de Azure DevOps para traer iteraciones, capacidad y tareas, o prueba antes con un ejemplo que nunca contacta con Azure.'}</p><div class="actions"><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>`;return;
   }
-  const iteration=selected();
-  const changes=pendingCount(ws), drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
+  const drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
   // Redrawing keeps the horizontal position of the capacity grid and the scroll of
   // each column that scrolls on its own.
   const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0, scrolls=keptScrolls();
-  $('#app').innerHTML=`<div class="workspace-controls"><span class="team-label">${ws.sources ? ws.sources.map(s=>escape(s.config.project)).join(' · ') : escape(ws.config.project)+' / '+escape(ws.config.team)}</span>${ws.mode==='azure' ? '<button class="button small" data-action="connect">+ Añadir proyecto</button>' : ''}<button class="button small" data-action="create">+ Crear</button>${iteration ? `<button class="button small iteration-select" data-action="tab" data-tab="iteration" title="Cambiar la iteración que se planifica">Planificando ${escape(iteration.name)} · Cambiar</button>` : ''}<div class="workspace-data-actions">${ws.mode==='demo' ? '' : `<button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>`}<a class="button small" href="/api/export" download>Exportar</a></div></div>
-  ${stepTabs(changes)}
+  $('#app').innerHTML=`${ws.mode==='azure' ? `<div class="workspace-controls"><button class="button small" data-action="connect">+ Añadir proyecto</button><div class="workspace-data-actions"><button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button></div></div>` : ''}
+  ${stepTabs()}
   <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
@@ -1098,26 +1131,79 @@ function render() {
   fitBoardColumns();
   if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
-function editTask(id) {
+async function editTask(id, refreshStates = false) {
   const ws = state.workspace, item = ws.effectiveItems.find(i=>i.id === id);
   if (!item) throw new Error('La tarea ya no está disponible.');
   if (item.contextOnly) {toast('Este elemento es solo contexto de otro equipo.');return;}
+  const scope=ws.sources ? ws.sources.find(source=>source.id===item.sourceId) : ws;
+  let states=scope.workItemStates?.[item.type];
+  if (isExecutable(item) && (!states?.length || refreshStates)) {
+    showModal(`Estados de ${item.type}`, 'Cargando los estados disponibles de la tarea.', '<div id="connection-progress"></div>');
+    states=(await importWithProgress($('#connection-progress'),null,{path:'/api/work-item-states',input:{type:item.type,sourceId:item.sourceId},title:'Consultando estados'})).states;
+  }
+  const history=ws.stateChanges?.[id] ?? (ws.drafts[id]?.state ? [ws.drafts[id].state] : []);
+  const stateField=isExecutable(item) ? `<label class="form-field">Estado<select name="state">${[...new Set([item.state,...(states ?? []).map(s=>s.name)])].map(name=>`<option value="${escape(name)}" ${name===item.state ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select><small>Cada estado que guardes se enviará en orden al sincronizar.</small></label><button type="button" class="link-button" data-action="refresh-task-states" data-task="${id}">Actualizar estados</button>${history.length ? `<p class="notice"><strong>Estados pendientes:</strong> ${[ws.items.find(i=>i.id===id).state,...history].map(escape).join(' → ')}</p>` : ''}` : '';
   const paths = [{ path:ws.settings.backlogIteration.path, name:'Backlog' },...planningIterations()];
   if (!paths.some(i=>i.path === item.iterationPath)) paths.push({ path:item.iterationPath, name:iterationName(item.iterationPath) });
-  showModal(`#${id} · ${item.type}`, item.title, `${azureLink(item) ? `<p class="azure-open">${azureLink(item,'Abrir en Azure DevOps ↗')}</p>` : ''}<form id="task-form" data-task="${id}"><label class="form-field">Título<input name="title" required maxlength="255" value="${escape(item.title)}"></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
+  showModal(`#${id} · ${item.type}`, item.title, `${azureLink(item) ? `<p class="azure-open">${azureLink(item,'Abrir en Azure DevOps ↗')}</p>` : ''}<form id="task-form" data-task="${id}">${stateField}<label class="form-field">Título<input name="title" required maxlength="255" value="${escape(item.title)}"></label><label class="form-field">Responsable<select name="assignedTo"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m) === item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${item.assignedTo && !ws.members.some(m=>key(m) === item.assignedTo) ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)} (fuera del equipo)</option>` : ''}</select></label><label class="form-field">Iteración<select name="iterationPath">${paths.map(i=>`<option value="${escape(i.path)}" ${item.iterationPath === i.path ? 'selected' : ''}>${escape(i.name)}</option>`).join('')}</select></label><div class="grid2">${item.canPrioritize ? `<label class="form-field">Prioridad<select name="priority">${[1,2,3,4].map(p=>`<option value="${p}" ${item.priority === p ? 'selected' : ''}>P${p} · ${['Crítica','Alta','Media','Baja'][p-1]}</option>`).join('')}</select></label>` : ''}${item.canEstimateHours ? `<label class="form-field">Horas pendientes<input name="remainingWork" type="number" min="0" max="100000" step="0.25" value="${item.remainingWork ?? ''}" placeholder="Sin estimar"><small>Se guardan como trabajo restante.</small></label>` : `<div class="form-field">Estimación<span class="text-muted">${item.points !== null ? `${number(item.points)} puntos` : 'Sin estimar'} · consulta</span></div>`}</div><div class="notice">${ws.mode === 'demo' ? 'Datos de ejemplo. Puedes probar los cambios sin afectar a Azure DevOps.' : 'Este cambio se guarda en local. Se enviará cuando revises y confirmes la sincronización.'}</div></form>`, `${item.modified ? `<button class="button danger" data-action="discard-one" data-task="${id}">Deshacer cambios</button>` : '<button class="button" data-action="close">Cancelar</button>'}<button class="button primary" type="submit" form="task-form">Guardar en local</button>`);
   restrictAssignees($('#task-form [name="assignedTo"]'),item.assignedTo);
 }
 async function stage(id, changes) {
   await request('/api/stage', { edits:[{ id, changes }] }); review = null; render();
 }
-function reviewChanges() {
-  tab='changes'; review=null; changesUi={...changesUi,error:'',confirmAll:false}; render();
+function renderSyncPanel() {
+  if (!syncPanel.open) return;
+  // Keep the progress target mounted while its operation updates it.
+  if ((changesUi.loading || changesUi.syncing) && $('#changes-progress')) return;
+  const content=$('#sync-content'), scroll=content.scrollTop;
+  content.innerHTML=changesView();
+  content.scrollTop=scroll;
 }
+function reviewChanges() {
+  clearTimeout(syncCloseTimer);
+  syncPanel.classList.remove('is-closing');
+  if (!syncPanel.open) syncPanel.showModal();
+  document.body.classList.add('sync-open');
+  if (!changesUi.loading && !changesUi.syncing) {
+    review=null;
+    changesUi={...changesUi,error:'',confirmAll:false};
+  }
+  renderSyncPanel();
+}
+let syncCloseTimer;
+function closeSyncPanel() {
+  if (!syncPanel.open || syncPanel.classList.contains('is-closing')) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    syncPanel.close();
+    return;
+  }
+  syncPanel.classList.add('is-closing');
+  // Fallback in case the browser interrupts the CSS animation.
+  syncCloseTimer=setTimeout(()=>syncPanel.close(),300);
+}
+syncPanel.addEventListener('animationend',event=>{
+  if (event.target===syncPanel && event.animationName==='sync-panel-out' && syncPanel.classList.contains('is-closing')) syncPanel.close();
+});
+syncPanel.addEventListener('cancel',event=>{
+  event.preventDefault();
+  closeSyncPanel();
+});
+syncPanel.addEventListener('close',()=>{
+  clearTimeout(syncCloseTimer);
+  syncPanel.classList.remove('is-closing');
+  document.body.classList.remove('sync-open');
+  $('#sync-button').focus({preventScroll:true});
+});
+syncPanel.addEventListener('click',event=>{
+  if (event.target!==syncPanel) return;
+  const rect=syncPanel.getBoundingClientRect();
+  if (event.clientX<rect.left || event.clientX>rect.right || event.clientY<rect.top || event.clientY>rect.bottom) closeSyncPanel();
+});
 const reviewFresh = () => review && review.version===state.version && review.mode===state.mode;
-// Entering the step compares the local changes with Azure DevOps once; any later
+// Opening the drawer compares the local changes with Azure DevOps once; any later
 // local change invalidates the comparison and it is read again.
 async function loadReview() {
-  if (tab!=='changes' || changesUi.loading || changesUi.syncing || changesUi.error || reviewFresh() || !pendingCount()) return;
+  if (!syncPanel.open || changesUi.loading || changesUi.syncing || changesUi.error || reviewFresh() || !pendingCount()) return;
   if (pending) { setTimeout(loadReview,200); return; }
   changesUi.loading=true; render();
   try {
@@ -1153,23 +1239,24 @@ function capacityReview() {
 // button states when synchronizing will overwrite values changed in Azure DevOps.
 function reviewPlan(p) {
   const heading=`${p.creation ? 'Nuevo · Crear' : taskId(state.workspace.items.find(i=>i.id===p.id) ?? p)+' · Modificar'} · ${escape(p.title)}`;
+  const route=p.stateSteps?.length ? `<p class="state-review"><strong>Cambios de estado:</strong> ${[p.remote?.state,...p.stateSteps].filter(Boolean).map(escape).join(' → ')}. Se aplican en orden; si falla un paso, los pasos restantes quedan pendientes.</p>` : '';
   const rows=p.changes.map(c=>`<div class="change-row"><span class="change-label">${escape(c.label)}</span><span class="change-old">${escape(pretty(c.field,c.before))}${c.conflict ? `<small>Al importar: ${escape(pretty(c.field,c.original))}</small>` : ''}</span><span>→</span><span class="change-new">${escape(pretty(c.field,c.after))}${c.conflict ? ' ⚠' : ''}</span></div>`).join('');
   const notes=[
     p.missing && '<p class="local-note">No se pudo leer esta tarea en Azure DevOps (puede haberse eliminado o no tienes acceso). No se enviará; el resto de cambios sí.</p>',
     p.unverified && '<p class="local-note">No se pudo leer en Azure DevOps. Solo se enviará si la tarea no ha cambiado desde la importación; si cambió, quedará pendiente para revisarla.</p>',
-    p.conflicts.length && `<p class="local-note warning-text">Alguien la ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, tu versión local sobrescribirá ${p.conflicts.length===1 ? 'ese campo' : 'esos campos'}.</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>`,
-    !p.missing && !p.unverified && !Object.keys(p.updates).length && '<p class="local-note">Estos valores ya están aplicados en Azure DevOps. Solo se actualizará la copia local.</p>',
+    p.conflicts.length && `<p class="local-note warning-text">${p.stateSequenceConflict ? 'Hubo una respuesta perdida y Azure ha cambiado después. Elige qué versión conservar para continuar la secuencia.' : `Alguien la ha cambiado en Azure DevOps desde tu importación. Si sincronizas sin elegir, tu versión local sobrescribirá ${p.conflicts.length===1 ? 'ese campo' : 'esos campos'}.`}</p><div class="conflict-actions"><button class="button small" data-action="resolve-remote" data-task="${p.id}">Conservar versión de Azure</button><button class="button small" data-action="resolve-local" data-task="${p.id}">Mantener mis cambios</button></div>`,
+    !p.missing && !p.unverified && !p.stateSteps?.length && !Object.keys(p.updates).length && '<p class="local-note">Estos valores ya están aplicados en Azure DevOps. Solo se actualizará la copia local.</p>',
     p.validationError && `<p class="local-note warning-text">Azure DevOps no acepta esta creación: ${escape(p.validationError)}</p>`,
   ].filter(Boolean).join('');
   // Azure requires a description to create it: it is written here and sent with the creation.
   const description=p.needsDescription ? `<div class="notice warning">${p.item.description ? `«${escape(p.needsDescription.label)}» se enviará con la creación.` : `Azure DevOps exige «${escape(p.needsDescription.label)}» para crear este elemento. Sin ella no se creará.`}</div><textarea class="review-description" data-description="${p.id}" data-field="${escape(p.needsDescription.field)}" data-focus="description:${p.id}" rows="4" maxlength="20000" aria-label="${escape(p.needsDescription.label)}" placeholder="${escape(p.needsDescription.label)}">${escape(p.item.description ?? '')}</textarea>` : '';
   const discard=`<button class="button small danger" data-action="discard-change" data-task="${p.id}">${p.creation ? 'Descartar creación' : 'Descartar'}</button>`;
-  return `<section class="review-item"><div class="review-item-head"><h3>${heading}</h3>${discard}</div>${rows}${notes}${description}</section>`;
+  return `<section class="review-item"><div class="review-item-head"><h3>${heading}</h3>${discard}</div>${route}${rows}${notes}${description}</section>`;
 }
 function changesView() {
   const notice=changesUi.notice;
   if (changesUi.loading || changesUi.syncing) return `${notice}<div id="changes-progress"></div>`;
-  if (!pendingCount()) return `${notice}<div class="empty-panel"><h2>Sin cambios pendientes</h2><p>La copia local coincide con lo último importado o sincronizado.</p><div class="actions"><button class="button" data-action="tab" data-tab="planning">Volver a planificar</button></div></div>`;
+  if (!pendingCount()) return `${notice}<div class="empty-panel"><h2>Sin cambios pendientes</h2><p>La copia local coincide con lo último importado o sincronizado.</p><div class="actions"><button class="button" data-action="close-sync">Cerrar</button></div></div>`;
   if (changesUi.error) return `${notice}<div class="notice error">No se pudieron comparar los cambios con Azure DevOps: ${escape(changesUi.error)}</div><div class="actions changes-retry"><button class="button" data-action="retry-review">Reintentar</button></div>`;
   if (!reviewFresh()) { setTimeout(loadReview,0); return `${notice}<div id="changes-progress"></div>`; }
   const demo=state.mode==='demo', plans=review.plans, capacity=review.capacityPlans ?? [];
@@ -1202,30 +1289,14 @@ async function synchronize() {
   }
   render();
 }
-// Capacity moves both ways for the iteration being planned: download replaces the
-// local copy with Azure, upload sends only this iteration's capacity changes.
-let capacityNotice='';
+// Download replaces the local copy of the iteration's capacity with Azure; the
+// changes go up with the rest in Cambios pendientes.
 function capacityControls() {
-  const ws=state.workspace, iteration=selected(), azure=ws?.mode==='azure';
-  if(!ws || !iteration) return '';
-  const pending=ws.capacityPendingByIteration?.[iteration.id] ?? 0;
-  const upload=`<button class="button small ${pending ? 'primary' : ''}" data-action="upload-capacity" ${pending ? '' : 'disabled'} title="${pending ? `Envía a Azure DevOps los ${pending} ajustes de capacidad de ${escape(iteration.name)}` : 'No hay cambios de capacidad pendientes en esta iteración'}">${azure ? 'Subir capacidad' : 'Simular subida'}<span class="upload-count" aria-hidden="${!pending}">${pending || ''}</span></button>`;
-  const download=azure ? `<button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button>` : '';
-  const undo=`<button class="button small" data-action="discard-capacity" ${ws.capacityDrafts?.[iteration.id] ? '' : 'disabled'}>Deshacer ajustes</button>`;
-  return `<div class="workspace-controls">${download}${upload}${undo}</div><div id="capacity-download-progress" hidden></div>${capacityNotice}`;
-}
-async function uploadCapacity() {
-  const iteration=selected();
-  capacityNotice='';
-  const data=await importWithProgress($('#capacity-download-progress'),null,{path:'/api/upload-capacity',input:{iterationId:iteration.id},title:`Subiendo la capacidad de ${iteration.name}`});
-  const {successes,failures,conflicts}=data.result;
-  const problems=[...failures.map(f=>`<p class="inline-error">${escape(f.label)}: ${escape(f.error)}</p>`),...conflicts.map(label=>`<p class="inline-error">${escape(label)}: ha cambiado en Azure DevOps desde la importación. No se ha tocado; descarga la capacidad o revísala en Cambios pendientes para elegir.</p>`)].join('');
-  capacityNotice=problems ? `<div class="notice warning capacity-notice"><strong>${successes.length ? `Subidos ${plural(successes.length,'ajuste')}, faltan ${failures.length+conflicts.length}.` : 'No se ha subido la capacidad.'}</strong>${problems}</div>` : '';
-  review=null;render();
-  if(!problems) toast(`Capacidad subida: ${plural(successes.length,'ajuste')} sincronizado${successes.length===1 ? '' : 's'}.`);
+  const ws=state.workspace, iteration=selected();
+  if(ws?.mode!=='azure' || !iteration) return '';
+  return `<div class="workspace-controls"><button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button></div><div id="capacity-download-progress" hidden></div>`;
 }
 async function downloadCapacity() {
-  capacityNotice='';
   const iteration=selected();
   await importWithProgress($('#capacity-download-progress'),null,{path:'/api/download-capacity',input:{iterationId:iteration.id},title:`Descargando la capacidad de ${iteration.name}`});
   review=null;render();
@@ -1275,7 +1346,7 @@ async function refreshPlanningSection(section) {
   const title=({iterations:'Actualizar iteraciones',capacity:'Actualizar capacidad',tasks:'Actualizar tareas y jerarquía'})[section];
   showModal(title,'Se conservan los datos y cambios locales de las demás secciones.','<div id="connection-progress"></div>');
   await importWithProgress($('#connection-progress'),null,{path:'/api/refresh-section',input:{section},title});
-  modal.close();render();toast('Sección actualizada desde Azure DevOps.');
+  modal.close();render();toast(state.mode==='demo' ? 'Datos de prueba actualizados.' : 'Sección actualizada desde Azure DevOps.');
 }
 async function importData(refreshAll = true) {
   showModal('Actualizar todos los proyectos', 'Leyendo los proyectos importados y sus tareas abiertas.', '<div id="connection-progress"></div>');
@@ -1301,15 +1372,11 @@ async function securityQuery(descriptor, reauthenticate = false) {
 }
 // Home: the entry point to every area of the team management.
 function homeView() {
-  const ws=state.workspace, iteration=ws ? selected() : null, changes=pendingCount(ws);
-  const team=state.config?.team ? `${state.config.project} / ${state.config.team}` : ws ? `${ws.config.project} / ${ws.config.team}` : 'Neo Team';
-  const planning=!ws ? 'Sin datos importados' : `${iteration ? `Planificando ${escape(iteration.name)}` : 'Sin iteraciones'}${changes ? ` · ${changes} pendiente${changes===1 ? '' : 's'} de sincronizar` : ''}`;
-  const issues=maintenanceSnapshot?.issues;
-  const start=!state.config && !ws ? `<div class="home-start"><div><strong>Primer paso: conecta tu organización</strong><p>Neo Team lee tu equipo de Azure DevOps y guarda la planificación en este ordenador. Nada se envía a Azure hasta que revisas y confirmas los cambios. ¿Solo quieres verlo? Prueba con datos de ejemplo.</p></div><div class="actions"><button class="button primary" data-action="connect">Conectar Azure DevOps</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>` : '';
-  return `<section class="home"><header class="home-heading"><p class="eyebrow">GESTIÓN DEL EQUIPO</p><h1>${escape(team)}</h1><p>Elige por dónde empezar.</p></header>${start}<div class="home-sections">
-    <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong><span>Iteraciones, capacidad y reparto de tareas del equipo.</span><small>${planning}</small></button>
-    <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong><span>${escape(state.maintenanceSettings?.type || 'Functional Issue')} no cerrados del proyecto.</span><small>${issues ? `${issues.length} no cerrado${issues.length===1 ? '' : 's'} en la última consulta` : state.maintenanceSettings ? 'Se consultan al entrar' : 'Primero eliges qué estados son cerrados'}</small></button>
-    <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong><span>Revisa pull requests con GitHub Copilot y publica los comentarios que confirmes.</span><small>${state.prReviews?.length ? plural(state.prReviews.length,'revisión guardada','revisiones guardadas') : 'Nada se publica sin tu confirmación'}</small></button>
+  return `<section class="home"><div class="home-sections">
+    <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong></button>
+    <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
+    <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong></button>
+    <button class="home-card permissions" data-action="permissions" ${state.mode === 'demo' ? 'disabled title="Disponible en el modo Azure DevOps"' : ''}><span class="home-icon" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg></span><strong>Permisos</strong></button>
   </div></section>`;
 }
 async function loadMaintenance() {
@@ -1361,8 +1428,19 @@ async function saveFinding(el, change) {
   render();
   if (focus) $(focus)?.focus();
 }
+async function switchMode(mode) {
+  if (mode === state.mode) return;
+  if (pending || state.busy) return;
+  await request('/api/mode', { mode });
+  selectedIteration = ''; review = null;
+  changesUi = { loading:false, syncing:false, error:'', notice:'', confirmAll:false };
+  planningPeriod = null; previousGroupOrder = null;
+  lastPlanningTab = 'configuration'; tab = 'home';
+  render();
+  toast(mode === 'demo' ? 'Modo de prueba activado. Tus datos de Azure DevOps se conservan.' : 'Modo Azure DevOps activado. Tus pruebas se conservan por separado.');
+}
 const actions = {
-  permissions: async () => { await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
+  permissions: async () => { if (state.mode === 'demo') { toast('Cambia al modo Azure DevOps para consultar permisos.'); return; } await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
   'security-back': () => { tab = lastPlanningTab; render(); },
   'security-reconnect': el => securityQuery(el.dataset.descriptor || undefined, true),
   'security-refresh': () => securityQuery(),
@@ -1427,6 +1505,11 @@ const actions = {
     const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance-states', input: { type }, title: `Consultando los estados de «${type}»` });
     maintenanceSetup = { type: result.type, states: result.states }; modal.close(); render();
   },
+  'toggle-import-state':async el=>{
+    const index=el.dataset.importRule,rule=state.importRules[Number(index)];
+    await request('/api/import-rule',{...rule,action:rule.action==='include' ? 'exclude' : 'include'});
+    render();$(`[data-import-rule="${index}"]`)?.focus({preventScroll:true});
+  },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
   'download-hierarchy':downloadHierarchy,
@@ -1437,36 +1520,31 @@ const actions = {
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
   'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
-  'upload-capacity':uploadCapacity,
   'download-choice':async el=>{
     const choice=el.dataset.choice;
-    await request('/api/capacity-download-choice',{iterationId:selectedIteration,key:el.dataset.owner,choice});review=null;render();
+    await trackCapacity(el.dataset.owner,()=>request('/api/capacity-download-choice',{iterationId:selectedIteration,key:el.dataset.owner,choice}));
     toast(choice==='azure' ? 'Validada la capacidad de Azure DevOps.' : 'Recuperada tu capacidad local. Pendiente de sincronizar.');
   },
   connect: connection, close: () => modal.close(), 'save-config':()=>saveConfig(false),
-  demo: async()=>{ await request('/api/mode',{ mode:'demo' }); selectedIteration=''; tab='iteration'; render(); },
-  azure: async()=>{ await request('/api/mode',{ mode:'azure' }); selectedIteration=''; tab='iteration'; render(); },
+  'set-mode': el => switchMode(el.dataset.mode),
+  demo: () => switchMode('demo'),
+  azure: () => switchMode('azure'),
   import: importData,
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
-  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;tab='capacity';render();window.scrollTo({top:0});},
+  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;render();$(`[data-action="choose-iteration"][data-iteration="${CSS.escape(selectedIteration)}"]`)?.focus({preventScroll:true});},
   'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
   'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);previousGroupOrder=null;updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
-  'edit-completed-state': el=>chooseCompletedState(el.dataset.type,null,null,el.dataset.source || undefined),
-  'load-work-item-states': async()=>{
-    const {type,taskId,sourceId}=completedStateChoice;
-    const result=await importWithProgress($('#connection-progress'),null,{path:'/api/work-item-states',input:{type,...(sourceId ? {sourceId} : {})},title:`Consultando los estados de «${type}»`});
-    chooseCompletedState(type,taskId,result.states,sourceId);
-  },
+  'refresh-task-states': el => editTask(Number(el.dataset.task), true),
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': ()=>{collapsed.clear();updatePlanningView();},
   'collapse-tree': ()=>{state.workspace.items.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();},
-  tab: el=>{if(el.dataset.tab==='changes' && tab!=='changes'){reviewChanges();return;}tab=el.dataset.tab;capacityNotice='';if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousGroupOrder=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
-  review: reviewChanges, sync:synchronize,
+  tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousGroupOrder=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
+  review: reviewChanges, sync:synchronize, 'close-sync':closeSyncPanel,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
   'cancel-discard-all':()=>{changesUi.confirmAll=false;render();},
@@ -1482,8 +1560,9 @@ const actions = {
   'discard-one':async el=>{await request('/api/discard',{id:Number(el.dataset.task)});modal.close();render();toast('Cambios de la tarea deshechos.');},
   'focus-capacity':el=>{const owner=el.dataset.owner, input=$(owner==='team' ? '[data-owner="team"][data-action="card-day"]' : `[data-focus="hours:${CSS.escape(owner)}:0"]`);input?.focus();input?.select?.();},
   'card-day':async el=>{const owner=el.dataset.owner;await saveCapacity(owner,{daysOff:toggleDay(capacityOf(selectedIteration,owner).daysOff,el.dataset.day)},`[data-focus="${CSS.escape(el.dataset.focus)}"]`);},
-  'discard-capacity':async()=>{await request('/api/discard-capacity',{iterationId:selectedIteration});review=null;render();toast('Cambios de capacidad deshechos.');},
-  'discard-capacity-entry':async el=>{await request('/api/discard-capacity',{iterationId:selectedIteration,key:el.dataset.owner});review=null;render();},
+  'discard-capacity-entry':el=>trackCapacity(el.dataset.owner,()=>request('/api/discard-capacity',{iterationId:selectedIteration,key:el.dataset.owner})),
+  'capacity-undo':()=>stepCapacityHistory('undo','redo'),
+  'capacity-redo':()=>stepCapacityHistory('redo','undo'),
   'resolve-capacity-local':el=>resolveCapacity(el.dataset.iteration,el.dataset.owner,'local',el.dataset.source),
   'resolve-capacity-remote':el=>resolveCapacity(el.dataset.iteration,el.dataset.owner,'remote'),
   'resolve-local':el=>resolveTask(Number(el.dataset.task),'local'),
@@ -1497,7 +1576,6 @@ async function resolveTask(id,choice) {
   review=(await request('/api/resolve',{id,choice})).review; render();
   toast(choice==='remote' ? 'Se ha conservado la versión de Azure DevOps.' : 'Se mantienen tus cambios.');
 }
-$('#connection-button').onclick = () => { if (state && !pending) connection(); };
 modal.addEventListener('cancel', event => { if (pending) event.preventDefault(); });
 document.addEventListener('click', async event => {
   // A link to Azure DevOps opens there without triggering the card or branch action.
@@ -1505,6 +1583,7 @@ document.addEventListener('click', async event => {
   const target = event.target.closest('[data-action]');
   // Fields and comments inside a card are edited in place; they do not open it.
   if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments')) return;
+  if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
   if (!target || pending || target.disabled) return;
   if (target.closest('summary')) event.preventDefault();
   const action = actions[target.dataset.action];
@@ -1523,7 +1602,7 @@ document.addEventListener('keydown', event => {
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
   const card = event.target.closest('.task-card');
-  if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)); }
+  if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)).catch(errorInModal); }
   // Arrow keys move between the planning steps; Enter or Space opens one.
   const step = event.target.closest('.step-tab');
   if (step && ['ArrowLeft','ArrowRight'].includes(event.key)) {
@@ -1544,16 +1623,6 @@ document.addEventListener('submit', async event => {
       return;
     }
     if (event.target.id === 'pr-url-form') { await startReview({ url: new FormData(event.target).get('url') }); return; }
-    if (event.target.id === 'completed-state-form') {
-      const form=new FormData(event.target), {type,taskId,sourceId}=completedStateChoice;
-      const chosen=String(form.get('state') || form.get('other') || '').trim();
-      if (!chosen) throw new Error('Indica el nombre del estado completado.');
-      await request('/api/completed-state',{type,state:chosen,...(sourceId ? {sourceId} : {})});
-      if (taskId) await request('/api/complete-task',{id:taskId});
-      modal.close();review=null;render();
-      toast(taskId ? `#${taskId} marcada como completada (${chosen}) en local.` : `«${type}» se completará con el estado ${chosen}.`);
-      return;
-    }
     if (event.target.id === 'state-rules-form') {
       const choices = [...event.target.querySelectorAll('select[data-state]')].filter(el => el.value).map(el => ({ state: el.dataset.state, action: el.value }));
       const refreshAll=event.target.dataset.refreshAll==='true',section=event.target.dataset.section;
@@ -1609,7 +1678,6 @@ document.addEventListener('input',event=>{
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
-  if (event.target.name === 'other' && event.target.closest('#completed-state-form')) $('[data-other-state]').checked = true;
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
@@ -1638,9 +1706,12 @@ document.addEventListener('drop',async event => {
   const target=zone.dataset.drop, iteration=selected();
   if (!iteration) return;
   try {
-    await stage(id,target === 'backlog' ? {iterationPath:state.workspace.settings.backlogIteration.path} : {assignedTo:target,iterationPath:iteration.path});
+    // A task that was not in the iteration goes back exactly as it was imported,
+    // so dragging it out and back leaves nothing pending.
+    const base=state.workspace.items.find(i=>i.id===id), restore=base && base.iterationPath!==iteration.path;
+    await stage(id,target !== 'backlog' ? {assignedTo:target,iterationPath:iteration.path} : restore ? {iterationPath:base.iterationPath,assignedTo:base.assignedTo || ''} : {iterationPath:state.workspace.settings.backlogIteration.path});
     const warning=target!=='backlog' && capacityWarning(target,iteration);
-    toast(warning ? `Asignada en local. ${warning}` : 'Planificación guardada en local.', warning ? 'warning' : 'info');
+    toast(warning ? `Asignada en local. ${warning}` : restore && !state.workspace.drafts[id] ? 'Devuelta al backlog sin cambios.' : 'Planificación guardada en local.', warning ? 'warning' : 'info');
   } catch(error){toast(error.message,'error');}
 });
 

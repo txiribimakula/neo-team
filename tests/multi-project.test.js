@@ -91,13 +91,12 @@ test('personal and global holidays overlap safely and source working days preser
  assert.ok(Math.abs(plans.reduce((n,p)=>n+p.allocated,0)-32)<0.03);
 });
 test('completed state names remain scoped to their project',async()=>{
- const {completeTask,setCompletedState}=await import('../server/planner.js');
+ const {completeTask}=await import('../server/planner.js');
  const a=project('A',1,30),b=project('B',2,10);b.completedStates={Task:'Delivered'};
  const ws=mergeProjects(a,b);
  completeTask(ws,1);completeTask(ws,2);
  assert.equal(ws.drafts[1].state,'Closed');assert.equal(ws.drafts[2].state,'Delivered');
- setCompletedState(ws,'Task','Finished',ws.sources[1].id);
- assert.equal(ws.drafts[1].state,'Closed');assert.equal(ws.drafts[2].state,'Finished');
+ assert.deepEqual(ws.stateChanges[1],['Closed']);assert.deepEqual(ws.stateChanges[2],['Delivered']);
 });
 test('zero global capacity clears project allocations and ignores assigned work',()=>{
  const ws=mergeProjects(project('A',1,30),project('B',2,10)),iteration=ws.iterations[0];

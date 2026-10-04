@@ -1,7 +1,10 @@
 // Shared pure model: the browser and local API apply the same selection rules.
 export const memberKey = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
 export const isExecutable = item => !item.contextOnly && ['task', 'bug', 'tarea'].includes(item.type.toLowerCase());
-export const completedState = (item, workspace) => (workspace.sources ? workspace.sources.find(s=>s.id===item.sourceId)?.completedStates : workspace.completedStates)?.[item.type];
+export const completedState = (item, workspace) => {
+  const scope=workspace.sources ? workspace.sources.find(s=>s.id===item.sourceId) : workspace;
+  return scope?.workItemStates?.[item.type]?.find(s=>s.category==='completed')?.name ?? scope?.completedStates?.[item.type];
+};
 export const isCompleted = (item, workspace) => !!completedState(item,workspace) && item.state === completedState(item,workspace);
 // The hour fields a task can be edited with, named as in Azure DevOps. Types read
 // from Azure say which fields they have; otherwise the usual Task/Bug fields apply.

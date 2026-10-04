@@ -1,3 +1,4 @@
+import { availableImportRules, isImportType } from './import-query.js';
 import { normalizeItem } from './planner.js';
 export function createDemo() {
   const monday = new Date(); monday.setUTCHours(0,0,0,0); monday.setUTCDate(monday.getUTCDate() + ((8 - monday.getUTCDay()) % 7 || 7));
@@ -41,10 +42,55 @@ export function createDemo() {
     estimateFields: { Task: { originalEstimate: 'Original Estimate', remainingWork: 'Remaining Work' }, Bug: { originalEstimate: null, remainingWork: 'Remaining Work' } } };
   upgradeDemoHierarchy(workspace);
   upgradeDemoPreviousIteration(workspace);
+  upgradeDemoImportRules(workspace);
   return workspace;
 }
 
-export const DEMO_STATES = [['New', 'proposed'], ['Active', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category }));
+export function upgradeDemoImportRules(workspace) {
+  if (!workspace || workspace.mode !== 'demo') return false;
+  let changed=false;
+  workspace.workItemStates ??= {};
+  workspace.completedStates ??= {};
+  for(const type of ['Task','Bug']) {
+    if(!workspace.workItemStates[type]?.length) {
+      workspace.workItemStates[type]=structuredClone(DEMO_STATES);
+      changed=true;
+    }
+    if(!workspace.completedStates[type]) {
+      workspace.completedStates[type]='Closed';
+      changed=true;
+    }
+  }
+  const rules=availableImportRules(workspace,workspace.importRules);
+  if(JSON.stringify(rules)!==JSON.stringify(workspace.importRules)) {
+    workspace.importRules=rules;
+    changed=true;
+  }
+  return changed;
+}
+
+export function applyDemoImportRules(workspace, section) {
+  if(!['tasks','iterations','capacity'].includes(section)) throw new Error('Sección no válida.');
+  if(section!=='tasks') return workspace;
+  const pool=new Map([...(workspace.excludedImportItems ?? []),...workspace.items].map(item=>[item.id,item]));
+  const included=new Set();
+  for(const item of pool.values()) {
+    const rule=workspace.importRules.find(r=>r.type===item.type && r.state===item.state);
+    if(item.localOnly || workspace.drafts?.[item.id] || workspace.stateChanges?.[item.id]?.length || isImportType(item.type) && rule?.action!=='exclude') included.add(item.id);
+  }
+  for(const id of included) {
+    let parent=pool.get(id)?.parent;const visited=new Set();
+    while(parent && pool.has(parent) && !visited.has(parent)) {
+      visited.add(parent);included.add(parent);parent=pool.get(parent).parent;
+    }
+  }
+  workspace.items=[...pool.values()].filter(item=>included.has(item.id)).map(item=>({...item,contextOnly:item.localOnly ? item.contextOnly : !isImportType(item.type)}));
+  workspace.excludedImportItems=[...pool.values()].filter(item=>!included.has(item.id));
+  workspace.importedAt=new Date().toISOString();
+  return workspace;
+}
+
+export const DEMO_STATES = [['New', 'proposed'], ['Active', 'inprogress'], ['Ready for Test', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category }));
 export function demoFunctionalIssues(settings) {
   const day = offset => new Date(Date.now() - offset * 86400000).toISOString();
   const issues = [
@@ -85,6 +131,7 @@ export function upgradeDemoPreviousIteration(workspace) {
     } }));
   }
   workspace.completedStates ??= { Task: 'Closed', Bug: 'Closed' };
+  workspace.workItemStates ??= {Task:DEMO_STATES, Bug:DEMO_STATES};
   workspace.demoPreviousVersion = 1;
   return true;
 }

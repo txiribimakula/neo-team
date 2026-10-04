@@ -106,11 +106,19 @@ export function discardLocal(workspace,id) {
   // Comments on an item that will not be created go with it; discarding everything clears them.
   workspace.pendingComments=(workspace.pendingComments ?? []).filter(c=>id!==undefined && !(c.id<0 && ids.includes(c.id)));
   if(id===undefined){
-    workspace.drafts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};
+    workspace.drafts={};workspace.stateChanges={};workspace.stateAttempts={};workspace.conflicts={};workspace.capacityDrafts={};workspace.capacityConflicts={};
     // What remains is the project split recalculated from the imported data: keep Azure's.
     for(const plan of projectCapacityPlans(workspace).filter(allocationPending)) markAllocationDiscarded(workspace,plan);
   }
-  else {delete workspace.drafts[id];delete workspace.conflicts[id];}
+  else {delete workspace.drafts[id];delete workspace.stateChanges?.[id];delete workspace.stateAttempts?.[id];delete workspace.conflicts[id];}
+}
+export function discardStateChanges(workspace, id) {
+  delete workspace.stateChanges?.[id];
+  delete workspace.stateAttempts?.[id];
+  if (workspace.drafts?.[id]) {
+    delete workspace.drafts[id].state;
+    if (!Object.keys(workspace.drafts[id]).length) delete workspace.drafts[id];
+  }
 }
 export function stageChanges(workspace, id, changes) {
   const item = workspace.items.find(i => i.id === id);
@@ -120,6 +128,7 @@ export function stageChanges(workspace, id, changes) {
   if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Object.keys(changes).length) throw new Error('Indica algún cambio.');
   const current = { ...item, ...workspace.drafts[id] };
   const draft = { ...workspace.drafts[id] };
+  const states = [...(workspace.stateChanges?.[id] ?? (draft.state ? [draft.state] : []))];
   for (const [field, value] of Object.entries(changes)) {
     if (!Object.hasOwn(FIELD_LABELS, field)) throw new Error('Campo no editable.');
     if (field === 'title' && (typeof value!=='string' || !value.trim() || value.length>255)) throw new Error('Indica un título válido.');
@@ -130,13 +139,21 @@ export function stageChanges(workspace, id, changes) {
     if (field === 'priority' && (!item.canPrioritize || !Number.isInteger(value) || value < 1 || value > 4)) throw new Error('La prioridad debe estar entre 1 y 4.');
     if (field === 'originalEstimate' && (!estimateFields(workspace,item).originalEstimate || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido para la estimación original.');
     if (field === 'remainingWork' && (!estimateFields(workspace,item).remainingWork || typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000)) throw new Error('Indica un número de horas válido.');
-    // The only state change is closing a task or bug with its type's completed state.
-    if (field === 'state' && (typeof value !== 'string' || (value !== item.state && (!isExecutable(item) || !completedState(item,workspace) || value !== completedState(item,workspace))))) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
-    if (same(item[field], value)) delete draft[field]; else draft[field] = value;
+    if (field === 'state') {
+      const catalog = sourceFor(workspace, item).workItemStates?.[item.type];
+      if (typeof value !== 'string' || !isExecutable(item) || !value.trim() || value.length > 128 || value !== item.state && !catalog?.some(s => s.name === value) && value !== completedState(item,workspace)) throw new Error('Elige un estado válido del flujo de trabajo para esta tarea o bug.');
+      if (value !== current.state) states.push(value);
+      // Returning to the imported state is another transition, not an undo.
+      if (states.length) draft.state = states.at(-1);
+      continue;
+    }
+    // An empty assignee and a missing one are the same: nobody.
+    if (field === 'assignedTo' ? (item[field] || '') === (value || '') : same(item[field], value)) delete draft[field]; else draft[field] = value;
   }
   // Moving a task whose owner has no capacity there (or is outside the team) is the
   // person's decision: the interface warns, the plan does not block it.
   if(workspace.sources) workspace.allocationIterations=[...new Set([...(workspace.allocationIterations ?? []),...workspace.iterations.filter(i=>i.path===item.iterationPath || i.path===draft.iterationPath).map(i=>i.id)])];
+  if (states.length) { workspace.stateChanges ??= {}; workspace.stateChanges[id] = states; }
   if (item.localOnly) draft.title=changes.title ?? draft.title ?? item.title;
   if (Object.keys(draft).length) workspace.drafts[id] = draft; else delete workspace.drafts[id];
   delete workspace.conflicts[id];
@@ -151,6 +168,14 @@ export function planReview(workspace, remoteItems) {
     const conflicts = Object.keys(fields).filter(key => !same(remote[key], base[key]) && !same(remote[key], fields[key]));
     const updates = Object.fromEntries(Object.entries(fields).filter(([key, value]) => !same(remote[key], value)));
     return { id: Number(id), title: base.title, remote, fields, updates, conflicts, changes: Object.entries(fields).map(([field, value]) => ({ field, label: FIELD_LABELS[field], before: remote[field], original: base[field], after: value, conflict: conflicts.includes(field) })) };
+  }).map(plan => {
+    plan.stateSteps = [...(workspace.stateChanges?.[plan.id] ?? (plan.fields.state ? [plan.fields.state] : []))];
+    const attempt = workspace.stateAttempts?.[plan.id];
+    if (attempt && plan.remote?.rev !== attempt.rev) {
+      plan.stateSequenceConflict = true;
+      if (!plan.conflicts.includes('state')) plan.conflicts.push('state');
+    }
+    return plan;
   });
 }
 export function resolveConflict(workspace, id, choice) {
@@ -161,7 +186,9 @@ export function resolveConflict(workspace, id, choice) {
   const changes = { ...workspace.drafts[id] };
   workspace.items = workspace.items.map(i => i.id === id ? conflict.remote : i);
   delete workspace.drafts[id]; delete workspace.conflicts[id];
-  if (choice === 'local' && Object.keys(changes).length) stageChanges(workspace, id, changes);
+  delete workspace.stateAttempts?.[id];
+  if (choice === 'local' && Object.keys(changes).length) workspace.drafts[id] = changes;
+  else delete workspace.stateChanges?.[id];
 }
 // Deciding a conflict fixes the change against the Azure version the review already
 // read: nothing is compared again, and only that task or capacity changes in the review.
@@ -408,30 +435,10 @@ export function planningWorkspace(workspace) {
   return {...workspace,projectAllocations,capacityPendingByIteration,pendingChanges:Object.keys(workspace.drafts ?? {}).length+capacityPending+(workspace.pendingComments?.length ?? 0),capacityPending,effectiveItems:effectiveItems(workspace),effectiveCapacities:capacities,capacityHours:Object.fromEntries(workspace.iterations.map(i=>[i.id,Object.fromEntries(workspace.members.map(m=>[m.id,workingCapacity(i,capacities[i.id],m.id,workspace.settings.workingDays)]))]))};
 }
 
-// The person planning decides which state closes each type of task. Tasks
-// already marked with a previous choice move to the new one.
-export function setCompletedState(workspace, type, state, sourceId) {
-  if(workspace?.sources) {
-    const source=workspace.sources.find(s=>s.id===sourceId);
-    if(!source) throw new Error('Elige el proyecto cuyo estado completado quieres configurar.');
-    const scoped={...workspace,sources:undefined,items:workspace.items.filter(i=>i.sourceId===sourceId),completedStates:source.completedStates};
-    setCompletedState(scoped,type,state);source.completedStates=scoped.completedStates;return;
-  }
-  if (!workspace?.items.some(i => i.type === type && isExecutable(i))) throw new Error('Elige un tipo de tarea o bug de esta planificación.');
-  const name = typeof state === 'string' ? state.trim() : '';
-  if (!name || name.length > 128) throw new Error('Indica el estado que se considera completado.');
-  const previous = workspace.completedStates?.[type];
-  workspace.completedStates = { ...workspace.completedStates, [type]: name };
-  if (!previous || previous === name) return;
-  for (const [id, draft] of Object.entries(workspace.drafts)) {
-    const item = workspace.items.find(i => i.id === Number(id));
-    if (item?.type === type && draft.state === previous) stageChanges(workspace, item.id, { state: name });
-  }
-}
 export function completeTask(workspace, id) {
   const item = workspace && effectiveItems(workspace).find(i => i.id === id);
   if (!item || !isExecutable(item)) throw new Error('Solo se pueden marcar como completadas las tareas y bugs.');
-  if (!completedState(item,workspace)) throw new Error(`Indica primero qué estado de «${item.type}» se considera completado.`);
+  if (!completedState(item,workspace)) throw new Error(`Azure no ha indicado un estado completado para «${item.type}». Elige un estado en el editor de la tarea.`);
   stageChanges(workspace, id, { state: completedState(item,workspace) });
 }
 
@@ -448,7 +455,7 @@ export class Planner {
     return result;
   }
   async prepareReview() {
-    const workspace = this.workspace();
+    let workspace = this.workspace();
     if (!workspace) throw new Error('Importa una planificación primero.');
     const ids = Object.keys(workspace.drafts).map(Number);
     const creations=effectiveItems(workspace).filter(i=>i.localOnly).sort((a,b)=>b.id-a.id);
@@ -462,12 +469,34 @@ export class Planner {
     // without having been shown in a review.
     const unreadable = [];
     const remoteItems = workspace.mode === 'demo' ? workspace.items : await this.readItems(workspace, ids.filter(id=>id>0)).catch(error => { unreadable.push(`Tareas: ${error.message}`); return workspace.items.filter(i => ids.includes(i.id)); });
+    const reconciled = structuredClone(this.store.data);
+    workspace = reconciled[reconciled.mode];
+    for (const remote of remoteItems) {
+      const attempt = workspace.stateAttempts?.[remote.id];
+      // Only the exact acknowledgement of a recorded send advances the queue.
+      // Matching a later state alone is insufficient when a sequence revisits states.
+      if (attempt && remote.rev === attempt.rev + 1 && remote.state === attempt.state) {
+        workspace.stateChanges[remote.id].shift();
+        if (!workspace.stateChanges[remote.id].length) delete workspace.stateChanges[remote.id];
+        delete workspace.stateAttempts[remote.id];
+        workspace.items = workspace.items.map(i => i.id === remote.id ? remote : i);
+        const draft = workspace.drafts[remote.id];
+        if (draft) {
+          for (const field of Object.keys(draft)) if (same(remote[field],draft[field]) && !(field === 'state' && workspace.stateChanges?.[remote.id]?.length)) delete draft[field];
+          if (!Object.keys(draft).length) delete workspace.drafts[remote.id];
+        }
+      }
+    }
     const plans = planReview(workspace, remoteItems);
     if (unreadable.length) for (const plan of plans) if (!plan.missing) plan.unverified = true;
     for(const item of creations) plans.push({id:item.id,title:item.title,creation:true,item,conflicts:[],updates:{title:item.title},changes:['type','title','parent','assignedTo','iterationPath','originalEstimate','remainingWork'].map(field=>({field,label:FIELD_LABELS[field] || ({type:'Tipo',parent:'Padre'})[field],before:null,after:item[field]}))});
+    for (const plan of plans.filter(p=>p.creation)) {
+      plan.stateSteps = [...(workspace.stateChanges?.[plan.id] ?? (workspace.drafts[plan.id]?.state ? [workspace.drafts[plan.id].state] : []))];
+      if (plan.stateSteps.length) plan.item = {...plan.item,state:workspace.items.find(i=>i.id===plan.id).state};
+    }
     if (workspace.mode === 'azure') for (const plan of plans.filter(p => p.creation && !workspace.creationAttempts?.[p.id])) await this.validateCreation(workspace, plan);
     const { capacityPlans, incompleteAllocations } = await this.reviewCapacity(workspace, unreadable);
-    const data = structuredClone(this.store.data);
+    const data = reconciled;
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});
     await this.store.save(data);
@@ -581,11 +610,26 @@ export class Planner {
           const data=structuredClone(this.store.data),next=data[data.mode];
           next.items=next.items.map(i=>i.id===plan.id ? updated : i.parent===plan.id ? {...i,parent:updated.id} : i);
           delete next.drafts[plan.id];delete next.conflicts[plan.id];delete next.creationAttempts?.[plan.id];next.lastSyncedAt=new Date().toISOString();
-          await this.store.save(data);remapped.set(plan.id,updated.id);successes.push(updated.id);
+          delete next.stateChanges?.[plan.id];
+          if (plan.stateSteps?.length) {
+            next.stateChanges ??= {}; next.stateChanges[updated.id] = [...plan.stateSteps];
+            next.drafts[updated.id] = {state:plan.stateSteps.at(-1)};
+          }
+          await this.store.save(data);remapped.set(plan.id,updated.id);
+          if (plan.stateSteps?.length) {
+            const error=await this.syncStatePlan({id:updated.id,remote:updated,fields:{state:plan.stateSteps.at(-1)},updates:{},stateSteps:plan.stateSteps},this.workspace());
+            if(error) failures.push({id:updated.id,error});else successes.push(updated.id);
+          } else successes.push(updated.id);
         } catch(error) {failures.push({id:plan.id,error:error.message});}
         continue;
       }
       if (plan.missing) { failures.push({ id: plan.id, error: 'No se pudo leer esta tarea en Azure DevOps. Comprueba que existe y vuelve a sincronizar.' }); continue; }
+      if (plan.stateSequenceConflict) { failures.push({id:plan.id,error:'Azure cambió después de una respuesta perdida. Decide qué versión conservar antes de continuar la secuencia.'}); continue; }
+      if (plan.stateSteps?.length) {
+        const error = await this.syncStatePlan(plan, workspace);
+        if (error) failures.push({id:plan.id,error}); else successes.push(plan.id);
+        continue;
+      }
       let updated;
       try {
         updated = workspace.mode === 'demo' ? { ...plan.remote, ...plan.fields, rev: plan.remote.rev + 1 }
@@ -605,6 +649,40 @@ export class Planner {
     const capacity = await this.syncCapacity(review, workspace);
     const comments = await this.syncComments(review, workspace, remapped);
     return { successes, failures, capacity, comments, demo: workspace.mode === 'demo' };
+  }
+  async syncStatePlan(plan, workspace) {
+    let current=plan.remote;
+    const source=sourceFor(workspace,current);
+    for (const [index, state] of plan.stateSteps.entries()) {
+      this.onProgress?.(`#${plan.id} · Estado ${index+1}/${plan.stateSteps.length}: ${current.state} → ${state}`);
+      const fields=index===0 ? {...plan.updates,state} : {state};
+      let updated;
+      const sent=structuredClone(this.store.data);
+      sent[sent.mode].stateChanges ??= {};
+      sent[sent.mode].stateChanges[plan.id] ??= plan.stateSteps.slice(index);
+      sent[sent.mode].stateAttempts ??= {};
+      sent[sent.mode].stateAttempts[plan.id] = {state,rev:current.rev};
+      await this.store.save(sent);
+      try {
+        updated=workspace.mode==='demo' ? {...current,...fields,rev:current.rev+1}
+          : planningItem(workspace,await this.azure.update(source.config,plan.id,current.rev,remoteFields(workspace,current,fields)),source);
+      } catch (error) {
+        return `No se confirmó el paso «${state}». Último estado confirmado: «${current.state}». La secuencia sigue pendiente; vuelve a revisar para continuar. ${error.message}`;
+      }
+      // Persist each acknowledgement and remove only its step from the queue.
+      const data=structuredClone(this.store.data), next=data[data.mode];
+      next.items=next.items.map(item=>item.id===plan.id ? updated : item);
+      if (updated.state !== state) return `Azure confirmó «${updated.state}» en lugar de «${state}». Revisa la tarea antes de continuar.`;
+      next.stateChanges?.[plan.id]?.shift();
+      if (!next.stateChanges?.[plan.id]?.length) delete next.stateChanges?.[plan.id];
+      delete next.stateAttempts?.[plan.id];
+      const remaining=Object.fromEntries(Object.entries(plan.fields).filter(([field,value])=>!same(updated[field],value) || field==='state' && next.stateChanges?.[plan.id]?.length));
+      if (Object.keys(remaining).length) next.drafts[plan.id]=remaining; else delete next.drafts[plan.id];
+      delete next.conflicts[plan.id];next.lastSyncedAt=new Date().toISOString();
+      await this.store.save(data);
+      current=updated;
+    }
+    return null;
   }
   // Each reviewed comment is published once, after the task it belongs to exists.
   // A failed one stays pending; it is never repeated automatically.

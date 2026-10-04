@@ -34,7 +34,7 @@ test('identity comparison works with raw refs and official batch display strings
 test('staging normalizes reversions and rejects foreign assignments and fields',()=>{
   const ws=createDemo();stageChanges(ws,1042,{remainingWork:0});assert.equal(ws.drafts[1042].remainingWork,0);
   stageChanges(ws,1042,{remainingWork:12});assert.equal(ws.drafts[1042],undefined);
-  for (const patch of [{assignedTo:'intruder@example.test'},{iterationPath:'Other\\Sprint'},{remainingWork:-1},{remainingWork:Infinity},{priority:5},{state:'Active'},{state:null}]) assert.throws(()=>stageChanges(ws,1042,patch));
+  for (const patch of [{assignedTo:'intruder@example.test'},{iterationPath:'Other\\Sprint'},{remainingWork:-1},{remainingWork:Infinity},{priority:5},{state:'Unknown'},{state:null}]) assert.throws(()=>stageChanges(ws,1042,patch));
   assert.throws(()=>stageChanges(ws,9999,{priority:1}));
   assert.throws(()=>stageChanges(ws,1047,{originalEstimate:1}),/estimación original/,'the example Bug has no Original Estimate');
   stageChanges(ws,1042,{originalEstimate:10});assert.equal(ws.drafts[1042].originalEstimate,10);
@@ -181,30 +181,24 @@ test('reviewing the previous iteration carries tasks over or closes them with th
   const f=await fixture(t),next=f.workspace().iterations[0].path,previous=f.workspace().iterations.find(i=>i.past);
   assert.equal(f.workspace().items.find(i=>i.id===1030).iterationPath,previous.path);
   await f.stage(1030,{iterationPath:next});await f.stage(1031,{state:'Closed'});
-  assert.throws(()=>stageChanges(structuredClone(f.workspace()),1001,{state:'Closed'}),/completadas/,'only tasks and bugs can be closed');
+  assert.throws(()=>stageChanges(structuredClone(f.workspace()),1001,{state:'Closed'}),/estado válido/,'only tasks and bugs can change state');
   const unknown=structuredClone(f.workspace());delete unknown.completedStates;
-  assert.throws(()=>stageChanges(unknown,1032,{state:'Closed'}),/completadas/,'a type without a known completed state cannot be closed');
+  stageChanges(unknown,1032,{state:'Closed'});assert.equal(unknown.drafts[1032].state,'Closed','the catalog permits state changes without closing configuration');
   const review=await f.planner.prepareReview();const result=await f.planner.sync(review.token);
   assert.deepEqual(result.failures,[]);
   assert.deepEqual(f.calls.map(c=>[c.id,c.changes]),[[1030,{iterationPath:next}],[1031,{state:'Closed'}]]);
   assert.equal(f.workspace().items.find(i=>i.id===1031).state,'Closed');
   assert.equal(f.workspace().items.find(i=>i.id===1030).assignedTo,'ana@example.test','a carried-over task stays with its owner');
   await f.stage(1032,{state:'Closed'});await f.stage(1032,{state:'New'});
-  assert.equal(f.workspace().drafts[1032],undefined,'undoing restores the imported state');
+  assert.deepEqual(f.workspace().stateChanges[1032],['Closed','New'],'returning to the original state retains both transitions');
 });
 
-test('the person chooses the completed state of each type; tasks already marked follow a new choice',async()=>{
-  const {setCompletedState,completeTask}=await import('../server/planner.js');
+test('completion uses the Azure completed state without closing configuration',async()=>{
+  const {completeTask}=await import('../server/planner.js');
   const ws=createDemo();delete ws.completedStates;
-  assert.throws(()=>completeTask(ws,1031),/Indica primero/);
-  assert.throws(()=>setCompletedState(ws,'Epic','Closed'),/tipo/);
-  assert.throws(()=>setCompletedState(ws,'Task','  '),/estado/);
-  setCompletedState(ws,'Task',' Done ');completeTask(ws,1031);completeTask(ws,1033);
-  assert.equal(ws.drafts[1031].state,'Done');
-  stageChanges(ws,1033,{state:'Active'});
-  setCompletedState(ws,'Task','Closed');
-  assert.equal(ws.drafts[1031].state,'Closed');assert.equal(ws.drafts[1033],undefined,'an undone task is not closed again');
-  assert.throws(()=>completeTask(ws,1032),/«Bug»/);
+  completeTask(ws,1031);assert.equal(ws.drafts[1031].state,'Closed');
+  delete ws.workItemStates;
+  assert.throws(()=>completeTask(ws,1032),/estado completado/);
   assert.throws(()=>completeTask(ws,1001),/tareas y bugs/);
 });
 test('a task that could not be read during the review is written only if Azure still has the imported revision',async t=>{
@@ -373,4 +367,14 @@ test('creations carry no marker: a new one is not searched, and a duplicate drop
   const data=structuredClone(f.store.data);createLocalItem(data.azure,{type:'Task',title:'Nueva',parent:1001});await f.store.save(data);
   const result=await f.planner.sync((await f.planner.prepareReview()).token);
   assert.deepEqual(result.failures,[]);assert.equal(searches,0,'Azure is only searched after a lost answer');
+});
+
+test('dragging a backlog task to a person and back leaves nothing pending', () => {
+  const ws = createDemo(), iteration = ws.iterations.at(-1);
+  const item = ws.items.find(i => ['Task','Bug'].includes(i.type) && !i.assignedTo && i.iterationPath !== iteration.path);
+  assert.ok(item);
+  stageChanges(ws, item.id, { assignedTo: identityKey(ws.members[0]), iterationPath: iteration.path });
+  assert.ok(ws.drafts[item.id]);
+  stageChanges(ws, item.id, { iterationPath: item.iterationPath, assignedTo: item.assignedTo || '' });
+  assert.equal(ws.drafts[item.id], undefined);
 });

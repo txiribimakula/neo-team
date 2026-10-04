@@ -22,10 +22,9 @@ test('HTTP hardening: cross-site requests, split UTF-8 bodies, expired sessions 
   assert.equal(stateResponse.headers.get('x-content-type-options'), 'nosniff');
   let state = await stateResponse.json();
 
-  const crossSite = await fetch(url + '/api/export', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+  const crossSite = await fetch(url + '/api/state', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
   assert.equal(crossSite.status, 403, 'another website cannot download the plan');
   assert.equal((await fetch(url + '/', { headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 200, 'a link to the application still opens it');
-  assert.match((await fetch(url + '/api/export')).headers.get('content-disposition'), /neo-team-planificacion-\d{4}-\d{2}-\d{2}\.json/);
 
   const expired = await fetch(url + '/api/mode', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Neo-CSRF': 'old' }, body: '{}' });
   assert.equal(expired.status, 403);assert.equal((await expired.json()).reason, 'session');

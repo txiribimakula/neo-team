@@ -7,7 +7,7 @@ const period = iteration => {
   return start && end ? `${start}/${end}` : null;
 };
 export function sourcesOf(workspace) {
-  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates, estimateFields: workspace.estimateFields }] : []);
+  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates, workItemStates: workspace.workItemStates, estimateFields: workspace.estimateFields }] : []);
 }
 export function sourceFor(workspace, item) {
   const source = sourcesOf(workspace).find(s => s.id === item?.sourceId) ?? (!workspace.sources ? sourcesOf(workspace)[0] : null);
@@ -35,7 +35,14 @@ export function mergeProjects(previous, imported) {
   if (key(previous.config.organization) !== key(imported.config.organization)) throw new Error('Los proyectos de una planificación deben pertenecer a la misma organización.');
   const incoming = sourceId(imported.config), sources = structuredClone(sourcesOf(previous)).filter(s => s.id !== incoming);
   if (sources.some(s => key(s.config.project) === key(imported.config.project))) throw new Error('Este proyecto ya está importado con otro equipo. Usa el equipo importado para evitar duplicar capacidad.');
-  sources.push(...structuredClone(sourcesOf(imported)));
+  const incomingSources=structuredClone(sourcesOf(imported));
+  for (const source of incomingSources) {
+    const old=sourcesOf(previous).find(s=>s.id===source.id);
+    if (old) {
+      source.completedStates={...source.completedStates,...old.completedStates};
+    }
+  }
+  sources.push(...incomingSources);
   const members = [...new Map(sources.flatMap(s => s.members).map(m => [m.id,m])).values()];
   const iterations = [], periods = new Map();
   for (const source of sources) for (const iteration of source.iterations.filter(i=>!i.past)) {

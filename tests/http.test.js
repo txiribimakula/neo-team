@@ -29,6 +29,13 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   assert.equal(result.response.status,200);assert.equal(state.config.organization,'example');
   assert.equal(state.workspace,null,'configuration makes no calls to Azure');
   result=await post('/api/mode',{mode:'demo'});assert.equal(result.response.status,200);assert.equal(state.mode,'demo');
+  assert.equal(state.busy,false,'a completed mode change must release the toggle');
+  assert.equal(state.operation,null);
+  for (const mode of ['azure','demo','azure','demo']) {
+    result=await post('/api/mode',{mode});
+    assert.equal(result.response.status,200);assert.equal(state.mode,mode);
+    assert.equal(state.busy,false);assert.equal(state.operation,null);
+  }
   const oldVersion=state.version;
   result=await post('/api/stage',{edits:[{id:1042,changes:{remainingWork:24}},{id:1045,changes:{priority:1}}]});assert.equal(result.response.status,200);
   assert.equal(state.workspace.effectiveItems.find(i=>i.id===1042).remainingWork,24);
@@ -40,7 +47,6 @@ test('HTTP workflow: local configuration, demo, persisted draft, review, CSRF an
   const rebindingStatus=await new Promise((resolve,reject)=>{
     const req=httpRequest(url+'/api/state',{headers:{Host:`evil.example:${port}`}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.end();
   });assert.equal(rebindingStatus,403);
-  const exported=await (await fetch(url+'/api/export')).json();assert.equal(exported.workspace.drafts[1042].remainingWork,24);
   result=await post('/api/review');assert.ok(result.data.review.token);
   result=await post('/api/sync',{token:result.data.review.token});assert.deepEqual(result.data.result.successes,[1042,1045]);assert.equal(result.data.result.demo,true);
   assert.deepEqual(state.workspace.drafts,{});
