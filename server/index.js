@@ -11,7 +11,7 @@ import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
@@ -66,6 +66,10 @@ const maintenanceScope = () => JSON.stringify([store.data.mode, store.data.confi
 const maintenanceKey = () => store.data.mode === 'demo' ? 'demo' : [store.data.config?.organization, store.data.config?.project].map(value => String(value ?? '').toLowerCase()).join('\n');
 const currentMaintenanceSettings = () => store.data.maintenanceSettings?.[maintenanceKey()] ?? null;
 const currentMaintenance = () => maintenance?.scope === maintenanceScope() ? maintenance : null;
+// My iteration: the last query, in memory, for the active mode and connection.
+let myIteration = null;
+const myIterationScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project, store.data.config?.team]);
+const currentMyIteration = () => myIteration?.scope === myIterationScope() ? myIteration : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 // Local steps after the Azure queries join the activity, so a failure shows
 // where it stopped instead of the last request sent to Azure.
@@ -156,6 +160,10 @@ const server = http.createServer(async (req, res) => {
       requireSession(req);
       return json(res, { maintenance: currentMaintenance() });
     }
+    if (req.method === 'GET' && path === '/api/my-iteration') {
+      requireSession(req);
+      return json(res, { myIteration: currentMyIteration() });
+    }
     if (req.method === 'POST' && path.startsWith('/api/')) {
       requireSession(req);
       const input = await body(req);
@@ -170,8 +178,8 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -211,6 +219,27 @@ const server = http.createServer(async (req, res) => {
             maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, settings, reportProgress)) };
           }
           return json(res, { maintenance: currentMaintenance() });
+        }
+        // Every imported team (or the connected one) with its current iteration.
+        if (path === '/api/my-iteration') {
+          const reportProgress = progress => {
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            operation = { ...operation, ...progress, updatedAt: Date.now() };
+          };
+          if (store.data.mode === 'demo') myIteration = { scope: myIterationScope(), ...demoMyIteration() };
+          else {
+            const configs = store.data.azure ? sourcesOf(store.data.azure).map(source => configFrom(source.config)) : store.data.config?.team ? [configFrom(store.data.config)] : [];
+            if (!configs.length) throw fail('Conecta Azure DevOps con un proyecto y un equipo para consultar tu iteración.');
+            reportProgress({ message: 'Conectando con Azure DevOps…' });
+            await azure.open(configs[0]);
+            const boards = [];
+            for (const config of configs) {
+              if (operation.cancelRequested) throw fail('Consulta cancelada.');
+              boards.push(await azure.myIteration(config, reportProgress));
+            }
+            myIteration = { scope: myIterationScope(), fetchedAt: new Date().toISOString(), demo: false, boards };
+          }
+          return json(res, { myIteration: currentMyIteration() });
         }
         // The possible states of a type, so the person can choose which are closed.
         if (path === '/api/maintenance-states') {
@@ -538,7 +567,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

@@ -1,6 +1,7 @@
 import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
+import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation } from './reviews.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -9,7 +10,7 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
-let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null;
+let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null, myIterationSnapshot = null;
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
@@ -80,6 +81,7 @@ function setState(next) {
     prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
     maintenanceSnapshot = null; maintenanceSetup = null; resetMaintenanceFilters();
   }
+  if (scope(state) !== scope(next) || state?.config?.team !== next?.config?.team) myIterationSnapshot = null;
   state = next; markSnapshot(state?.workspace);
 }
 function createItem(parentId) {
@@ -376,7 +378,7 @@ async function importWithProgress(target, existing = null, start = null) {
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
-  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status'].includes(start?.path || existing?.path)) {
+  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status'].includes(start?.path || existing?.path)) {
     $('.import-progress-phase', target).textContent = 'Preparando la simulación con datos de ejemplo…';
     $('.import-progress-note', target).textContent = 'Esta operación no contacta con Azure DevOps ni con GitHub.';
   }
@@ -393,7 +395,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -527,6 +529,7 @@ async function resumeOperation() {
     await loadState();
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
     if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
+    if (current.path === '/api/my-iteration') { await loadMyIteration(); tab = 'my-iteration'; render(); }
     if (current.path.startsWith('/api/pr-')) { if (current.path === '/api/pr-review') prUi.reviewId = state.prReviews?.[0]?.id ?? null; tab = 'reviews'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
@@ -1084,7 +1087,7 @@ function render() {
   syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
   syncButton.title=`Sincronización: ${savedStatus()}`;
   renderSyncPanel();
-  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
+  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
   const demo = state.mode === 'demo';
@@ -1116,6 +1119,7 @@ function render() {
   if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
   if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state, maintenanceSetup); return; }
+  if (tab === 'my-iteration') { $('#app').innerHTML = myIterationView(myIterationSnapshot, state); return; }
   if (tab === 'reviews') { $('#app').innerHTML = reviewsView(state, prUi); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
@@ -1377,6 +1381,7 @@ async function securityQuery(descriptor, reauthenticate = false) {
 function homeView() {
   return `<section class="home"><div class="home-sections">
     <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong></button>
+    <button class="home-card my-iteration" data-action="open-my-iteration"><span class="home-icon" aria-hidden="true">▦</span><strong>Mi iteración</strong></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
     <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong></button>
     <button class="home-card permissions" data-action="permissions" ${state.mode === 'demo' ? 'disabled title="Disponible en el modo Azure DevOps"' : ''}><span class="home-icon" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg></span><strong>Permisos</strong></button>
@@ -1386,6 +1391,16 @@ async function loadMaintenance() {
   const response = await fetch('/api/maintenance', { headers: { 'X-Neo-CSRF': state.csrf } });
   if (!response.ok) throw new Error('No se pudo recuperar la consulta de mantenimiento.');
   maintenanceSnapshot = (await response.json()).maintenance;
+}
+async function loadMyIteration() {
+  const response = await fetch('/api/my-iteration', { headers: { 'X-Neo-CSRF': state.csrf } });
+  if (!response.ok) throw new Error('No se pudo recuperar la consulta de tu iteración.');
+  myIterationSnapshot = (await response.json()).myIteration;
+}
+async function myIterationQuery() {
+  showModal('Mi iteración', state.mode === 'demo' ? 'Datos de ejemplo' : 'Elementos asignados a tu cuenta en la iteración actual.', '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/my-iteration', input: {}, title: 'Consultando mi iteración' });
+  myIterationSnapshot = result.myIteration; tab = 'my-iteration'; modal.close(); render();
 }
 async function maintenanceQuery() {
   const settings = state.maintenanceSettings;
@@ -1459,6 +1474,11 @@ const actions = {
     if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
   },
   'maintenance-refresh': () => maintenanceQuery(),
+  'open-my-iteration': async () => {
+    await loadMyIteration(); tab = 'my-iteration'; render();
+    if (!myIterationSnapshot && (state.config?.team || state.mode === 'demo')) await myIterationQuery();
+  },
+  'my-iteration-refresh': () => myIterationQuery(),
   'maintenance-clear-filters': () => { resetMaintenanceFilters(); render(); $('[data-maintenance-filter="text"]')?.focus(); },
   'security-clear-filters': () => { resetPermissionFilters(); render(); $('[data-security-filter="text"]')?.focus(); },
   'open-reviews': async () => {

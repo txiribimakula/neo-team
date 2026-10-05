@@ -1,5 +1,6 @@
 import { availableImportRules, isImportType } from './import-query.js';
 import { normalizeItem } from './planner.js';
+import { boardItem, myIterationBoard } from './my-iteration.js';
 export function createDemo() {
   const monday = new Date(); monday.setUTCHours(0,0,0,0); monday.setUTCDate(monday.getUTCDate() + ((8 - monday.getUTCDay()) % 7 || 7));
   const date = offset => new Date(+monday + offset * 86400000).toISOString();
@@ -104,6 +105,28 @@ export function demoFunctionalIssues(settings) {
   ].filter(([, , state]) => !settings.closedStates.includes(state))
     .map(([id, title, state, assignedTo, priority, changed, tags]) => ({ id, title, state, category: settings.states.find(s => s.name === state)?.category ?? '', assignedTo, areaPath: 'Neo Platform\\Producto', iterationPath: 'Neo Platform', priority, createdAt: day(changed + 20), changedAt: day(changed), tags }));
   return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', issues };
+}
+
+// My iteration in the example: Ana García's items in the current iteration.
+export function demoMyIteration() {
+  const monday = new Date(); monday.setUTCHours(0, 0, 0, 0); monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+  const date = offset => new Date(+monday + offset * 86400000).toISOString();
+  const raw = ([id, title, type, state, parent, remaining, rank, assignedTo = 'Ana García', tags = []]) => ({ id, fields: { 'System.Title': title, 'System.WorkItemType': type, 'System.State': state, 'System.AssignedTo': assignedTo ? { displayName: assignedTo } : undefined, 'System.Parent': parent, 'Microsoft.VSTS.Scheduling.RemainingWork': remaining, 'Microsoft.VSTS.Common.StackRank': rank, 'Microsoft.VSTS.Common.Priority': 2, 'System.Tags': tags.join('; ') } });
+  const mine = [
+    [1101, 'Diseñar el filtro por fecha', 'Task', 'Closed', 1090, 0, 1],
+    [1102, 'Implementar el filtro en la API', 'Task', 'Active', 1090, 6, 2, 'Ana García', ['API']],
+    [1103, 'Pruebas del filtro por fecha', 'Task', 'New', 1090, 4, 3],
+    [1104, 'Revisar los textos del aviso', 'Task', 'Ready for Test', 1092, 1, 4],
+    [1105, 'Mostrar el aviso al caducar la sesión', 'Task', 'Active', 1092, 3, 5],
+    [1106, 'El aviso no se cierra con Escape', 'Bug', 'New', 1092, 2, 6, 'Ana García', ['Accesibilidad']],
+    [1107, 'Actualizar la guía de despliegue', 'Task', 'New', null, 2, 7],
+  ].map(raw).map(boardItem);
+  const parents = [
+    [1090, 'Filtrar la actividad por fecha', 'User Story', 'Active', null, null, 1, 'Marcos Ruiz'],
+    [1092, 'Avisar antes de que caduque la sesión', 'User Story', 'Active', null, null, 2, 'Lucía Martín'],
+  ].map(raw).map(boardItem);
+  const states = Object.fromEntries(['Task', 'Bug'].map(type => [type, DEMO_STATES]));
+  return { fetchedAt: new Date().toISOString(), demo: true, boards: [{ organization: 'ejemplo', project: 'Neo Platform', team: 'Equipo de producto', iteration: { name: 'Iteración 24', path: 'Neo Platform\\Iteración 24', startDate: date(0), finishDate: date(11) }, me: 'Ana García', limited: false, ...myIterationBoard(mine, parents, states) }] };
 }
 
 // A finished iteration with open work, reviewed before planning the next one.

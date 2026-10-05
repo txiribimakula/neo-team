@@ -6,6 +6,7 @@ import { normalizeItem, descriptionHtml } from './planner.js';
 import { isExecutable } from '../dist/hierarchy.js';
 import { activityReader, describeCall, seconds } from './activity.js';
 import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceIssue, maintenanceWiql } from './maintenance.js';
+import { MY_ITERATION_FIELDS, MY_ITERATION_LIMIT, boardItem, currentIteration, myIterationBoard, myIterationWiql, parentsWiql } from './my-iteration.js';
 
 export function parseToolResult(result) {
   const blocks = (result.content ?? []).filter(b => b.type === 'text').map(b => {
@@ -173,6 +174,34 @@ export class AzureGateway {
     const issues = result.workItems.map(raw => maintenanceIssue(raw, settings.states)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     onProgress({ message: `${issues.length} elementos obtenidos.`, counts: { issuesFound: issues.length, issuesRead: issues.length } });
     return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: !!result.limited, demo: false, organization: config.organization, project: config.project, issues };
+  }
+  // My iteration: what the signed-in account has assigned in the team's current
+  // iteration, with the parents as rows and the task states as columns.
+  async myIteration(config, onProgress = () => {}) {
+    onProgress({ message: `Buscando la iteración actual de ${config.team}…` });
+    const rawIterations = await this.call('work', { action: 'list_team_iterations', project: config.project, team: config.team });
+    if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
+    const found = currentIteration(rawIterations), board = { organization: config.organization, project: config.project, team: config.team, iteration: null, me: '', columns: [], lanes: [], limited: false };
+    if (!found) return board;
+    const iteration = normalizeIteration(found, config.project, 'la iteración actual');
+    board.iteration = { name: iteration.name, path: iteration.path, startDate: iteration.attributes?.startDate ?? null, finishDate: iteration.attributes?.finishDate ?? null };
+    onProgress({ message: `Consultando tus elementos en «${iteration.name}»…` });
+    const result = await this.call('neo_query_work_items', { project: config.project, wiql: myIterationWiql(iteration.path), fields: MY_ITERATION_FIELDS, top: MY_ITERATION_LIMIT });
+    if (!Array.isArray(result?.workItems)) throw new Error('Azure DevOps no devolvió una lista válida de elementos.');
+    const mine = result.workItems.map(boardItem), known = new Set(mine.map(i => i.id));
+    const missing = [...new Set(mine.map(i => i.parent).filter(id => id && !known.has(id)))], parents = [];
+    for (let offset = 0; offset < missing.length; offset += 200) {
+      onProgress({ message: 'Leyendo los elementos padre…' });
+      const page = await this.call('neo_query_work_items', { project: config.project, wiql: parentsWiql(missing.slice(offset, offset + 200)), fields: MY_ITERATION_FIELDS, top: 200 });
+      parents.push(...(page?.workItems ?? []).map(boardItem));
+    }
+    const states = {};
+    for (const type of new Set(['Task', ...mine.map(i => i.type).filter(Boolean)])) {
+      onProgress({ message: `Consultando los estados de «${type}»…` });
+      try { states[type] = await this.workItemStates(config, type); }
+      catch (error) { if (mine.some(i => i.type === type)) throw error; }
+    }
+    return { ...board, me: mine.find(i => i.assignedTo)?.assignedTo ?? '', limited: !!result.limited, ...myIterationBoard(mine, parents, states) };
   }
   async workItemStates(config, type) {
     const states = await this.call('neo_work_item_states', { project: config.project, type });

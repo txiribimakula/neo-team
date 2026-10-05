@@ -33,6 +33,12 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
   - **Uso:** se consulta al entrar y con **Actualizar**; el resultado solo se guarda en memoria. Permite buscar y filtrar por estado, y cada título abre el elemento en Azure DevOps.
   - **Límites:** muestra hasta 1000 elementos y avisa si hay más. Es de solo lectura. En el ejemplo se usan datos simulados.
 
+- **Mi iteración**: los elementos asignados a tu cuenta en la iteración en curso del equipo, como en el taskboard de Azure DevOps.
+  - **Quién:** la consulta usa `@Me`, es decir, la cuenta con la que has iniciado sesión en Azure DevOps. No hay que elegir persona.
+  - **Qué iteración:** la que Azure marca como actual para el equipo (o, si no la marca, la que contiene la fecha de hoy). Con varios proyectos importados se muestra un tablero por equipo.
+  - **Tablero:** filas por elemento padre (historia, PBI…) y columnas por estado de `Task`. Las tareas y bugs son tarjetas con su trabajo restante; los bugs con otros estados se colocan por categoría. Las tareas sin padre van en la última fila y los elementos en estado `Removed` no aparecen.
+  - **Uso:** se consulta al entrar y con **Actualizar**; el resultado solo se guarda en memoria. Es de solo lectura y cada título abre el elemento en Azure DevOps. En el ejemplo se usan datos simulados.
+
 - **Revisión de PRs**: revisa pull requests de Azure DevOps con GitHub Copilot y publica los comentarios que confirmes. Se describe en [Revisión de pull requests](#revisión-de-pull-requests).
 
 ## Revisión de pull requests
@@ -72,7 +78,7 @@ En el ejemplo, los pull requests, la revisión y la publicación se simulan: no 
 7. En **4 · Tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
 8. En **5 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
 
-Inicio muestra cuatro recuadros con el icono y el título de Planificación, Mantenimiento, Revisión de PRs y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Azure DevOps** y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
+Inicio muestra cinco recuadros con el icono y el título de Planificación, Mi iteración, Mantenimiento, Revisión de PRs y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Azure DevOps** y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
 
 Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar con un botón. La revisión de PRs muestra cuántos comentarios se publicarán y solo habilita la publicación cuando hay una selección pendiente y el pull request está activo.
 
