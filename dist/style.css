@@ -463,3 +463,4 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .mi-card-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}.mi-card-meta strong{margin-left:auto;color:var(--ink);font-weight:650}
 .mi-card.type-task,.mi-parent-type.type-task{border-left-color:#f2cb1d}.mi-card.type-bug,.mi-parent-type.type-bug{border-left-color:#cc293d}.mi-parent-type.type-user-story,.mi-parent-type.type-product-backlog-item,.mi-parent-type.type-requirement{border-left-color:#009ccc}.mi-parent-type.type-feature{border-left-color:#773b93}.mi-parent-type.type-epic{border-left-color:#ff7b00}
 @media(max-width:740px){.mi-board-head h1{font-size:24px}.mi-grid{min-width:calc(180px + var(--mi-columns) * 170px)}.mi-lane{grid-template-columns:180px repeat(var(--mi-columns),minmax(170px,1fr))}}
+.pr-local{max-width:620px;margin-top:14px}.pr-local input{font-family:ui-monospace,monospace;font-size:13px}

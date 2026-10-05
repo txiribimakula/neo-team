@@ -48,6 +48,13 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
 3. El resultado se guarda en local: un resumen, una valoración y los comentarios propuestos por gravedad, cada uno anclado a su línea del pull request cuando esa línea aparece en el diff. Puedes editar el texto de cada comentario y marcar cuáles publicar (las sugerencias vienen desmarcadas).
 4. **Publicar en Azure DevOps** muestra exactamente qué se va a crear y pide confirmación. Solo entonces se añaden hilos nuevos al pull request.
 
+**Repositorio local (opcional).** Al elegir un repositorio en la lista, o en el detalle de una revisión, puedes indicar la carpeta de un clon suyo. Se comprueba que es un repositorio git con un remoto que apunta a `…/_git/<repositorio>`. Con la carpeta indicada, una revisión pide a Azure DevOps solo los datos del pull request: sus ramas, el commit revisado y los comentarios existentes. Después:
+
+- hace `git fetch` de las ramas source y target en ese clon (solo actualiza las ramas remotas: no toca tus ramas ni tus cambios);
+- calcula el diff con `git` entre la base común con la rama target y el commit del pull request, el mismo que se comprueba antes de publicar.
+
+Así no se descarga cada archivo de Azure, no hay límite de descarga y se ve exactamente lo mismo que con `git`. Si el clon no consigue el commit del pull request (por ejemplo, porque `git fetch` pide credenciales), la revisión lo indica y no envía nada a Copilot. Vacía la carpeta para volver a leer de Azure DevOps. La carpeta se guarda por organización, proyecto y repositorio en `.neo-team/workspace.json`.
+
 **Seguridad y datos**
 
 - **Azure DevOps:** se accede con el mismo inicio de sesión de Microsoft y a través del MCP local. La única escritura crea hilos de comentario nuevos: no edita, resuelve ni borra comentarios, no vota ni completa el pull request.

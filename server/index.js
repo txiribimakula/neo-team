@@ -13,6 +13,7 @@ import { Planner, createLocalItem, duplicateItem, addComment, discardComment, di
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
+import { checkRepository, repositoryKey } from './local-repo.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
 
@@ -104,7 +105,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {} };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -125,7 +126,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -321,7 +322,10 @@ const server = http.createServer(async (req, res) => {
             if (store.data.mode !== 'demo' && target.organization.toLowerCase() !== config.organization.toLowerCase()) throw fail(`El pull request es de la organización «${target.organization}» y Neo Team está conectado a «${config.organization}». Cambia la organización en la configuración.`);
             if (!target.repository || target.repository.length > 200 || !Number.isSafeInteger(target.pullRequestId) || target.pullRequestId < 1) throw fail('Elige un repositorio y un pull request.');
             if (store.data.mode === 'demo') target.project = config.project;
-            const review = await runReview({ azure: gateway, reviewer, config, target, mode: store.data.mode, onProgress: progress });
+            // A repository with a local folder is compared there; the folder is checked again each time.
+            const folder = store.data.mode === 'demo' ? null : store.data.localRepositories?.[repositoryKey(config.organization, target.project, target.repository)];
+            const local = folder ? await checkRepository(folder, target.repository) : null;
+            const review = await runReview({ azure: gateway, reviewer, config, target, mode: store.data.mode, local, onProgress: progress });
             progress({ cancellable: false });
             const data = structuredClone(store.data);
             data.prReviews = [review, ...(data.prReviews ?? [])].slice(0, REVIEW_LIMITS.reviews);
@@ -336,6 +340,18 @@ const server = http.createServer(async (req, res) => {
             await store.save(data);
           } });
           return json(res, { result, state: publicState({ operationComplete: true }) });
+        }
+        if (path === '/api/pr-local-repo') {
+          // The local clone of a repository, so its pull requests are compared with git.
+          if (store.data.mode === 'demo') throw fail('En el ejemplo no se usan repositorios locales.');
+          const config = reviewConfig(), repository = typeof input.repository === 'string' ? input.repository.trim() : '', project = typeof input.project === 'string' && input.project.trim() ? input.project.trim() : config.project;
+          if (!repository || repository.length > 200 || project.length > 200) throw fail('Elige un repositorio.');
+          const key = repositoryKey(config.organization, project, repository), data = structuredClone(store.data);
+          data.localRepositories = { ...data.localRepositories };
+          if (typeof input.path === 'string' && input.path.trim()) data.localRepositories[key] = (await checkRepository(input.path, repository)).path;
+          else delete data.localRepositories[key];
+          await store.save(data);
+          return json(res, publicState());
         }
         if (path === '/api/copilot-status') {
           const { reviewer } = reviewTools();

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { structuredPatch } from 'diff';
+import { localPullRequestFiles } from './local-repo.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 export const SEVERITIES = { blocker: 'Bloqueante', major: 'Importante', minor: 'Menor', suggestion: 'Sugerencia' };
@@ -170,21 +171,26 @@ export function noChangesMessage(files) {
 }
 
 // Reads the pull request, asks Copilot and returns the review to store locally.
-export async function runReview({ azure, reviewer, config, target, mode, onProgress = () => {} }) {
+// With a local clone (`local`: its folder and the remote of the repository) the diff
+// is made there with git; Azure DevOps only gives the pull request and its comments.
+export async function runReview({ azure, reviewer, config, target, mode, local = null, onProgress = () => {} }) {
   const scoped = { ...config, project: target.project };
   // Without a GitHub session the review would read the whole pull request for nothing.
   onProgress({ phase: 'copilot', message: 'Comprobando la sesión de GitHub Copilot…' });
   const auth = await reviewer.status();
   if (!auth.isAuthenticated) throw authError();
   onProgress({ phase: 'pull-request', message: `Leyendo el pull request ${target.pullRequestId} de «${target.repository}»…` });
-  const data = await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes, maxTotalBytes: LIMITS.totalBytes });
+  const data = local
+    ? await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: false, includeThreads: true })
+    : await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes, maxTotalBytes: LIMITS.totalBytes });
+  if (local) Object.assign(data, await localPullRequestFiles({ ...local, pullRequest: data.pullRequest, iteration: data.iteration, limits: LIMITS, onProgress }));
   const diff = buildDiff(data.files);
   if (!diff.files.some(f => f.status === 'included' && f.lines.length)) throw fail(noChangesMessage(diff.files), 422);
   onProgress({ phase: 'copilot', message: `Enviando ${diff.files.filter(f => f.status === 'included').length} archivos a GitHub Copilot…` });
   const result = await reviewer.review({ prompt: reviewPrompt({ pullRequest: data.pullRequest, repository: data.pullRequest.repository?.name ?? target.repository, diff, threads: data.threads, omittedFiles: data.omittedFiles }), onProgress });
   onProgress({ phase: 'saving', message: 'Comprobando la respuesta y guardando la revisión…' });
   const parsed = parseReviewOutput(result.text, diff);
-  return reviewRecord({ mode, organization: config.organization, project: target.project, target, data, diff, parsed, copilot: { login: result.login ?? null, model: result.model ?? null, inputTokens: result.usage?.inputTokens ?? null, outputTokens: result.usage?.outputTokens ?? null } });
+  return { ...reviewRecord({ mode, organization: config.organization, project: target.project, target, data, diff, parsed, copilot: { login: result.login ?? null, model: result.model ?? null, inputTokens: result.usage?.inputTokens ?? null, outputTokens: result.usage?.outputTokens ?? null } }), diffSource: local ? { kind: 'local', path: local.path } : { kind: 'azure' } };
 }
 
 // Publishes the selected comments as new threads. The pull request must still be

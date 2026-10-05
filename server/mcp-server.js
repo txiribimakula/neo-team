@@ -231,8 +231,8 @@ server.tool('neo_pull_requests', 'List the active pull requests of a repository.
 server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, optionally, the content of its changed files and existing comments.', {
   project: z.string().min(1).max(200), repository: z.string().min(1).max(200), pullRequestId: z.number().int().positive(),
   includeFiles: z.boolean(), maxFiles: z.number().int().min(1).max(500), maxFileBytes: z.number().int().min(1000).max(20000000),
-  maxTotalBytes: z.number().int().min(1000).max(200000000).optional(),
-}, async ({ project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes, maxTotalBytes = 50000000 }) => {
+  maxTotalBytes: z.number().int().min(1000).max(200000000).optional(), includeThreads: z.boolean().optional(),
+}, async ({ project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes, maxTotalBytes = 50000000, includeThreads = includeFiles }) => {
   const git = await (await connectionProvider()).getGitApi();
   const pr = await git.getPullRequest(repository, pullRequestId, project);
   if (!pr) throw new Error(`Azure DevOps no encontró el pull request ${pullRequestId} en «${repository}».`);
@@ -240,7 +240,15 @@ server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, 
   const iterations = await git.getPullRequestIterations(repositoryId, pullRequestId, project) ?? [];
   const iteration = iterations.at(-1);
   const result = { pullRequest: pullRequestSummary(pr), iteration: iteration ? { id: iteration.id, sourceCommit: iteration.sourceRefCommit?.commitId ?? null, baseCommit: iteration.commonRefCommit?.commitId ?? iteration.targetRefCommit?.commitId ?? null } : null, files: [], omittedFiles: 0, threads: [] };
-  if (!includeFiles || !iteration) return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  // Existing comments, so the review does not repeat them (also when the diff is made locally).
+  const readThreads = async () => {
+    const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];
+    result.threads = threads.filter(t => !t.isDeleted).map(t => ({
+      id: t.id, filePath: t.threadContext?.filePath ?? null, line: t.threadContext?.rightFileStart?.line ?? null,
+      comments: (t.comments ?? []).filter(c => !c.isDeleted && c.commentType !== 3).map(c => ({ author: c.author?.displayName ?? '', content: String(c.content ?? '').slice(0, 2000) })),
+    })).filter(t => t.comments.length).slice(0, 200);
+  };
+  if (!includeFiles || !iteration) { if (includeThreads) await readThreads(); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
   const entries = [];
   for (let skip = 0; ; skip += 2000) {
     const page = await git.getPullRequestIterationChanges(repositoryId, pullRequestId, iteration.id, project, 2000, skip, 0);
@@ -265,11 +273,7 @@ server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, 
     result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? null, changeType: type, before, after });
     if ((index + 1) % 20 === 0) emit('info', `${index + 1} / ${Math.min(files.length, maxFiles)} archivos leídos.`);
   }
-  const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];
-  result.threads = threads.filter(t => !t.isDeleted).map(t => ({
-    id: t.id, filePath: t.threadContext?.filePath ?? null, line: t.threadContext?.rightFileStart?.line ?? null,
-    comments: (t.comments ?? []).filter(c => !c.isDeleted && c.commentType !== 3).map(c => ({ author: c.author?.displayName ?? '', content: String(c.content ?? '').slice(0, 2000) })),
-  })).filter(t => t.comments.length).slice(0, 200);
+  if (includeThreads) await readThreads();
   return { content: [{ type: 'text', text: JSON.stringify(result) }] };
 });
 server.tool('neo_pull_request_threads', 'List the text of the existing comments of a pull request.', {

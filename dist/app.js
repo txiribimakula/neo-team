@@ -2,8 +2,9 @@ import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
-import { reviewsView, publishConfirmation } from './reviews.js';
+import { reviewsView, publishConfirmation, localFolder } from './reviews.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
+const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const key = member => (member.uniqueName || member.id || member.displayName || '').toLowerCase();
@@ -1672,6 +1673,7 @@ document.addEventListener('change',async event=>{
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
+    if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}
     if(el.dataset.description){const data=await request('/api/description',{id:Number(el.dataset.description),field:el.dataset.field,description:el.value});review=data.review;render();return;}
     if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;render();$('#pr-include-summary')?.focus();return;}
     if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
