@@ -230,8 +230,9 @@ server.tool('neo_pull_requests', 'List the active pull requests of a repository.
 });
 server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, optionally, the content of its changed files and existing comments.', {
   project: z.string().min(1).max(200), repository: z.string().min(1).max(200), pullRequestId: z.number().int().positive(),
-  includeFiles: z.boolean(), maxFiles: z.number().int().min(1).max(500), maxFileBytes: z.number().int().min(1000).max(2000000),
-}, async ({ project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes }) => {
+  includeFiles: z.boolean(), maxFiles: z.number().int().min(1).max(500), maxFileBytes: z.number().int().min(1000).max(20000000),
+  maxTotalBytes: z.number().int().min(1000).max(200000000).optional(),
+}, async ({ project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes, maxTotalBytes = 50000000 }) => {
   const git = await (await connectionProvider()).getGitApi();
   const pr = await git.getPullRequest(repository, pullRequestId, project);
   if (!pr) throw new Error(`Azure DevOps no encontró el pull request ${pullRequestId} en «${repository}».`);
@@ -249,14 +250,19 @@ server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, 
   const files = entries.filter(entry => entry.item?.path && !entry.item.isFolder && entry.item.gitObjectType !== 'tree');
   result.omittedFiles = Math.max(0, files.length - maxFiles);
   emit('info', `El pull request cambia ${files.length} archivos. Leyendo su contenido…`);
+  // Large files are read whole (only their changed parts go to Copilot), within a
+  // budget for the whole pull request; the files beyond it are left out and named.
+  let budget = maxTotalBytes;
   for (const [index, entry] of files.slice(0, maxFiles).entries()) {
     const type = changeType(entry.changeType);
-    const read = (sha, path, commit) => readSide({ sha, path, commit, limit: maxFileBytes,
+    if (budget <= 0) { result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? null, changeType: type, before: { skipped: true }, after: { skipped: true } }); continue; }
+    const read = (sha, path, commit) => readSide({ sha, path, commit, limit: Math.min(maxFileBytes, budget),
       blob: id => git.getBlobContent(repositoryId, id, project, false),
       item: (itemPath, version) => git.getItemText(repositoryId, itemPath, project, undefined, undefined, undefined, undefined, false, { version, versionType: 2 }, true) });
     const path = entry.item.path, originalPath = entry.originalPath ?? path;
     const [before, after] = await Promise.all([type === 'add' ? { text: '' } : read(entry.item.originalObjectId, originalPath, result.iteration.baseCommit), type === 'delete' ? { text: '' } : read(entry.item.objectId, path, result.iteration.sourceCommit)]);
-    result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? entry.sourceServerItem ?? null, changeType: type, before, after });
+    budget -= (before.size ?? 0) + (after.size ?? 0);
+    result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? null, changeType: type, before, after });
     if ((index + 1) % 20 === 0) emit('info', `${index + 1} / ${Math.min(files.length, maxFiles)} archivos leídos.`);
   }
   const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];

@@ -343,8 +343,8 @@ export class AzureGateway {
     if (!Array.isArray(result)) throw new Error('Azure DevOps no devolvió una lista válida de pull requests.');
     return result;
   }
-  async pullRequest(config, repository, pullRequestId, { includeFiles = false, maxFiles = 300, maxFileBytes = 400000 } = {}) {
-    const result = await this.call('neo_pull_request', { project: config.project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes });
+  async pullRequest(config, repository, pullRequestId, { includeFiles = false, maxFiles = 300, maxFileBytes = 5000000, maxTotalBytes = 50000000 } = {}) {
+    const result = await this.call('neo_pull_request', { project: config.project, repository, pullRequestId, includeFiles, maxFiles, maxFileBytes, maxTotalBytes });
     if (!result?.pullRequest || !Array.isArray(result.files)) throw new Error('Azure DevOps no devolvió un pull request válido.');
     return result;
   }

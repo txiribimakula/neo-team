@@ -166,3 +166,21 @@ test('a pull request whose files cannot be read says why instead of reporting no
   assert.match(noChangesMessage(buildDiff([{ path: '/b.js', changeType: 'edit', before: { text: 'x\n' }, after: { text: 'x\n' } }]).files), /de 1 archivos, 1 sin cambios de contenido/);
   await assert.rejects(() => runReview({ azure: { pullRequest: async () => ({ pullRequest: { pullRequestId: 1 }, files: [{ path: '/a.js', changeType: 'edit', before: { error: 'HTTP 401' }, after: { error: 'HTTP 401' } }], threads: [] }) }, reviewer: { status: async () => ({ isAuthenticated: true }) }, config: { organization: 'o' }, target: { project: 'P', repository: 'r', pullRequestId: 1 }, mode: 'azure' }), /HTTP 401/);
 });
+
+test('large files are reviewed by their changes, UTF-16 files are text, and what is left out is named', async () => {
+  const { readText } = await import('../server/pr-content.js');
+  const { Readable } = await import('node:stream');
+  const stream = buffer => Readable.from([buffer]);
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('SELECT 1;\n', 'utf16le')]);
+  assert.equal((await readText(stream(utf16), 1000)).text, 'SELECT 1;\n');
+  assert.equal((await readText(stream(Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('SELECT 1;\n', 'utf16le').swap16()])), 1000)).text, 'SELECT 1;\n');
+  assert.equal((await readText(stream(Buffer.from('﻿hola')), 1000)).text, 'hola', 'the UTF-8 mark is not part of the code');
+  const big = Array.from({ length: 30000 }, (_, i) => `línea ${i} con algo de texto para ocupar espacio`).join('\n') + '\n';
+  assert.ok(Buffer.byteLength(big) > 1000000);
+  const diff = buildDiff([{ path: '/big.sql', changeType: 'edit', before: { text: big }, after: { text: big.replace('línea 15000 ', 'línea 15000 cambiada ') } }]);
+  assert.equal(diff.files[0].status, 'included');assert.deepEqual(diff.files[0].lines.filter(l => l === 15001), [15001]);
+  assert.ok(diff.text.length < 2000, 'only the changed part is sent');
+  const { noChangesMessage } = await import('../server/pr-review.js');
+  const message = noChangesMessage(buildDiff([{ path: '/huge.json', changeType: 'edit', before: { tooLarge: true, size: 6000000 }, after: { text: '' } }, { path: '/late.js', changeType: 'edit', before: { skipped: true }, after: { skipped: true } }]).files);
+  assert.match(message, /1 demasiado grandes \(más de 5 MB.*\/huge\.json\)/);assert.match(message, /1 fuera del límite total de 50 MB/);
+});

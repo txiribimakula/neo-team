@@ -11,7 +11,7 @@ import { structuredPatch } from 'diff';
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 export const SEVERITIES = { blocker: 'Bloqueante', major: 'Importante', minor: 'Menor', suggestion: 'Sugerencia' };
 export const VERDICTS = { approve: 'Se puede aprobar', comment: 'Aprobable con comentarios', changes: 'Necesita cambios' };
-export const LIMITS = { files: 300, fileBytes: 400000, diffChars: 160000, lineChars: 400, findings: 40, title: 200, body: 4000, summary: 4000, description: 4000, reviews: 30 };
+export const LIMITS = { files: 300, fileBytes: 5000000, totalBytes: 50000000, diffMs: 10000, diffChars: 160000, lineChars: 400, findings: 40, title: 200, body: 4000, summary: 4000, description: 4000, reviews: 30 };
 const text = (value, max) => String(value ?? '').trim().slice(0, max);
 
 // https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id} and the
@@ -42,10 +42,12 @@ export function buildDiff(files, limit = LIMITS.diffChars) {
     const failed = [file.before, file.after].find(side => side?.error);
     if (failed) { entry.status = 'error'; entry.error = String(failed.error).slice(0, 300); continue; }
     const unreadable = [file.before, file.after].find(side => side?.binary || side?.tooLarge);
-    if (unreadable) { entry.status = unreadable.binary ? 'binary' : 'tooLarge'; continue; }
-    if (truncated) { entry.status = 'omitted'; continue; }
+    if (unreadable) { entry.status = unreadable.binary ? 'binary' : 'tooLarge'; entry.size = unreadable.size ?? null; continue; }
+    if (truncated || [file.before, file.after].some(side => side?.skipped)) { entry.status = 'omitted'; truncated = true; continue; }
     const before = String(file.before?.text ?? '').replace(/\r\n/g, '\n'), after = String(file.after?.text ?? '').replace(/\r\n/g, '\n');
-    const patch = structuredPatch(file.originalPath || file.path, file.path, before, after, '', '', { context: 4 });
+    // A huge file with many changes could take minutes to compare: it is left out instead.
+    const patch = structuredPatch(file.originalPath || file.path, file.path, before, after, '', '', { context: 4, timeout: LIMITS.diffMs });
+    if (!patch) { entry.status = 'tooLarge'; entry.size = Math.max(before.length, after.length); continue; }
     const out = [`### ${file.path} (${file.changeType}${file.originalPath && file.originalPath !== file.path ? `, antes ${file.originalPath}` : ''})`];
     for (const hunk of patch.hunks) {
       out.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
@@ -161,7 +163,9 @@ export function noChangesMessage(files) {
   const errors = files.filter(f => f.status === 'error');
   if (errors.length) return `Azure DevOps no devolvió el contenido de ${errors.length === files.length ? 'ningún archivo' : `${errors.length} de ${files.length} archivos`} del pull request (${errors[0].path}: ${errors[0].error}). Comprueba que tu cuenta puede leer el repositorio y vuelve a intentarlo.`;
   const count = status => files.filter(f => f.status === status).length;
-  const parts = [[count('binary'), 'binarios'], [count('tooLarge'), 'demasiado grandes'], [files.filter(f => f.status === 'included' && !f.lines.length).length, 'sin cambios de contenido o solo con líneas eliminadas']].filter(([n]) => n).map(([n, label]) => `${n} ${label}`);
+  const megabytes = bytes => `${(bytes / 1e6).toLocaleString('es', { maximumFractionDigits: 1 })} MB`;
+  const large = files.filter(f => f.status === 'tooLarge');
+  const parts = [[count('binary'), 'binarios'], [count('tooLarge'), `demasiado grandes (más de ${megabytes(LIMITS.fileBytes)} o con un diff demasiado complejo: ${large.map(f => f.path).join(', ')})`], [count('omitted'), `fuera del límite total de ${megabytes(LIMITS.totalBytes)}`], [files.filter(f => f.status === 'included' && !f.lines.length).length, 'sin cambios de contenido o solo con líneas eliminadas']].filter(([n]) => n).map(([n, label]) => `${n} ${label}`);
   return `El pull request no tiene cambios de texto que se puedan revisar: de ${files.length} archivos, ${parts.join(', ')}.`;
 }
 
@@ -173,7 +177,7 @@ export async function runReview({ azure, reviewer, config, target, mode, onProgr
   const auth = await reviewer.status();
   if (!auth.isAuthenticated) throw authError();
   onProgress({ phase: 'pull-request', message: `Leyendo el pull request ${target.pullRequestId} de «${target.repository}»…` });
-  const data = await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes });
+  const data = await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes, maxTotalBytes: LIMITS.totalBytes });
   const diff = buildDiff(data.files);
   if (!diff.files.some(f => f.status === 'included' && f.lines.length)) throw fail(noChangesMessage(diff.files), 422);
   onProgress({ phase: 'copilot', message: `Enviando ${diff.files.filter(f => f.status === 'included').length} archivos a GitHub Copilot…` });

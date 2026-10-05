@@ -28,11 +28,17 @@ export async function readText(stream, limit) {
   }
   let buffer = Buffer.concat(chunks);
   if (/gzip/i.test(stream.headers?.['content-encoding'] ?? '')) buffer = gunzipSync(buffer);
+  // Files saved as UTF-16 (common in .NET and SQL projects) carry a byte order mark.
+  const utf16 = buffer[0] === 0xff && buffer[1] === 0xfe ? 'le' : buffer[0] === 0xfe && buffer[1] === 0xff ? 'be' : null;
   const status = stream.statusCode;
   if (status && (status < 200 || status >= 300)) return { error: `HTTP ${status}${azureStreamError(buffer.toString('utf8')) ? `: ${azureStreamError(buffer.toString('utf8'))}` : ''}` };
   // A NUL byte in the first bytes marks binary content, which is not reviewed.
+  if (utf16) {
+    const bytes = utf16 === 'be' ? Buffer.from(buffer.subarray(2)).swap16() : buffer.subarray(2);
+    return { text: bytes.subarray(0, bytes.length - bytes.length % 2).toString('utf16le'), size };
+  }
   if (buffer.subarray(0, 8000).includes(0)) return { binary: true, size };
-  const text = buffer.toString('utf8'), error = azureStreamError(text);
+  const text = buffer.toString('utf8').replace(/^\uFEFF/, ''), error = azureStreamError(text);
   return error ? { error } : { text, size };
 }
 
