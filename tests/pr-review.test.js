@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePullRequestUrl, buildDiff, parseReviewOutput, publishReview, commentText, summaryText, runReview, CopilotReviewer } from '../server/pr-review.js';
 import { demoPullRequest, DemoReviewer, DemoPullRequestGateway } from '../server/demo.js';
-import { location } from '../dist/reviews.js';
+import { location, lineChanges, markChanged } from '../dist/reviews.js';
 
 const file = (path, before, after, changeType = 'edit') => ({ path, changeType, before: { text: before }, after: { text: after } });
 
@@ -216,4 +216,22 @@ test('the review model can be chosen among those the account may use', async () 
   assert.equal(log.sessions[1].config.model, 'gpt-5');
   await new CopilotReviewer({ load, model: undefined }).review({ prompt: 'diff' });
   assert.equal('model' in log.sessions[2].config, false, 'without a choice, the default of the plan');
+});
+
+test('every anchored comment keeps the code it talks about, and a suggestion marks only what changes', () => {
+  const diff = buildDiff(demoPullRequest(318).files);
+  const findings = parseReviewOutput(JSON.stringify({ summary: 'S', verdict: 'comment', findings: [
+    { file: '/src/api/export.js', line: 6, severity: 'major', title: 'A', body: 'B' },
+    { file: '/src/csv.js', line: 1, severity: 'minor', title: 'C', body: 'D' },
+    { file: '/src/csv.js', line: null, severity: 'minor', title: 'E', body: 'F' },
+  ] }), diff).findings;
+  assert.deepEqual(findings[0].snippet, { startLine: 4, focus: 6, lines: ['export async function exportReport(req, res) {', "  const format = req.query.format || 'json';", "  const rows = await query(`SELECT * FROM reports WHERE team = '${req.query.team}'`);", "  if (format === 'csv') {", "    res.setHeader('Content-Type', 'text/csv');"] });
+  assert.deepEqual([findings[1].snippet.startLine, findings[1].snippet.lines.length], [1, 3], 'the snippet stops where the file starts');
+  assert.equal(findings[2].snippet, null, 'a comment on the whole file has no snippet');
+  const changes = lineChanges(['  const columns = Object.keys(rows[0]);'], ["  if (!rows.length) return '';", '  const columns = Object.keys(rows[0] ?? {});']);
+  assert.deepEqual(changes.map(c => c.kind), ['removed', 'added', 'added']);
+  const changed = changes.find(c => c.kind === 'added' && c.pair);
+  assert.equal(markChanged(changed.text, changed.pair), '  const columns = Object.keys(rows[0]<mark> ?? {}</mark>);', 'only the changed part of a changed line');
+  assert.equal(markChanged("  if (!rows.length) return '';"), "  <mark>if (!rows.length) return &#39;&#39;;</mark>", 'a new line is changed whole, without its indentation');
+  assert.equal(markChanged('a = 1', 'a  = 1'), 'a = 1', 'only spaces do not count as a change');
 });

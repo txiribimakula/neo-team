@@ -396,7 +396,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -1435,6 +1435,16 @@ async function startReview(input) {
   prUi.reviewId = data.reviewId; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
   toast('Revisión lista. Ajusta los comentarios y publica los que quieras.');
 }
+// The person's own pull requests, read in the background when entering the section,
+// once per workspace and project (or again on demand).
+async function loadMyPullRequests(force = false) {
+  const scope = `${state.mode}|${state.config?.project ?? ''}`;
+  if ((state.mode !== 'demo' && !state.config?.project) || state.busy || prUi.mine === 'loading' || (!force && prUi.mine && prUi.mineScope === scope)) return;
+  prUi.mine = 'loading'; prUi.mineScope = scope; if (tab === 'reviews') render();
+  const { response, data } = await send('/api/pr-mine', {}).catch(error => ({ data: { error: error.message } }));
+  prUi.mine = response?.ok && data.mine ? data.mine : { error: data?.error || 'No se pudieron consultar tus pull requests.' };
+  if (tab === 'reviews') render();
+}
 async function loadPullRequests(repository) {
   prUi.repository = repository; prUi.pullRequests = null;
   if (repository) prUi.pullRequests = (await runOperation('/api/pr-list', { repository }, 'Buscar pull requests', `Pull requests activos de «${repository}».`)).pullRequests;
@@ -1485,10 +1495,14 @@ const actions = {
   'open-reviews': async () => {
     prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
     // The sign-in state is checked once, in the background, so the section shows it at once.
-    if (state.mode === 'demo' || prUi.copilot || state.busy) return;
-    const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
-    if (response?.ok && data.copilot) { prUi.copilot = data.copilot; if (tab === 'reviews') render(); }
+    if (state.mode !== 'demo' && !prUi.copilot && !state.busy) {
+      const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
+      if (response?.ok && data.copilot) { prUi.copilot = data.copilot; if (tab === 'reviews') render(); }
+    }
+    await loadMyPullRequests();
   },
+  'pr-mine-refresh': () => loadMyPullRequests(true),
+  'pr-edit-suggestion': el => { prUi.editSuggestion = prUi.editSuggestion === el.dataset.finding ? null : el.dataset.finding; render(); if (prUi.editSuggestion) $(`[data-pr-suggestion="${CSS.escape(el.dataset.finding)}"]`)?.focus(); },
   'pr-copy': async el => { await navigator.clipboard.writeText(el.dataset.copy); toast(`Copiado: ${el.dataset.copy}`); },
   'pr-copilot-status': async () => {
     prUi.copilot = (await request('/api/copilot-status', {})).copilot;

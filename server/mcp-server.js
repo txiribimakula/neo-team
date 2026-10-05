@@ -228,6 +228,26 @@ server.tool('neo_pull_requests', 'List the active pull requests of a repository.
   const pullRequests = await git.getPullRequests(repository, { status: 1 }, project, undefined, 0, top) ?? [];
   return { content: [{ type: 'text', text: JSON.stringify(pullRequests.map(pullRequestSummary)) }] };
 });
+// The person's own active pull requests in a project: those they created and those
+// where they are a reviewer, with their vote.
+server.tool('neo_my_pull_requests', 'List the active pull requests of a project created by the signed-in user or where the user is a reviewer.', {
+  project: z.string().min(1).max(200), top: z.number().int().min(1).max(200),
+}, async ({ project, top }) => {
+  const connection = await connectionProvider();
+  const me = (await connection.connect())?.authenticatedUser?.id;
+  if (!me) throw new Error('Azure DevOps no indicó qué usuario ha iniciado sesión.');
+  const git = await connection.getGitApi();
+  const [created, reviewing] = await Promise.all([
+    git.getPullRequestsByProject(project, { status: 1, creatorId: me }, undefined, 0, top),
+    git.getPullRequestsByProject(project, { status: 1, reviewerId: me }, undefined, 0, top),
+  ]);
+  const mine = pr => (pr.reviewers ?? []).find(r => r.id === me);
+  const result = {
+    created: (created ?? []).map(pullRequestSummary),
+    reviewing: (reviewing ?? []).filter(pr => pr.createdBy?.id !== me).map(pr => ({ ...pullRequestSummary(pr), myVote: mine(pr)?.vote ?? 0, required: !!mine(pr)?.isRequired })),
+  };
+  return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+});
 server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, optionally, the content of its changed files and existing comments.', {
   project: z.string().min(1).max(200), repository: z.string().min(1).max(200), pullRequestId: z.number().int().positive(),
   includeFiles: z.boolean(), maxFiles: z.number().int().min(1).max(500), maxFileBytes: z.number().int().min(1000).max(20000000),

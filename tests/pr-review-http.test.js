@@ -29,6 +29,8 @@ test('HTTP pull request review in the example: list, review, edit, publish once 
   await post('/api/mode', { mode: 'demo' });
   const repositories = (await post('/api/pr-repositories')).data.repositories;
   assert.deepEqual(repositories.map(r => r.name), ['neo-platform-web']);
+  const mine = (await post('/api/pr-mine')).data.mine;
+  assert.deepEqual([mine.created.map(pr => pr.pullRequestId), mine.reviewing.map(pr => [pr.pullRequestId, pr.myVote, pr.repository.name])], [[318], [[321, 0, 'neo-platform-web']]], 'created by me and assigned to me');
   const pullRequests = (await post('/api/pr-list', { repository: 'neo-platform-web' })).data.pullRequests;
   assert.deepEqual(pullRequests.map(pr => pr.pullRequestId), [318, 321]);
   assert.equal((await post('/api/pr-review', { url: 'https://github.com/o/r/pull/1' })).status, 400);

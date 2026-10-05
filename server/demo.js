@@ -244,6 +244,10 @@ export class DemoPullRequestGateway {
   constructor() { this.threads = new Map(); this.nextId = 1; }
   async repositories() { return demoRepositories(); }
   async pullRequests() { return demoPullRequests(); }
+  async myPullRequests() {
+    const [created, reviewing] = demoPullRequests();
+    return { created: [created], reviewing: [{ ...reviewing, myVote: 0, required: true }] };
+  }
   async pullRequest(_config, _repository, id) { return demoPullRequest(id); }
   async pullRequestThreads(_config, _repositoryId, id) { return (this.threads.get(id) ?? []).map(t => ({ id: t.id, comments: [t.content] })); }
   async addPullRequestComment(_config, { pullRequestId, content, filePath, line, endLine }) {

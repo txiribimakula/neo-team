@@ -131,6 +131,14 @@ function suggestedChange(value, file) {
   return { startLine, endLine, original, code };
 }
 
+// The code a finding talks about: its line with up to two lines around it from the diff.
+export function snippetAt(file, line, around = 2) {
+  let start = line, end = line;
+  while (start > line - around && file.content?.[start - 1] !== undefined) start--;
+  while (end < line + around && file.content?.[end + 1] !== undefined) end++;
+  return { startLine: start, focus: line, lines: Array.from({ length: end - start + 1 }, (_, i) => String(file.content[start + i]).slice(0, 1000)) };
+}
+
 // The answer is validated and every finding is anchored to a line of the diff.
 // A finding whose line is not in the diff is kept as a comment on the file.
 export function parseReviewOutput(output, diff) {
@@ -145,7 +153,8 @@ export function parseReviewOutput(output, diff) {
     const anchored = !!file && Number.isInteger(line) && file.lines.includes(line);
     const severity = Object.hasOwn(SEVERITIES, item?.severity) ? item.severity : 'minor';
     const suggestion = file ? suggestedChange(item?.suggestion, file) : null;
-    return [{ id: `f${index + 1}`, file: file?.path ?? null, line: suggestion?.startLine ?? (anchored ? line : null), severity, title: title || text(body, 80), body, suggestion, selected: severity !== 'suggestion', published: null }];
+    const at = suggestion?.startLine ?? (anchored ? line : null);
+    return [{ id: `f${index + 1}`, file: file?.path ?? null, line: at, severity, title: title || text(body, 80), body, suggestion, snippet: at ? snippetAt(file, at) : null, selected: severity !== 'suggestion', published: null }];
   });
   const order = Object.keys(SEVERITIES);
   findings.sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
