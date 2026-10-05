@@ -62,6 +62,7 @@ function detailView(review, ui) {
   const notes = [
     review.notes.truncated && `${review.notes.omittedFiles} archivos no se incluyeron por tamaño: revísalos a mano.`,
     review.notes.binaryFiles && `${review.notes.binaryFiles} archivos binarios no revisados.`,
+    review.notes.unreadableFiles && `${review.notes.unreadableFiles} archivos no se pudieron leer en Azure DevOps y no se han revisado.`,
     review.notes.tooLargeFiles && `${review.notes.tooLargeFiles} archivos demasiado grandes no revisados.`,
     review.pullRequest.status !== 'active' && 'El pull request ya no está activo: no se podrán publicar comentarios.',
   ].filter(Boolean);

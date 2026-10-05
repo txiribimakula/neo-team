@@ -8,6 +8,7 @@ import { logger } from '@azure-devops/mcp/dist/logger.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { securityReader } from './security-reader.js';
+import { changeType, readSide } from './pr-content.js';
 import { WebApi, getBearerHandler } from 'azure-devops-node-api';
 import { z } from 'zod';
 import { createAuthenticator } from '@azure-devops/mcp/dist/auth.js';
@@ -205,22 +206,7 @@ server.tool('neo_create_item', 'Create or validate one work item with its parent
 // Pull request review. Reads are limited in size; the only write adds a new
 // comment thread and never edits, resolves, votes on or completes a pull request.
 const PR_STATUS = { 1: 'active', 2: 'abandoned', 3: 'completed' };
-const CHANGE_TYPES = [[16, 'delete'], [1, 'add'], [8, 'rename'], [2, 'edit']];
-const changeType = value => CHANGE_TYPES.find(([bit]) => (Number(value) & bit) !== 0)?.[1] ?? 'edit';
 const person = identity => identity ? { displayName: identity.displayName ?? '', uniqueName: identity.uniqueName ?? '' } : null;
-async function readText(stream, limit) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of stream) {
-    size += chunk.length;
-    if (size > limit) { stream.destroy?.(); return { tooLarge: true, size }; }
-    chunks.push(chunk);
-  }
-  const buffer = Buffer.concat(chunks);
-  // A NUL byte in the first bytes marks binary content, which is not reviewed.
-  if (buffer.subarray(0, 8000).includes(0)) return { binary: true, size };
-  return { text: buffer.toString('utf8'), size };
-}
 const pullRequestSummary = pr => ({
   pullRequestId: pr.pullRequestId, title: pr.title ?? '', description: pr.description ?? '', status: PR_STATUS[pr.status] ?? String(pr.status ?? ''),
   isDraft: !!pr.isDraft, createdBy: person(pr.createdBy), creationDate: pr.creationDate ?? null,
@@ -265,8 +251,11 @@ server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, 
   emit('info', `El pull request cambia ${files.length} archivos. Leyendo su contenido…`);
   for (const [index, entry] of files.slice(0, maxFiles).entries()) {
     const type = changeType(entry.changeType);
-    const read = async sha => sha ? readText(await git.getBlobContent(repositoryId, sha, project, false), maxFileBytes) : { text: '' };
-    const [before, after] = await Promise.all([type === 'add' ? { text: '' } : read(entry.item.originalObjectId), type === 'delete' ? { text: '' } : read(entry.item.objectId)]);
+    const read = (sha, path, commit) => readSide({ sha, path, commit, limit: maxFileBytes,
+      blob: id => git.getBlobContent(repositoryId, id, project, false),
+      item: (itemPath, version) => git.getItemText(repositoryId, itemPath, project, undefined, undefined, undefined, undefined, false, { version, versionType: 2 }, true) });
+    const path = entry.item.path, originalPath = entry.originalPath ?? path;
+    const [before, after] = await Promise.all([type === 'add' ? { text: '' } : read(entry.item.originalObjectId, originalPath, result.iteration.baseCommit), type === 'delete' ? { text: '' } : read(entry.item.objectId, path, result.iteration.sourceCommit)]);
     result.files.push({ path: entry.item.path, originalPath: entry.originalPath ?? entry.sourceServerItem ?? null, changeType: type, before, after });
     if ((index + 1) % 20 === 0) emit('info', `${index + 1} / ${Math.min(files.length, maxFiles)} archivos leídos.`);
   }

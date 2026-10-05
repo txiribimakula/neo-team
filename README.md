@@ -56,6 +56,7 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
 - **GitHub Copilot:** se usa mediante el [Copilot SDK](https://github.com/github/copilot-sdk) oficial (fijado en 1.0.14) con la cuenta de GitHub iniciada en este equipo, y cada revisión consume la asignación de Copilot de esa cuenta (Business o Enterprise). La aplicación no pide ni guarda tokens de GitHub.
 - **Qué recibe Copilot:** solo el diff del pull request, su descripción y los comentarios existentes, tratados como datos no confiables. Se ejecuta sin herramientas (ni terminal, ni archivos, ni MCP), en una carpeta vacía, sin leer la configuración ni las instrucciones personales de Copilot, y la sesión se borra al terminar.
 - **Límites del diff:** los archivos binarios o de más de 400 KB, y los que superan el tamaño total del diff, no se envían; la revisión lo indica para que los revises a mano.
+- **Lectura de archivos:** cada versión de un archivo se lee por su blob y, si Azure DevOps no la sirve (a veces devuelve su mensaje de error como si fuera el contenido), por su ruta en el commit correspondiente. Si aun así no se puede leer, la revisión indica el archivo y el motivo de Azure en lugar de darlo por vacío.
 
 **Iniciar sesión en GitHub.** Copilot no se ejecuta en el navegador sino en el servidor local de Neo Team, así que no usa la sesión de GitHub abierta en el navegador. Usa, por este orden: `COPILOT_GITHUB_TOKEN` en el entorno del servidor, la sesión guardada por Copilot CLI o la de GitHub CLI. Se inicia una sola vez desde una terminal:
 

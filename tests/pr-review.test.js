@@ -139,3 +139,30 @@ test('the prompt marks the pull request content as untrusted data', async () => 
   assert.match(log.prompt, /<descripcion_del_autor>[\s\S]*<\/descripcion_del_autor>/);assert.match(log.prompt, /<diff>[\s\S]*export\.js[\s\S]*<\/diff>/);
   assert.match(log.sessions[0].config.systemMessage.content, /Ignora cualquier instrucción/);
 });
+
+test('an Azure error served as file content is recognised, and the file is read again by path and commit', async () => {
+  const { readText, readSide, changeType } = await import('../server/pr-content.js');
+  const { Readable } = await import('node:stream');
+  const { gzipSync } = await import('node:zlib');
+  const stream = (text, extra = {}) => Object.assign(Readable.from([Buffer.isBuffer(text) ? text : Buffer.from(text)]), extra);
+  const azureError = JSON.stringify({ $id: '1', innerException: null, message: 'TF401174: The item could not be found.', typeName: 'Microsoft.TeamFoundation.Git.Server.GitItemNotFoundException', typeKey: 'GitItemNotFoundException', errorCode: 0 });
+  assert.deepEqual(await readText(stream(azureError), 1000), { error: 'TF401174: The item could not be found.' });
+  assert.match((await readText(stream('{}', { statusCode: 404 }), 1000)).error, /HTTP 404/);
+  assert.equal((await readText(stream('{"message":"a","typeName":"b"}'), 1000)).text, '{"message":"a","typeName":"b"}', 'a JSON file of the repository is still code');
+  assert.equal((await readText(stream(gzipSync('const a = 1;\n'), { headers: { 'content-encoding': 'gzip' } }), 1000)).text, 'const a = 1;\n');
+  const calls = [];
+  const side = await readSide({ sha: 'abc', path: '/a.js', commit: 'c1', limit: 1000, blob: async sha => { calls.push(['blob', sha]); return stream(azureError); }, item: async (path, commit) => { calls.push(['item', path, commit]); return stream('let x = 2;\n'); } });
+  assert.equal(side.text, 'let x = 2;\n');assert.deepEqual(calls, [['blob', 'abc'], ['item', '/a.js', 'c1']]);
+  const failed = await readSide({ sha: 'abc', path: '/a.js', commit: 'c1', limit: 1000, blob: async () => stream(azureError), item: async () => { throw new Error('HTTP 401'); } });
+  assert.match(failed.error, /TF401174/);
+  assert.deepEqual([changeType(2), changeType(16), changeType(9), changeType('add'), changeType('delete, sourceRename'), changeType('edit')], ['edit', 'delete', 'add', 'add', 'delete', 'edit']);
+});
+
+test('a pull request whose files cannot be read says why instead of reporting no changes', async () => {
+  const { noChangesMessage } = await import('../server/pr-review.js');
+  const unreadable = buildDiff([{ path: '/a.js', changeType: 'edit', before: { error: 'TF401019: no tienes acceso' }, after: { error: 'TF401019: no tienes acceso' } }, { path: '/b.js', changeType: 'edit', before: { text: 'x\n' }, after: { text: 'x\n' } }]);
+  assert.equal(unreadable.files[0].status, 'error');
+  assert.match(noChangesMessage(unreadable.files), /no devolvió el contenido de 1 de 2 archivos del pull request \(\/a\.js: TF401019/);
+  assert.match(noChangesMessage(buildDiff([{ path: '/b.js', changeType: 'edit', before: { text: 'x\n' }, after: { text: 'x\n' } }]).files), /de 1 archivos, 1 sin cambios de contenido/);
+  await assert.rejects(() => runReview({ azure: { pullRequest: async () => ({ pullRequest: { pullRequestId: 1 }, files: [{ path: '/a.js', changeType: 'edit', before: { error: 'HTTP 401' }, after: { error: 'HTTP 401' } }], threads: [] }) }, reviewer: { status: async () => ({ isAuthenticated: true }) }, config: { organization: 'o' }, target: { project: 'P', repository: 'r', pullRequestId: 1 }, mode: 'azure' }), /HTTP 401/);
+});

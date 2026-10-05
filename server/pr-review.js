@@ -39,6 +39,8 @@ export function buildDiff(files, limit = LIMITS.diffChars) {
   for (const file of files) {
     const entry = { path: file.path, changeType: file.changeType, lines: [], added: 0, removed: 0, status: 'included' };
     summary.push(entry);
+    const failed = [file.before, file.after].find(side => side?.error);
+    if (failed) { entry.status = 'error'; entry.error = String(failed.error).slice(0, 300); continue; }
     const unreadable = [file.before, file.after].find(side => side?.binary || side?.tooLarge);
     if (unreadable) { entry.status = unreadable.binary ? 'binary' : 'tooLarge'; continue; }
     if (truncated) { entry.status = 'omitted'; continue; }
@@ -91,7 +93,7 @@ ${text(pullRequest.description, LIMITS.description) || '(sin descripción)'}
 ${existing || '(ninguno)'}
 </comentarios_existentes>
 
-${skipped.length || omittedFiles ? `Archivos no incluidos en el diff (binarios, demasiado grandes o por límite de tamaño): ${[...skipped.map(f => f.path), ...(omittedFiles ? [`y ${omittedFiles} más`] : [])].join(', ')}.\n\n` : ''}El diff muestra el número de línea de la versión nueva. Las líneas «+» son añadidas, las «-» eliminadas y el resto contexto.
+${skipped.length || omittedFiles ? `Archivos no incluidos en el diff (binarios, demasiado grandes, ilegibles o por límite de tamaño): ${[...skipped.map(f => f.path), ...(omittedFiles ? [`y ${omittedFiles} más`] : [])].join(', ')}.\n\n` : ''}El diff muestra el número de línea de la versión nueva. Las líneas «+» son añadidas, las «-» eliminadas y el resto contexto.
 
 <diff>
 ${diff.text}
@@ -149,8 +151,18 @@ export function reviewRecord({ mode, organization, project, target, data, diff, 
     repository: { id: pr.repository?.id ?? null, name: pr.repository?.name ?? target.repository },
     pullRequest: { id: pr.pullRequestId, title: pr.title, url: pullRequestUrl({ organization, project, repository: pr.repository?.name ?? target.repository, pullRequestId: pr.pullRequestId }), author: pr.createdBy?.displayName ?? '', sourceRefName: pr.sourceRefName, targetRefName: pr.targetRefName, status: pr.status, isDraft: pr.isDraft, sourceCommit: data.iteration?.sourceCommit ?? pr.lastMergeSourceCommit, iterationId: data.iteration?.id ?? null },
     copilot, summary: parsed.summary, verdict: parsed.verdict, findings: parsed.findings, summaryPublished: null,
-    notes: { files: diff.files.length + (data.omittedFiles ?? 0), omittedFiles: diff.files.filter(f => f.status === 'omitted').length + (data.omittedFiles ?? 0), binaryFiles: diff.files.filter(f => f.status === 'binary').length, tooLargeFiles: diff.files.filter(f => f.status === 'tooLarge').length, truncated: diff.truncated || (data.omittedFiles ?? 0) > 0 },
+    notes: { files: diff.files.length + (data.omittedFiles ?? 0), omittedFiles: diff.files.filter(f => f.status === 'omitted').length + (data.omittedFiles ?? 0), binaryFiles: diff.files.filter(f => f.status === 'binary').length, unreadableFiles: diff.files.filter(f => f.status === 'error').length, tooLargeFiles: diff.files.filter(f => f.status === 'tooLarge').length, truncated: diff.truncated || (data.omittedFiles ?? 0) > 0 },
   };
+}
+
+// Why there is nothing to review, so a reading problem is not taken for an empty pull request.
+export function noChangesMessage(files) {
+  if (!files.length) return 'Azure DevOps no devolvió ningún archivo cambiado en la última iteración del pull request.';
+  const errors = files.filter(f => f.status === 'error');
+  if (errors.length) return `Azure DevOps no devolvió el contenido de ${errors.length === files.length ? 'ningún archivo' : `${errors.length} de ${files.length} archivos`} del pull request (${errors[0].path}: ${errors[0].error}). Comprueba que tu cuenta puede leer el repositorio y vuelve a intentarlo.`;
+  const count = status => files.filter(f => f.status === status).length;
+  const parts = [[count('binary'), 'binarios'], [count('tooLarge'), 'demasiado grandes'], [files.filter(f => f.status === 'included' && !f.lines.length).length, 'sin cambios de contenido o solo con líneas eliminadas']].filter(([n]) => n).map(([n, label]) => `${n} ${label}`);
+  return `El pull request no tiene cambios de texto que se puedan revisar: de ${files.length} archivos, ${parts.join(', ')}.`;
 }
 
 // Reads the pull request, asks Copilot and returns the review to store locally.
@@ -163,7 +175,7 @@ export async function runReview({ azure, reviewer, config, target, mode, onProgr
   onProgress({ phase: 'pull-request', message: `Leyendo el pull request ${target.pullRequestId} de «${target.repository}»…` });
   const data = await azure.pullRequest(scoped, target.repository, target.pullRequestId, { includeFiles: true, maxFiles: LIMITS.files, maxFileBytes: LIMITS.fileBytes });
   const diff = buildDiff(data.files);
-  if (!diff.files.some(f => f.status === 'included' && f.lines.length)) throw fail('El pull request no tiene cambios de texto que se puedan revisar.');
+  if (!diff.files.some(f => f.status === 'included' && f.lines.length)) throw fail(noChangesMessage(diff.files), 422);
   onProgress({ phase: 'copilot', message: `Enviando ${diff.files.filter(f => f.status === 'included').length} archivos a GitHub Copilot…` });
   const result = await reviewer.review({ prompt: reviewPrompt({ pullRequest: data.pullRequest, repository: data.pullRequest.repository?.name ?? target.repository, diff, threads: data.threads, omittedFiles: data.omittedFiles }), onProgress });
   onProgress({ phase: 'saving', message: 'Comprobando la respuesta y guardando la revisión…' });
