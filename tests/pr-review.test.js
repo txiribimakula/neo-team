@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePullRequestUrl, buildDiff, parseReviewOutput, publishReview, commentText, commentReference, runReview, CopilotReviewer } from '../server/pr-review.js';
 import { demoPullRequest, DemoReviewer, DemoPullRequestGateway } from '../server/demo.js';
+import { location } from '../dist/reviews.js';
 
 const file = (path, before, after, changeType = 'edit') => ({ path, changeType, before: { text: before }, after: { text: after } });
 
@@ -183,4 +184,21 @@ test('large files are reviewed by their changes, UTF-16 files are text, and what
   const { noChangesMessage } = await import('../server/pr-review.js');
   const message = noChangesMessage(buildDiff([{ path: '/huge.json', changeType: 'edit', before: { tooLarge: true, size: 6000000 }, after: { text: '' } }, { path: '/late.js', changeType: 'edit', before: { skipped: true }, after: { skipped: true } }]).files);
   assert.match(message, /1 demasiado grandes \(más de 5 MB.*\/huge\.json\)/);assert.match(message, /1 fuera del límite total de 50 MB/);
+});
+
+test('a finding can carry an Azure DevOps suggested change over whole lines of the diff', async () => {
+  const diff = buildDiff(demoPullRequest(318).files);
+  const parse = suggestion => parseReviewOutput(JSON.stringify({ summary: 'S', verdict: 'comment', findings: [{ file: '/src/csv.js', line: 2, severity: 'major', title: 'T', body: 'B', suggestion }] }), diff).findings[0];
+  const ok = parse({ startLine: 2, endLine: 3, code: "  if (!rows.length) return '';\n  return 'x';\n" });
+  assert.deepEqual(ok.suggestion, { startLine: 2, endLine: 3, code: "  if (!rows.length) return '';\n  return 'x';", original: ['  const columns = Object.keys(rows[0]);', "  return [columns.join(','), ...rows.map(row => columns.map(column => row[column]).join(','))].join('\\n');"] });
+  assert.equal(ok.line, 2);assert.equal(location(ok), '/src/csv.js:2-3');
+  for (const bad of [{ startLine: 4, endLine: 9, code: 'x' }, { startLine: 3, endLine: 2, code: 'x' }, { startLine: 2, endLine: 2, code: 'a ``` b' }, { startLine: 2, endLine: 2, code: '  const columns = Object.keys(rows[0]);' }, { startLine: 2 }, null])
+    assert.equal(parse(bad).suggestion, null, JSON.stringify(bad));
+  const review = { id: 'r9', project: 'P', repository: { id: 'r', name: 'web' }, pullRequest: { id: 318, sourceCommit: demoPullRequest(318).pullRequest.lastMergeSourceCommit }, summary: 'S', verdict: 'comment', summaryPublished: null, findings: [{ ...ok, id: 'f1', selected: true, published: null }] };
+  assert.match(commentText(review, review.findings[0]), /\n```suggestion\n  if \(!rows\.length\) return '';\n  return 'x';\n```\n/);
+  const gateway = new DemoPullRequestGateway(), sent = [];
+  const add = gateway.addPullRequestComment.bind(gateway);
+  gateway.addPullRequestComment = async (config, args) => { sent.push(args); return add(config, args); };
+  await publishReview({ azure: gateway, config: {}, review, includeSummary: false, onPublished: async () => {} });
+  assert.deepEqual([sent[0].filePath, sent[0].line, sent[0].endLine, sent[0].endOffset], ['/src/csv.js', 2, 3, review.findings[0].suggestion.original[1].length + 1], 'the thread selects the whole lines');
 });

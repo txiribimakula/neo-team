@@ -353,8 +353,8 @@ export class AzureGateway {
     if (!Array.isArray(result)) throw new Error('Azure DevOps no devolvió los comentarios del pull request.');
     return result;
   }
-  async addPullRequestComment(config, { repositoryId, pullRequestId, content, filePath, line }) {
-    const result = await this.call('neo_pull_request_comment_write', { project: config.project, repositoryId, pullRequestId, content, ...(filePath ? { filePath } : {}), ...(filePath && line ? { line } : {}) });
+  async addPullRequestComment(config, { repositoryId, pullRequestId, content, filePath, line, endLine, endOffset }) {
+    const result = await this.call('neo_pull_request_comment_write', { project: config.project, repositoryId, pullRequestId, content, ...(filePath ? { filePath } : {}), ...(filePath && line ? { line } : {}), ...(filePath && line && endLine ? { endLine, endOffset } : {}) });
     if (!Number.isInteger(result?.id)) throw new Error('Azure DevOps no confirmó el comentario.');
     return result;
   }

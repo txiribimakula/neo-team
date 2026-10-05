@@ -12,7 +12,7 @@ import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
-import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, LIMITS as REVIEW_LIMITS } from './pr-review.js';
+import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
@@ -365,6 +365,13 @@ const server = http.createServer(async (req, res) => {
           if (input.body !== undefined) {
             if (typeof input.body !== 'string' || !input.body.trim() || input.body.length > REVIEW_LIMITS.body) throw fail(`El comentario no puede estar vacío ni superar ${REVIEW_LIMITS.body} caracteres.`);
             finding.body = input.body.trim();
+          }
+          // The suggested change can be adjusted, or removed by leaving it empty.
+          if (input.suggestion !== undefined) {
+            if (!finding.suggestion) throw fail('Este comentario no tiene un cambio propuesto.');
+            if (!validSuggestionCode(input.suggestion)) throw fail(`El cambio propuesto no puede contener \`\`\` ni superar ${REVIEW_LIMITS.body} caracteres.`);
+            const code = input.suggestion.replace(/\r\n/g, '\n').replace(/\n$/, '');
+            finding.suggestion = code.trim() ? { ...finding.suggestion, code } : null;
           }
           if (input.selected !== undefined) {
             if (typeof input.selected !== 'boolean') throw fail('Selección no válida.');

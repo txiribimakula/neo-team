@@ -5,7 +5,7 @@ const when = value => value ? new Date(value).toLocaleString('es', { day: 'numer
 const branch = ref => String(ref ?? '').replace(/^refs\/heads\//, '');
 export const SEVERITY_LABELS = { blocker: 'Bloqueante', major: 'Importante', minor: 'Menor', suggestion: 'Sugerencia' };
 export const VERDICT_LABELS = { approve: 'Se puede aprobar', comment: 'Aprobable con comentarios', changes: 'Necesita cambios' };
-export const location = finding => finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ' · todo el archivo'}` : 'Comentario general';
+export const location = finding => finding.file ? `${finding.file}${finding.line ? `:${finding.line}${finding.suggestion && finding.suggestion.endLine > finding.line ? `-${finding.suggestion.endLine}` : ''}` : ' · todo el archivo'}` : 'Comentario general';
 export const pendingFindings = review => review.findings.filter(f => f.selected && !f.published);
 
 function copilotLine(ui, demo) {
@@ -59,7 +59,15 @@ function findingView(review, finding) {
     <header><label class="pr-select"><input type="checkbox" data-pr-select="${escape(finding.id)}" data-focus="pr-select:${escape(finding.id)}" ${finding.selected || done ? 'checked' : ''} ${done ? 'disabled' : ''} aria-label="Publicar «${escape(finding.title)}»"><span class="pill severity">${escape(SEVERITY_LABELS[finding.severity])}</span><strong>${escape(finding.title)}</strong></label>${done ? `<span class="pill changed">${review.mode === 'demo' ? 'Publicado (simulado)' : 'Publicado en Azure'} ✓</span>` : ''}</header>
     <p class="pr-location"><code>${escape(location(finding))}</code></p>
     <textarea data-pr-body="${escape(finding.id)}" data-focus="pr-body:${escape(finding.id)}" rows="${Math.min(12, Math.max(3, finding.body.split('\n').length + 1))}" maxlength="4000" aria-label="Texto del comentario" ${done ? 'disabled' : ''}>${escape(finding.body)}</textarea>
+    ${suggestionView(finding, done)}
   </article>`;
+}
+// The suggested change as Azure DevOps shows it: the commented lines and what replaces them.
+function suggestionView(finding, done) {
+  const s = finding.suggestion;
+  if (!s) return '';
+  const lines = s.code.split('\n').length;
+  return `<div class="pr-suggestion"><pre class="pr-suggestion-old" aria-label="Líneas actuales">${s.original.map((line, i) => `<span>${String(s.startLine + i).padStart(4)}  ${escape(line)}</span>`).join('')}</pre><textarea class="pr-suggestion-new" data-pr-suggestion="${escape(finding.id)}" data-focus="pr-suggestion:${escape(finding.id)}" rows="${Math.min(14, lines + 1)}" maxlength="4000" spellcheck="false" aria-label="Cambio propuesto" title="Se publica como cambio sugerido de Azure DevOps. Vacío: sin cambio propuesto" ${done ? 'disabled' : ''}>${escape(s.code)}</textarea></div>`;
 }
 
 function detailView(review, ui, state) {
@@ -99,6 +107,6 @@ export function reviewsView(state, ui) {
 
 // What will be written, shown before anything is sent to Azure DevOps.
 export function publishConfirmation(review, includeSummary) {
-  const items = [...(includeSummary && !review.summaryPublished ? [{ where: 'Comentario general', title: 'Resumen de la revisión' }] : []), ...pendingFindings(review).map(f => ({ where: location(f), title: `${SEVERITY_LABELS[f.severity]}: ${f.title}` }))];
+  const items = [...(includeSummary && !review.summaryPublished ? [{ where: 'Comentario general', title: 'Resumen de la revisión' }] : []), ...pendingFindings(review).map(f => ({ where: location(f), title: `${SEVERITY_LABELS[f.severity]}: ${f.title}${f.suggestion ? ' · con cambio propuesto' : ''}` }))];
   return { count: items.length, html: `<p>Se crearán <strong>${items.length} hilos nuevos</strong> en el pull request !${review.pullRequest.id} de «${escape(review.repository.name)}». No se modifican, resuelven ni borran comentarios existentes y no se vota el pull request.</p><ul class="pr-confirm-list">${items.map(i => `<li><code>${escape(i.where)}</code> ${escape(i.title)}</li>`).join('')}</ul><div class="notice">Antes de publicar se comprueba que el pull request no ha cambiado desde la revisión. Cada comentario indica que es una revisión asistida por GitHub Copilot.</div>` };
 }

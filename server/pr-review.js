@@ -12,7 +12,7 @@ import { localPullRequestFiles } from './local-repo.js';
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 export const SEVERITIES = { blocker: 'Bloqueante', major: 'Importante', minor: 'Menor', suggestion: 'Sugerencia' };
 export const VERDICTS = { approve: 'Se puede aprobar', comment: 'Aprobable con comentarios', changes: 'Necesita cambios' };
-export const LIMITS = { files: 300, fileBytes: 5000000, totalBytes: 50000000, diffMs: 10000, diffChars: 160000, lineChars: 400, findings: 40, title: 200, body: 4000, summary: 4000, description: 4000, reviews: 30 };
+export const LIMITS = { files: 300, fileBytes: 5000000, totalBytes: 50000000, diffMs: 10000, diffChars: 160000, lineChars: 400, findings: 40, title: 200, body: 4000, suggestionLines: 30, summary: 4000, description: 4000, reviews: 30 };
 const text = (value, max) => String(value ?? '').trim().slice(0, max);
 
 // https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id} and the
@@ -38,7 +38,7 @@ export function buildDiff(files, limit = LIMITS.diffChars) {
   const sections = [], summary = [];
   let size = 0, truncated = false;
   for (const file of files) {
-    const entry = { path: file.path, changeType: file.changeType, lines: [], added: 0, removed: 0, status: 'included' };
+    const entry = { path: file.path, changeType: file.changeType, lines: [], content: {}, added: 0, removed: 0, status: 'included' };
     summary.push(entry);
     const failed = [file.before, file.after].find(side => side?.error);
     if (failed) { entry.status = 'error'; entry.error = String(failed.error).slice(0, 300); continue; }
@@ -58,7 +58,7 @@ export function buildDiff(files, limit = LIMITS.diffChars) {
         if (mark === '\\') continue;
         if (mark === '-') { out.push(`-      | ${content}`); entry.removed++; continue; }
         out.push(`${mark === '+' ? '+' : ' '}${String(line).padStart(5)} | ${content}`);
-        entry.lines.push(line);
+        entry.lines.push(line); entry.content[line] = raw.slice(1);
         if (mark === '+') entry.added++;
         line++;
       }
@@ -103,8 +103,9 @@ ${diff.text}
 </diff>
 
 Formato de respuesta (JSON):
-{"summary":"Resumen en 2-5 frases de qué cambia y de su riesgo","verdict":"approve | comment | changes","findings":[{"file":"/ruta/exacta/del/diff","line":12,"severity":"blocker | major | minor | suggestion","title":"Frase corta","body":"Explicación, impacto y corrección propuesta"}]}
+{"summary":"Resumen en 2-5 frases de qué cambia y de su riesgo","verdict":"approve | comment | changes","findings":[{"file":"/ruta/exacta/del/diff","line":12,"severity":"blocker | major | minor | suggestion","title":"Frase corta","body":"Explicación, impacto y corrección propuesta","suggestion":{"startLine":12,"endLine":13,"code":"código que sustituye esas líneas"}}]}
 - "line" es un número de línea de la versión nueva que aparece en el diff, o null si el hallazgo es de todo el archivo.
+- "suggestion" es el cambio concreto que corrige el hallazgo, o null si no hay uno claro y acotado. Sustituye por completo las líneas de "startLine" a "endLine" de la versión nueva (las dos incluidas, que aparezcan en el diff, como mucho ${LIMITS.suggestionLines}). "code" es el texto exacto que las reemplaza, con su sangría, sin \`\`\` ni números de línea; puede tener más o menos líneas que las sustituidas.
 - Como máximo ${LIMITS.findings} hallazgos, ordenados por gravedad. Si no hay problemas, "findings" es una lista vacía.`;
 }
 
@@ -115,6 +116,19 @@ function extractJson(output) {
   return null;
 }
 const normalizePath = path => { const value = String(path ?? '').trim().replace(/\\/g, '/'); return value && !value.startsWith('/') ? `/${value}` : value; };
+
+// A suggested change replaces whole lines of the new version that are in the diff,
+// like Azure DevOps' own suggestions; anything else is left as plain text.
+export const validSuggestionCode = code => typeof code === 'string' && code.length <= LIMITS.body && !code.includes('```');
+function suggestedChange(value, file) {
+  const startLine = Number(value?.startLine ?? value?.line), endLine = Number(value?.endLine ?? value?.startLine ?? value?.line);
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine > endLine || endLine - startLine >= LIMITS.suggestionLines) return null;
+  const original = Array.from({ length: endLine - startLine + 1 }, (_, i) => file.content?.[startLine + i]);
+  if (original.some(line => line === undefined)) return null;
+  const code = typeof value.code === 'string' ? value.code.replace(/\r\n/g, '\n').replace(/\n$/, '') : null;
+  if (code === null || !validSuggestionCode(code) || code === original.join('\n')) return null;
+  return { startLine, endLine, original, code };
+}
 
 // The answer is validated and every finding is anchored to a line of the diff.
 // A finding whose line is not in the diff is kept as a comment on the file.
@@ -129,7 +143,8 @@ export function parseReviewOutput(output, diff) {
     const line = Number(item?.line);
     const anchored = !!file && Number.isInteger(line) && file.lines.includes(line);
     const severity = Object.hasOwn(SEVERITIES, item?.severity) ? item.severity : 'minor';
-    return [{ id: `f${index + 1}`, file: file?.path ?? null, line: anchored ? line : null, severity, title: title || text(body, 80), body, selected: severity !== 'suggestion', published: null }];
+    const suggestion = file ? suggestedChange(item?.suggestion, file) : null;
+    return [{ id: `f${index + 1}`, file: file?.path ?? null, line: suggestion?.startLine ?? (anchored ? line : null), severity, title: title || text(body, 80), body, suggestion, selected: severity !== 'suggestion', published: null }];
   });
   const order = Object.keys(SEVERITIES);
   findings.sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
@@ -141,7 +156,9 @@ export function parseReviewOutput(output, diff) {
 export const commentReference = (review, id) => `neo-review-${review.id}-${id}`;
 export function commentText(review, finding) {
   const where = finding.file && !finding.line ? `\n\nArchivo: \`${finding.file}\`` : '';
-  return `**${SEVERITIES[finding.severity]}: ${finding.title}**\n\n${finding.body}${where}\n\n_Revisión asistida por GitHub Copilot desde Neo Team · ${commentReference(review, finding.id)}_`;
+  // Azure DevOps shows this block as a suggested change over the commented lines.
+  const suggestion = finding.suggestion && finding.line ? `\n\n\`\`\`suggestion\n${finding.suggestion.code}\n\`\`\`` : '';
+  return `**${SEVERITIES[finding.severity]}: ${finding.title}**\n\n${finding.body}${where}${suggestion}\n\n_Revisión asistida por GitHub Copilot desde Neo Team · ${commentReference(review, finding.id)}_`;
 }
 export function summaryText(review) {
   return `**Resumen de la revisión asistida · ${VERDICTS[review.verdict]}**\n\n${review.summary}\n\n_Revisión asistida por GitHub Copilot desde Neo Team · ${commentReference(review, 'summary')}_`;
@@ -210,13 +227,15 @@ export async function publishReview({ azure, config, review, includeSummary, onP
   onProgress({ message: 'Buscando comentarios ya publicados de esta revisión…' });
   const existing = (await azure.pullRequestThreads(scoped, repositoryId, review.pullRequest.id)).flatMap(t => t.comments.map(content => ({ id: t.id, content })));
   const found = reference => existing.find(c => c.content.includes(reference))?.id;
-  const items = [...(summary ? [{ id: 'summary', content: summaryText(review) }] : []), ...pending.map(f => ({ id: f.id, content: commentText(review, f), filePath: f.file ?? undefined, line: f.line ?? undefined }))];
+  const items = [...(summary ? [{ id: 'summary', content: summaryText(review) }] : []), ...pending.map(f => ({ id: f.id, content: commentText(review, f), filePath: f.file ?? undefined, line: f.line ?? undefined,
+    // A suggested change selects its whole lines, as Azure DevOps does when one is written there.
+    ...(f.suggestion && f.line ? { endLine: f.suggestion.endLine, endOffset: f.suggestion.original.at(-1).length + 1 } : {}) }))];
   const published = [], failures = [];
   for (const [index, item] of items.entries()) {
     onProgress({ message: `Publicando ${index + 1} de ${items.length} comentarios…` });
     try {
       const recovered = found(commentReference(review, item.id));
-      const threadId = recovered ?? (await azure.addPullRequestComment(scoped, { repositoryId, pullRequestId: review.pullRequest.id, content: item.content, filePath: item.filePath, line: item.line })).id;
+      const threadId = recovered ?? (await azure.addPullRequestComment(scoped, { repositoryId, pullRequestId: review.pullRequest.id, content: item.content, filePath: item.filePath, line: item.line, endLine: item.endLine, endOffset: item.endOffset })).id;
       await onPublished(item.id, { threadId, at: new Date().toISOString(), recovered: !!recovered });
       published.push(item.id);
     } catch (error) { failures.push({ id: item.id, error: error.message }); }

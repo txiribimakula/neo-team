@@ -1443,7 +1443,7 @@ async function loadPullRequests(repository) {
 const currentReview = () => state.prReviews?.find(r => r.id === prUi.reviewId);
 async function saveFinding(el, change) {
   const focus = capacityFocus(document.activeElement);
-  await request('/api/pr-finding', { id: prUi.reviewId, findingId: el.dataset.prSelect || el.dataset.prBody, ...change });
+  await request('/api/pr-finding', { id: prUi.reviewId, findingId: el.dataset.prSelect || el.dataset.prBody || el.dataset.prSuggestion, ...change });
   render();
   if (focus) $(focus)?.focus();
 }
@@ -1678,6 +1678,7 @@ document.addEventListener('change',async event=>{
     if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;render();$('#pr-include-summary')?.focus();return;}
     if(el.dataset.prSelect){await saveFinding(el,{selected:el.checked});return;}
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
+    if(el.dataset.prSuggestion){await saveFinding(el,{suggestion:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
     if(el.dataset.taskField){
       // The control the person moved to (Tab, click) is read once focus has

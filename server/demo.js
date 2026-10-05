@@ -225,8 +225,8 @@ export const DEMO_REVIEW_OUTPUT = JSON.stringify({
   summary: 'Añade la exportación de informes en CSV. El cambio introduce una inyección SQL y deja de filtrar por el equipo del usuario autenticado, por lo que cualquiera podría leer informes de otros equipos. La conversión a CSV no escapa valores ni admite listas vacías.',
   verdict: 'changes',
   findings: [
-    { file: '/src/api/export.js', line: 6, severity: 'blocker', title: 'Inyección SQL y acceso a informes de otros equipos', body: 'La consulta concatena `req.query.team` en el SQL y usa un valor que envía el cliente en lugar de `req.user.team`. Cualquiera puede leer informes de otro equipo o ejecutar SQL arbitrario.\n\nUsa de nuevo la consulta parametrizada con el equipo del usuario: `query(\'SELECT * FROM reports WHERE team = ?\', [req.user.team])`.' },
-    { file: '/src/csv.js', line: 2, severity: 'major', title: 'Falla con una lista vacía', body: 'Si no hay informes, `rows[0]` es `undefined` y `Object.keys` lanza una excepción. Devuelve una cadena vacía o solo la cabecera cuando `rows` esté vacío.' },
+    { file: '/src/api/export.js', line: 6, severity: 'blocker', title: 'Inyección SQL y acceso a informes de otros equipos', body: 'La consulta concatena `req.query.team` en el SQL y usa un valor que envía el cliente en lugar de `req.user.team`. Cualquiera puede leer informes de otro equipo o ejecutar SQL arbitrario.\n\nUsa de nuevo la consulta parametrizada con el equipo del usuario.', suggestion: { startLine: 6, endLine: 6, code: "  const rows = await query('SELECT * FROM reports WHERE team = ?', [req.user.team]);" } },
+    { file: '/src/csv.js', line: 2, severity: 'major', title: 'Falla con una lista vacía', body: 'Si no hay informes, `rows[0]` es `undefined` y `Object.keys` lanza una excepción. Devuelve una cadena vacía cuando `rows` esté vacío.', suggestion: { startLine: 2, endLine: 2, code: "  if (!rows.length) return '';\n  const columns = Object.keys(rows[0]);" } },
     { file: '/src/csv.js', line: 3, severity: 'minor', title: 'Los valores no se escapan', body: 'Los valores con comas, comillas o saltos de línea rompen el CSV. Escápalos entre comillas dobles y duplica las comillas internas.' },
     { file: '/src/api/export.js', line: 5, severity: 'suggestion', title: 'Validar el formato solicitado', body: 'Un formato desconocido devuelve JSON sin avisar. Responde 400 si `format` no es `json` ni `csv`.' },
   ],
@@ -246,8 +246,8 @@ export class DemoPullRequestGateway {
   async pullRequests() { return demoPullRequests(); }
   async pullRequest(_config, _repository, id) { return demoPullRequest(id); }
   async pullRequestThreads(_config, _repositoryId, id) { return (this.threads.get(id) ?? []).map(t => ({ id: t.id, comments: [t.content] })); }
-  async addPullRequestComment(_config, { pullRequestId, content, filePath, line }) {
-    const thread = { id: this.nextId++, content, filePath, line };
+  async addPullRequestComment(_config, { pullRequestId, content, filePath, line, endLine }) {
+    const thread = { id: this.nextId++, content, filePath, line, endLine };
     this.threads.set(pullRequestId, [...(this.threads.get(pullRequestId) ?? []), thread]);
     return { id: thread.id };
   }

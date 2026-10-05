@@ -286,11 +286,13 @@ server.tool('neo_pull_request_threads', 'List the text of the existing comments 
 server.tool('neo_pull_request_comment_write', 'Add one new active comment thread to a pull request, optionally anchored to a line of the changed file.', {
   project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(),
   content: z.string().min(1).max(20000), filePath: z.string().min(1).max(1000).optional(), line: z.number().int().positive().optional(),
-}, async ({ project, repositoryId, pullRequestId, content, filePath, line }) => {
+  endLine: z.number().int().positive().optional(), endOffset: z.number().int().positive().optional(),
+}, async ({ project, repositoryId, pullRequestId, content, filePath, line, endLine, endOffset }) => {
   const git = await (await connectionProvider()).getGitApi();
   const thread = {
     comments: [{ parentCommentId: 0, content, commentType: 1 }], status: 1,
-    ...(filePath ? { threadContext: { filePath, ...(line ? { rightFileStart: { line, offset: 1 }, rightFileEnd: { line, offset: 1 } } : {}) } } : {}),
+    // A suggested change spans its whole lines, from the start of the first to the end of the last.
+    ...(filePath ? { threadContext: { filePath, ...(line ? { rightFileStart: { line, offset: 1 }, rightFileEnd: { line: endLine ?? line, offset: endLine ? endOffset ?? 1 : 1 } } : {}) } } : {}),
   };
   const created = await git.createThread(thread, repositoryId, pullRequestId, project);
   if (!created?.id) throw new Error('Azure DevOps no confirmó el comentario.');
