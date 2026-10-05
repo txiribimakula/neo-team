@@ -845,9 +845,12 @@ function capacityDayCells(owner, name, days, daysOff, teamOff) {
 // Conflicts and downloaded differences get their own row; a plain pending change
 // is a short line under the name.
 // The undo button always keeps its place, so marking a change never moves the row.
+const icon = paths => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const undoIcon = icon('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>');
+const redoIcon = icon('<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>');
 function capacityUndo(owner, drafts) {
   const pending=!!drafts[owner];
-  return `<button type="button" class="cg-undo" data-action="discard-capacity-entry" data-owner="${escape(owner)}" title="Deshacer el ajuste sin subir" aria-label="Deshacer el ajuste sin subir" ${pending ? '' : 'hidden'}>↶</button>`;
+  return `<button type="button" class="cg-undo" data-action="discard-capacity-entry" data-owner="${escape(owner)}" title="Deshacer el ajuste sin subir" aria-label="Deshacer el ajuste sin subir" ${pending ? '' : 'hidden'}>${undoIcon}</button>`;
 }
 function capacityNoteRow(owner, drafts, conflicts, columns) {
   const note=conflicts[owner] ? '<p class="inline-error">Ha cambiado en Azure DevOps desde la importación. Descarga la capacidad o revísala en Cambios pendientes para elegir qué versión conservar.</p>' : capacityDownloadLine(owner);
@@ -933,7 +936,7 @@ async function stepCapacityHistory(from, to) {
 }
 function capacityHistoryButtons(iterationId) {
   const {undo,redo}=historyOf(iterationId);
-  return `<span class="cg-history"><button type="button" class="cg-undo" data-action="capacity-undo" title="Deshacer" aria-label="Deshacer el último ajuste de capacidad" ${undo.length ? '' : 'disabled'}>↶</button><button type="button" class="cg-undo" data-action="capacity-redo" title="Rehacer" aria-label="Rehacer el ajuste de capacidad" ${redo.length ? '' : 'disabled'}>↷</button></span>`;
+  return `<span class="cg-history"><button type="button" class="cg-undo" data-action="capacity-undo" title="Deshacer" aria-label="Deshacer el último ajuste de capacidad" ${undo.length ? '' : 'disabled'}>${undoIcon}</button><button type="button" class="cg-undo" data-action="capacity-redo" title="Rehacer" aria-label="Rehacer el ajuste de capacidad" ${redo.length ? '' : 'disabled'}>${redoIcon}</button></span>`;
 }
 // Saving re-renders the step, so the control the person moved to is restored.
 function capacityFocus(element) { return element?.dataset?.focus ? `[data-focus="${element.dataset.focus}"]` : ''; }
