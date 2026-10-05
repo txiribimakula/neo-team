@@ -1673,6 +1673,7 @@ document.addEventListener('change',async event=>{
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
+    if('copilotModel' in el.dataset){await request('/api/copilot-model',{model:el.value});render();toast(el.value ? `Las revisiones se harán con ${el.selectedOptions[0]?.textContent ?? el.value}.` : 'Las revisiones usarán el modelo predeterminado.');return;}
     if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}
     if(el.dataset.description){const data=await request('/api/description',{id:Number(el.dataset.description),field:el.dataset.field,description:el.value});review=data.review;render();return;}
     if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;render();$('#pr-include-summary')?.focus();return;}

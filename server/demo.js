@@ -222,13 +222,13 @@ export function demoPullRequest(id) {
   return { pullRequest: structuredClone(pullRequest), iteration: { id: 1, sourceCommit: pullRequest.lastMergeSourceCommit, baseCommit: 'd3e0c500' }, files, omittedFiles: 0, threads: [] };
 }
 export const DEMO_REVIEW_OUTPUT = JSON.stringify({
-  summary: 'Añade la exportación de informes en CSV. El cambio introduce una inyección SQL y deja de filtrar por el equipo del usuario autenticado, por lo que cualquiera podría leer informes de otros equipos. La conversión a CSV no escapa valores ni admite listas vacías.',
+  summary: 'Adds CSV export for reports. The change introduces SQL injection and stops filtering by the authenticated user\'s team, so anyone could read other teams\' reports. The CSV conversion does not escape values or handle empty lists.',
   verdict: 'changes',
   findings: [
-    { file: '/src/api/export.js', line: 6, severity: 'blocker', title: 'Inyección SQL y acceso a informes de otros equipos', body: 'La consulta concatena `req.query.team` en el SQL y usa un valor que envía el cliente en lugar de `req.user.team`. Cualquiera puede leer informes de otro equipo o ejecutar SQL arbitrario.\n\nUsa de nuevo la consulta parametrizada con el equipo del usuario.', suggestion: { startLine: 6, endLine: 6, code: "  const rows = await query('SELECT * FROM reports WHERE team = ?', [req.user.team]);" } },
-    { file: '/src/csv.js', line: 2, severity: 'major', title: 'Falla con una lista vacía', body: 'Si no hay informes, `rows[0]` es `undefined` y `Object.keys` lanza una excepción. Devuelve una cadena vacía cuando `rows` esté vacío.', suggestion: { startLine: 2, endLine: 2, code: "  if (!rows.length) return '';\n  const columns = Object.keys(rows[0]);" } },
-    { file: '/src/csv.js', line: 3, severity: 'minor', title: 'Los valores no se escapan', body: 'Los valores con comas, comillas o saltos de línea rompen el CSV. Escápalos entre comillas dobles y duplica las comillas internas.' },
-    { file: '/src/api/export.js', line: 5, severity: 'suggestion', title: 'Validar el formato solicitado', body: 'Un formato desconocido devuelve JSON sin avisar. Responde 400 si `format` no es `json` ni `csv`.' },
+    { file: '/src/api/export.js', line: 6, severity: 'blocker', title: 'SQL injection and access to other teams\' reports', body: 'The query concatenates `req.query.team` into the SQL and uses a value sent by the client instead of `req.user.team`. Anyone can read another team\'s reports or run arbitrary SQL.\n\nGo back to the parameterized query with the user\'s team.', suggestion: { startLine: 6, endLine: 6, code: "  const rows = await query('SELECT * FROM reports WHERE team = ?', [req.user.team]);" } },
+    { file: '/src/csv.js', line: 2, severity: 'major', title: 'Fails with an empty list', body: 'When there are no reports, `rows[0]` is `undefined` and `Object.keys` throws. Return an empty string when `rows` is empty.', suggestion: { startLine: 2, endLine: 2, code: "  if (!rows.length) return '';\n  const columns = Object.keys(rows[0]);" } },
+    { file: '/src/csv.js', line: 3, severity: 'minor', title: 'Values are not escaped', body: 'Values with commas, quotes or line breaks break the CSV. Wrap them in double quotes and double any inner quotes.' },
+    { file: '/src/api/export.js', line: 5, severity: 'suggestion', title: 'Validate the requested format', body: 'An unknown format silently returns JSON. Respond with 400 when `format` is neither `json` nor `csv`.' },
   ],
 });
 export class DemoReviewer {

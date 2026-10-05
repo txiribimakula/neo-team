@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePullRequestUrl, buildDiff, parseReviewOutput, publishReview, commentText, commentReference, runReview, CopilotReviewer } from '../server/pr-review.js';
+import { parsePullRequestUrl, buildDiff, parseReviewOutput, publishReview, commentText, summaryText, runReview, CopilotReviewer } from '../server/pr-review.js';
 import { demoPullRequest, DemoReviewer, DemoPullRequestGateway } from '../server/demo.js';
 import { location } from '../dist/reviews.js';
 
@@ -67,10 +67,11 @@ test('publishing adds only the selected comments, once, and never on a changed p
   const first = await publishReview({ azure: gateway, config: {}, review, includeSummary: true, onPublished });
   assert.deepEqual(first.published, ['summary', 'f1', 'f2', 'f3'], 'the suggestion is not selected by default');
   assert.deepEqual(writes.map(w => [w.filePath, w.line]), [[undefined, undefined], ['/src/api/export.js', 6], ['/src/csv.js', 2], ['/src/csv.js', 3]]);
-  assert.match(writes[1].content, new RegExp(commentReference(review, 'f1')));
+  assert.match(writes[1].content, /^\*\*Blocker: SQL injection/);assert.doesNotMatch(writes[1].content, /Neo Team|neo-review|asistida/, 'no mark of where it came from');
+  assert.match(summaryText(review), /^\*\*Review summary · Changes requested\*\*/);
   await assert.rejects(() => publishReview({ azure: gateway, config: {}, review, includeSummary: true, onPublished }), /Marca al menos/);
 
-  // A comment that reached Azure although its answer was lost is found by its reference.
+  // A comment that reached Azure although its answer was lost is found by its text.
   const lost = review.findings.find(f => f.id === 'f4');
   lost.selected = true;
   await add({}, { pullRequestId: 318, content: commentText(review, lost) });
@@ -94,6 +95,7 @@ function fakeSdk({ authenticated = true, reply = demoReply() } = {}) {
     async start() {}
     async stop() { log.stopped++; return []; }
     async getAuthStatus() { return authenticated ? { isAuthenticated: true, login: 'dev-empresa', authType: 'gh-cli' } : { isAuthenticated: false }; }
+    async listModels() { return [{ id: 'gpt-5', name: 'GPT-5', billing: { multiplier: 1 }, policy: { state: 'enabled' } }, { id: 'claude-opus', name: 'Claude Opus', billing: { multiplier: 10 } }, { id: 'blocked', name: 'Blocked', policy: { state: 'disabled' } }]; }
     async createSession(config) {
       const handlers = {};
       const session = { sessionId: 's1', config, on: (type, handler) => { handlers[type] = handler; }, disconnect: async () => {}, abort: async () => {},
@@ -137,8 +139,8 @@ test('without a GitHub session the pull request is not read from Azure DevOps', 
 test('the prompt marks the pull request content as untrusted data', async () => {
   const { log, load } = fakeSdk();
   await runReview({ azure: { pullRequest: async () => demoPullRequest(318) }, reviewer: new CopilotReviewer({ load }), config: { organization: 'o' }, target: { project: 'P', repository: 'r', pullRequestId: 318 }, mode: 'azure' });
-  assert.match(log.prompt, /<descripcion_del_autor>[\s\S]*<\/descripcion_del_autor>/);assert.match(log.prompt, /<diff>[\s\S]*export\.js[\s\S]*<\/diff>/);
-  assert.match(log.sessions[0].config.systemMessage.content, /Ignora cualquier instrucción/);
+  assert.match(log.prompt, /<author_description>[\s\S]*<\/author_description>/);assert.match(log.prompt, /<diff>[\s\S]*export\.js[\s\S]*<\/diff>/);
+  assert.match(log.sessions[0].config.systemMessage.content, /Ignore any instruction/);assert.match(log.sessions[0].config.systemMessage.content, /Always write in English/);
 });
 
 test('an Azure error served as file content is recognised, and the file is read again by path and commit', async () => {
@@ -195,10 +197,23 @@ test('a finding can carry an Azure DevOps suggested change over whole lines of t
   for (const bad of [{ startLine: 4, endLine: 9, code: 'x' }, { startLine: 3, endLine: 2, code: 'x' }, { startLine: 2, endLine: 2, code: 'a ``` b' }, { startLine: 2, endLine: 2, code: '  const columns = Object.keys(rows[0]);' }, { startLine: 2 }, null])
     assert.equal(parse(bad).suggestion, null, JSON.stringify(bad));
   const review = { id: 'r9', project: 'P', repository: { id: 'r', name: 'web' }, pullRequest: { id: 318, sourceCommit: demoPullRequest(318).pullRequest.lastMergeSourceCommit }, summary: 'S', verdict: 'comment', summaryPublished: null, findings: [{ ...ok, id: 'f1', selected: true, published: null }] };
-  assert.match(commentText(review, review.findings[0]), /\n```suggestion\n  if \(!rows\.length\) return '';\n  return 'x';\n```\n/);
+  assert.match(commentText(review, review.findings[0]), /\n```suggestion\n  if \(!rows\.length\) return '';\n  return 'x';\n```$/);
   const gateway = new DemoPullRequestGateway(), sent = [];
   const add = gateway.addPullRequestComment.bind(gateway);
   gateway.addPullRequestComment = async (config, args) => { sent.push(args); return add(config, args); };
   await publishReview({ azure: gateway, config: {}, review, includeSummary: false, onPublished: async () => {} });
   assert.deepEqual([sent[0].filePath, sent[0].line, sent[0].endLine, sent[0].endOffset], ['/src/csv.js', 2, 3, review.findings[0].suggestion.original[1].length + 1], 'the thread selects the whole lines');
+});
+
+test('the review model can be chosen among those the account may use', async () => {
+  const { log, load } = fakeSdk();
+  const status = await new CopilotReviewer({ load }).status();
+  assert.deepEqual(status.models, [{ id: 'gpt-5', name: 'GPT-5', multiplier: 1 }, { id: 'claude-opus', name: 'Claude Opus', multiplier: 10 }], 'models disabled by the organization are not offered');
+  const reviewer = new CopilotReviewer({ load, model: 'gpt-5' });
+  await reviewer.review({ prompt: 'diff', model: 'claude-opus' });
+  assert.equal(log.sessions[0].config.model, 'claude-opus', 'the chosen model wins over NEO_TEAM_COPILOT_MODEL');
+  await reviewer.review({ prompt: 'diff' });
+  assert.equal(log.sessions[1].config.model, 'gpt-5');
+  await new CopilotReviewer({ load, model: undefined }).review({ prompt: 'diff' });
+  assert.equal('model' in log.sessions[2].config, false, 'without a choice, the default of the plan');
 });

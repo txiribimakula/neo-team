@@ -23,6 +23,9 @@ test('HTTP pull request review in the example: list, review, edit, publish once 
     return { status: response.status, data };
   };
   assert.equal((await post('/api/pr-repositories')).status, 400, 'without a project there is nothing to review');
+  assert.equal((await post('/api/copilot-model', { model: 'claude-sonnet-4.5' })).status, 200);assert.equal(state.copilotModel, 'claude-sonnet-4.5');
+  assert.equal((await post('/api/copilot-model', { model: 'x; rm -rf /' })).status, 400);
+  assert.equal((await post('/api/copilot-model', { model: '' })).status, 200);assert.equal(state.copilotModel, null);
   await post('/api/mode', { mode: 'demo' });
   const repositories = (await post('/api/pr-repositories')).data.repositories;
   assert.deepEqual(repositories.map(r => r.name), ['neo-platform-web']);

@@ -8,11 +8,17 @@ export const VERDICT_LABELS = { approve: 'Se puede aprobar', comment: 'Aprobable
 export const location = finding => finding.file ? `${finding.file}${finding.line ? `:${finding.line}${finding.suggestion && finding.suggestion.endLine > finding.line ? `-${finding.suggestion.endLine}` : ''}` : ' · todo el archivo'}` : 'Comentario general';
 export const pendingFindings = review => review.findings.filter(f => f.selected && !f.published);
 
-function copilotLine(ui, demo) {
+function copilotLine(ui, demo, state) {
   if (demo) return '<span class="text-muted">La revisión de Copilot se simula y nada se publica en Azure DevOps.</span>';
   const status = ui.copilot;
   const text = !status ? 'GitHub Copilot' : status.isAuthenticated ? `GitHub Copilot · ${escape(status.login || 'cuenta de GitHub')}` : 'GitHub Copilot sin sesión';
-  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span> <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
+  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span>${status?.isAuthenticated ? modelSelect(status, state.copilotModel ?? '') : ''} <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
+}
+// The model that reviews, among those the account may use (× is its cost multiplier).
+function modelSelect(status, current) {
+  const models = [...(current && !status.models?.some(m => m.id === current) ? [{ id: current, name: current }] : []), ...(status.models ?? [])];
+  const label = model => `${model.name}${model.multiplier != null ? ` · ×${model.multiplier}` : ''}`;
+  return ` · <select class="pr-model" data-copilot-model aria-label="Modelo de IA para la revisión" title="Modelo con el que Copilot hace la revisión"><option value="">${status.defaultModel ? `Predeterminado (${escape(status.defaultModel)})` : 'Modelo predeterminado'}</option>${models.map(m => `<option value="${escape(m.id)}" ${m.id === current ? 'selected' : ''}>${escape(label(m))}</option>`).join('')}</select>`;
 }
 
 // Copilot runs in the local server, not in the browser: it uses the GitHub session
@@ -100,7 +106,7 @@ function detailView(review, ui, state) {
 export function reviewsView(state, ui) {
   const demo = state.mode === 'demo', reviews = state.prReviews ?? [];
   const review = reviews.find(r => r.id === ui.reviewId);
-  const heading = `<header class="maintenance-heading"><div><p class="eyebrow">REVISIÓN DE PULL REQUESTS</p><h1>Revisión de PRs</h1><p>${escape(demo ? 'Datos de ejemplo' : state.config?.project || 'Conecta un proyecto para revisar sus pull requests.')} · ${copilotLine(ui, demo)}</p></div></header>`;
+  const heading = `<header class="maintenance-heading"><div><p class="eyebrow">REVISIÓN DE PULL REQUESTS</p><h1>Revisión de PRs</h1><p>${escape(demo ? 'Datos de ejemplo' : state.config?.project || 'Conecta un proyecto para revisar sus pull requests.')} · ${copilotLine(ui, demo, state)}</p></div></header>`;
   if (!demo && !state.config?.project) return `<section class="maintenance-page">${heading}${loginView(ui)}<div class="empty-panel"><h2>Sin proyecto conectado</h2><p>Conecta Azure DevOps para leer los pull requests de sus repositorios.</p><button class="button primary" data-action="connect">Conectar Azure DevOps</button></div></section>`;
   return `<section class="maintenance-page">${heading}${review ? detailView(review, ui, state) : (demo ? '' : loginView(ui)) + pickerView(state, ui) + historyView(reviews)}</section>`;
 }
@@ -108,5 +114,5 @@ export function reviewsView(state, ui) {
 // What will be written, shown before anything is sent to Azure DevOps.
 export function publishConfirmation(review, includeSummary) {
   const items = [...(includeSummary && !review.summaryPublished ? [{ where: 'Comentario general', title: 'Resumen de la revisión' }] : []), ...pendingFindings(review).map(f => ({ where: location(f), title: `${SEVERITY_LABELS[f.severity]}: ${f.title}${f.suggestion ? ' · con cambio propuesto' : ''}` }))];
-  return { count: items.length, html: `<p>Se crearán <strong>${items.length} hilos nuevos</strong> en el pull request !${review.pullRequest.id} de «${escape(review.repository.name)}». No se modifican, resuelven ni borran comentarios existentes y no se vota el pull request.</p><ul class="pr-confirm-list">${items.map(i => `<li><code>${escape(i.where)}</code> ${escape(i.title)}</li>`).join('')}</ul><div class="notice">Antes de publicar se comprueba que el pull request no ha cambiado desde la revisión. Cada comentario indica que es una revisión asistida por GitHub Copilot.</div>` };
+  return { count: items.length, html: `<p>Se crearán <strong>${items.length} hilos nuevos</strong> en el pull request !${review.pullRequest.id} de «${escape(review.repository.name)}». No se modifican, resuelven ni borran comentarios existentes y no se vota el pull request.</p><ul class="pr-confirm-list">${items.map(i => `<li><code>${escape(i.where)}</code> ${escape(i.title)}</li>`).join('')}</ul><div class="notice">Antes de publicar se comprueba que el pull request no ha cambiado desde la revisión. Los comentarios se publican en inglés.</div>` };
 }
