@@ -256,3 +256,40 @@ export class DemoPullRequestGateway {
     return { id: thread.id };
   }
 }
+
+// Jira in the example: three tickets of a fictitious desktop application with
+// attachments referenced from their texts. Nothing is requested from Jira.
+const DEMO_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+const demoUser = name => ({ displayName: name });
+const DEMO_TICKETS = [
+  { key: 'NEO-101', summary: 'La exportación a Excel redondea mal los importes', type: 'Bug', priority: 'High', updated: '2026-10-01T09:12:00.000+0200',
+    description: 'h3. Pasos\n# Abrir *Facturas*\n# Pulsar {{Exportar}}\n# Abrir el Excel generado\n\nLos importes con 3 decimales salen redondeados hacia abajo. Ver !captura-exportar.png|thumbnail!',
+    attachments: [{ id: '5001', filename: 'captura-exportar.png', created: '2026-09-30T10:00:00.000+0200', content: DEMO_PNG }],
+    comments: [{ author: 'Lucía Martín', created: '2026-09-30T11:00:00.000+0200', body: 'Pasa también con el cliente [~lmartin] de pruebas. La captura es !captura-exportar.png!' }] },
+  { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver de la ficha', type: 'Bug', priority: 'Medium', updated: '2026-10-02T16:40:00.000+0200',
+    description: 'Al filtrar clientes por provincia, abrir uno y volver, la lista aparece sin filtrar. Vídeo: [^filtro-clientes.mp4]',
+    attachments: [{ id: '5002', filename: 'filtro-clientes.mp4', created: '2026-10-02T16:30:00.000+0200', content: Buffer.from('video de ejemplo') }],
+    comments: [] },
+  { key: 'NEO-103', summary: 'Error al imprimir albaranes en impresoras de red', type: 'Bug', priority: 'Low', updated: '2026-10-03T08:05:00.000+0200',
+    description: 'A veces sale el mensaje _Impresora no disponible_ al imprimir un albarán.', attachments: [], comments: [{ author: 'Soporte', created: '2026-10-03T08:00:00.000+0200', body: 'No tenemos más datos del cliente.' }] },
+];
+export const DEMO_JIRA_SETTINGS = { url: 'https://ejemplo.atlassian.net', deployment: 'cloud', email: 'ejemplo@ejemplo.com', filter: '10001', maxIterations: 3, repository: '', baseBranch: '', buildCommand: '', launchCommand: 'winapp run C:\\NeoDesk\\bin\\NeoDesk.exe --detach', ticketsDir: '', models: {} };
+export class DemoJiraClient {
+  static published = [];
+  constructor() { this.settings = DEMO_JIRA_SETTINGS; }
+  async search() {
+    return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: t.updated, status: { name: 'Abierto' }, priority: { name: t.priority }, issuetype: { name: t.type } } })), limited: false };
+  }
+  async issue(key) {
+    const t = DEMO_TICKETS.find(x => x.key === key);
+    return { key, fields: { summary: t.summary, description: t.description, status: { name: 'Abierto' }, priority: { name: t.priority }, issuetype: { name: t.type }, reporter: demoUser('Soporte'), created: t.updated, updated: t.updated, labels: ['cliente'],
+      attachment: t.attachments.map(a => ({ id: a.id, filename: a.filename, created: a.created, size: a.content.length, author: demoUser('Soporte'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/${a.id}` })) } };
+  }
+  // Comments published in the example stay in memory: nothing reaches Jira.
+  async addComment(key, body) { DemoJiraClient.published.push({ key, body }); return { id: String(DemoJiraClient.published.length) }; }
+  async comments(key) { return DEMO_TICKETS.find(x => x.key === key).comments.map(c => ({ author: demoUser(c.author), created: c.created, body: c.body })); }
+  async download(url) {
+    const attachment = DEMO_TICKETS.flatMap(t => t.attachments).find(a => url.endsWith(`/${a.id}`));
+    return new Response(attachment.content);
+  }
+}

@@ -2,16 +2,20 @@ import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
+import openPath from 'open';
 import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway } from './demo.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS } from './demo.js';
+import { JiraClient, jiraSettingsFrom, hasFfmpeg, listFiles, readText, TOKEN_HELP } from './jira.js';
+import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, checkKey, defaultModel, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
@@ -37,6 +41,54 @@ function reviewConfig() {
   if (store.data.mode === 'demo') return { organization: 'ejemplo', project: 'Neo Platform', team: '', authentication: 'interactive', tenant: '' };
   if (!store.data.config?.project) throw fail('Conecta Azure DevOps y elige un proyecto para revisar sus pull requests.');
   return configFrom(store.data.config, false);
+}
+// Jira tickets: settings and token of the real workspace, a fixed example, and
+// one pipeline of agents per tickets folder, running apart from other operations.
+const jiraTokenFile = () => join(store.directory, 'jira-token');
+async function jiraToken() {
+  if (process.env.NEO_TEAM_JIRA_TOKEN) return process.env.NEO_TEAM_JIRA_TOKEN.trim();
+  return (await readFile(jiraTokenFile(), 'utf8').catch(() => '')).trim();
+}
+let jiraHasToken = false, jiraAccount = null;
+const refreshJiraToken = async () => { jiraHasToken = !!(await jiraToken()); };
+await refreshJiraToken();
+function jiraSettings() {
+  const base = store.data.mode === 'demo' ? DEMO_JIRA_SETTINGS : store.data.jira;
+  return base ? { ...base, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, logs: !!store.data.jiraLogs?.[store.data.mode] } : null;
+}
+const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 'jira-ejemplo') : resolve(settings?.ticketsDir || join(store.directory, 'jira'));
+function publicJira() {
+  const settings = jiraSettings();
+  return settings ? { ...settings, account: store.data.mode === 'demo' ? 'ejemplo' : jiraAccount, demo: store.data.mode === 'demo', hasToken: store.data.mode === 'demo' || jiraHasToken, tokenFromEnv: !!process.env.NEO_TEAM_JIRA_TOKEN, root: jiraRoot(settings) } : null;
+}
+// Models the Copilot account may use, remembered from the last check.
+let copilotModels = [];
+const jiraPipelines = new Map();
+function jiraPipeline() {
+  const settings = jiraSettings();
+  if (!settings) throw fail('Configura Jira primero.');
+  const root = jiraRoot(settings), demo = store.data.mode === 'demo';
+  if (!jiraPipelines.has(root)) {
+    const tickets = new TicketStore(root);
+    jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent(), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, logs: !!store.data.jiraLogs?.demo } : jiraSettings()),
+      comment: async (key, body) => (demo ? new DemoJiraClient() : new JiraClient(jiraSettings(), await jiraToken())).addComment(key, body),
+      models: async () => { if (!demo && !copilotModels.length) copilotModels = (await copilot.status()).models ?? []; return demo ? [] : copilotModels; } }));
+  }
+  return jiraPipelines.get(root);
+}
+let jiraTools = null;
+const which = command => new Promise(done => execFile(process.platform === 'win32' ? 'where' : 'which', [command], { timeout: 5000 }, error => done(!error)));
+async function detectJiraTools() {
+  if (!jiraTools || Date.now() - jiraTools.at > 60000) jiraTools = { at: Date.now(), winapp: await which('winapp'), ffmpeg: await hasFfmpeg() };
+  return { winapp: jiraTools.winapp, ffmpeg: jiraTools.ffmpeg };
+}
+async function jiraBoard() {
+  const settings = publicJira();
+  if (!settings) return { settings: null };
+  const pipeline = jiraPipeline();
+  const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, history: (t.history ?? []).map(({ usage, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
+  const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
+  return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, demo: true } : await detectJiraTools() };
 }
 const currentReviews = () => (store.data.prReviews ?? []).filter(review => review.mode === store.data.mode);
 function findReview(data, id) {
@@ -105,7 +157,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -126,7 +178,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-logs', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -165,6 +217,38 @@ const server = http.createServer(async (req, res) => {
       requireSession(req);
       return json(res, { myIteration: currentMyIteration() });
     }
+    if (req.method === 'GET' && path === '/api/jira') {
+      requireSession(req);
+      return json(res, { jira: await jiraBoard() });
+    }
+    if (req.method === 'GET' && path === '/api/jira-ticket') {
+      requireSession(req);
+      const key = checkKey(url.searchParams.get('key')), tickets = jiraPipeline().tickets, folder = tickets.folder(key);
+      const ticket = await tickets.get(key);
+      if (!ticket) throw fail('El ticket ya no está disponible.', 404);
+      const read = name => readText(join(folder, name), 300000);
+      const reports = await Promise.all((ticket.history ?? []).filter(h => h.report).map(async h => ({ ...h, text: await read(h.report) })));
+      const commentList = await readText(join(folder, 'comentarios.json')).then(text => text ? JSON.parse(text) : null).catch(() => null);
+      return json(res, { ticket: { ...ticket, folder, files: await listFiles(folder, 3), description: await read('descripcion.md'), comments: await read('comentarios.md'), commentList, reports } });
+    }
+    // Images of a ticket (attachments, frames, evidence) shown inside its texts. An
+    // <img> cannot send the session header, so the session goes in the address.
+    if (req.method === 'GET' && path === '/api/jira-file') {
+      if (url.searchParams.get('s') !== csrf) throw fail('La sesión local ha caducado. Recarga la aplicación.', 403);
+      const key = checkKey(url.searchParams.get('key')), folder = jiraPipeline().tickets.folder(key);
+      const file = resolve(folder, String(url.searchParams.get('path') ?? ''));
+      const type = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp' }[file.split('.').at(-1).toLowerCase()];
+      if (!type || !file.startsWith(folder + sep) || file.split(sep).includes('codigo')) throw fail('No encontrado.', 404);
+      const content = await readFile(file).catch(() => null);
+      if (!content) throw fail('No encontrado.', 404);
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': content.length });
+      return res.end(content);
+    }
+    if (req.method === 'GET' && path === '/api/jira-learnings') {
+      requireSession(req);
+      const tickets = jiraPipeline().tickets;
+      return json(res, { learnings: Object.fromEntries(await Promise.all(['general', ...STAGES.map(s => s.id)].map(async scope => [scope, await tickets.learnings(scope)]))) });
+    }
     if (req.method === 'POST' && path.startsWith('/api/')) {
       requireSession(req);
       const input = await body(req);
@@ -179,8 +263,8 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-collect': 'Recolectando tickets de Jira' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/jira-collect', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -369,7 +453,102 @@ const server = http.createServer(async (req, res) => {
         if (path === '/api/copilot-status') {
           const { reviewer } = reviewTools();
           progress({ message: 'Iniciando GitHub Copilot y comprobando la sesión de GitHub de este equipo…' });
-          return json(res, { copilot: await reviewer.status() });
+          const status = await reviewer.status();
+          if (reviewer === copilot && status.isAuthenticated) { copilotModels = status.models ?? []; for (const pipeline of jiraPipelines.values()) { pipeline.needsCopilot = false; pipeline.error = null; } }
+          return json(res, { copilot: status });
+        }
+        if (path === '/api/jira-collect') {
+          const settings = jiraSettings();
+          if (!settings) throw fail('Configura Jira primero.');
+          const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
+          const pipeline = jiraPipeline();
+          if (client instanceof JiraClient && !jiraAccount) jiraAccount = (await client.call('/rest/api/2/myself').catch(() => null))?.displayName ?? null;
+          const result = await collectFilter({ client, settings, tickets: pipeline.tickets, ffmpeg: store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg, busyKey: pipeline.running?.key, onProgress: progress });
+          return json(res, { result, jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-settings') {
+          if (store.data.mode === 'demo') throw fail('En el ejemplo la configuración de Jira es fija.');
+          const data = structuredClone(store.data);
+          data.jira = jiraSettingsFrom(input.settings, data.jira ?? {});
+          delete data.jira.models;
+          if (typeof input.token === 'string' && input.token.trim()) {
+            if (input.token.trim().length > 2000 || /\s/.test(input.token.trim())) throw Object.assign(fail('El token no es válido.'), { field: 'token' });
+            await mkdir(store.directory, { recursive: true, mode: 0o700 });
+            await writeFile(jiraTokenFile(), input.token.trim(), { mode: 0o600 });
+          } else if (input.clearToken === true) await unlink(jiraTokenFile()).catch(() => {});
+          await refreshJiraToken();
+          await store.save(data);
+          if (!jiraHasToken) throw Object.assign(fail(`Configuración guardada. ${TOKEN_HELP}`), { reason: 'jira-token', field: 'token' });
+          // The connection is checked at once with the account of the token.
+          progress({ message: 'Comprobando la conexión con Jira…' });
+          const me = await new JiraClient(data.jira, await jiraToken()).call('/rest/api/2/myself')
+            .catch(error => { throw Object.assign(fail(`Configuración guardada, pero Jira no aceptó la conexión: ${error.message}`, error.status === 401 ? 401 : 400), { reason: error.reason, field: error.status === 401 ? 'token' : 'url' }); });
+          jiraAccount = me.displayName ?? me.emailAddress ?? me.name ?? null;
+          return json(res, { ...publicState({ operationComplete: true }), jiraAccount });
+        }
+        if (path === '/api/jira-logs') {
+          if (typeof input.on !== 'boolean') throw fail('Valor no válido.');
+          const data = structuredClone(store.data);
+          data.jiraLogs = { ...data.jiraLogs, [data.mode]: input.on };
+          await store.save(data);
+          return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-mode') {
+          if (!stageOf(input.stage) || !COLUMN_MODES.includes(input.mode)) throw fail('Modo no válido.');
+          const data = structuredClone(store.data);
+          data.jiraModes = { ...data.jiraModes };
+          if (input.mode === 'auto') delete data.jiraModes[input.stage]; else data.jiraModes[input.stage] = input.mode;
+          await store.save(data);
+          // Back on autopilot, the waiting tickets of that column go on.
+          if (input.mode === 'auto') jiraPipeline().setAuto(jiraPipeline().auto);
+          return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-model') {
+          if (!stageOf(input.stage)) throw fail('Columna no válida.');
+          const model = typeof input.model === 'string' ? input.model.trim() : '';
+          if (model.length > 100 || (model && !/^[\w.:/-]+$/.test(model))) throw fail('Modelo no válido.');
+          const data = structuredClone(store.data);
+          data.jiraModels = { ...data.jiraModels };
+          if (model) data.jiraModels[input.stage] = model; else delete data.jiraModels[input.stage];
+          await store.save(data);
+          return json(res, publicState());
+        }
+        if (path === '/api/jira-answer') {
+          // The person's answer to a stuck agent: saved in the ticket and given to the
+          // agent, which is run again unless its column is off.
+          const pipeline = jiraPipeline(), key = checkKey(input.key);
+          const answer = typeof input.answer === 'string' ? input.answer.trim() : '';
+          if (!answer || answer.length > 10000) throw fail('Escribe la respuesta (hasta 10000 caracteres).');
+          const ticket = await pipeline.tickets.get(key);
+          if (!ticket) throw fail('El ticket ya no está disponible.', 404);
+          if (ticket.status !== 'blocked') throw fail('Este ticket no está esperando una respuesta.', 409);
+          await pipeline.tickets.update(key, t => ({ ...t, status: 'pending', note: null, question: null, answers: [...(t.answers ?? []), { at: new Date().toISOString(), stage: t.stage, question: t.question ?? null, answer }] }));
+          if ((jiraSettings().modes?.[ticket.stage] ?? 'auto') !== 'off') await pipeline.enqueue(key);
+          return json(res, { jira: await jiraBoard() });
+        }
+        if (['/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-move', '/api/jira-archive', '/api/jira-learnings', '/api/jira-open'].includes(path)) {
+          const pipeline = jiraPipeline();
+          if (path === '/api/jira-run') await pipeline.enqueue(checkKey(input.key));
+          else if (path === '/api/jira-auto') pipeline.setAuto(input.on === true);
+          else if (path === '/api/jira-stop') await pipeline.stop();
+          else if (path === '/api/jira-move' || path === '/api/jira-archive') {
+            const key = checkKey(input.key);
+            if (pipeline.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
+            if (!(await pipeline.tickets.get(key))) throw fail('El ticket ya no está disponible.', 404);
+            if (path === '/api/jira-move') {
+              if (!STAGE_IDS.includes(input.stage)) throw fail('Columna no válida.');
+              await pipeline.tickets.update(key, t => ({ ...t, stage: input.stage, status: input.stage === 'done' ? 'done' : 'pending', note: null, ...(input.resetIterations ? { iterations: 0, reproduceAttempts: 0 } : {}) }));
+            } else await pipeline.tickets.update(key, t => ({ ...t, archived: input.archived !== false }));
+            pipeline.queue = pipeline.queue.filter(q => q.key !== key);
+          } else if (path === '/api/jira-learnings') {
+            if (typeof input.text !== 'string' || input.text.length > 200000) throw fail('Texto no válido.');
+            await pipeline.tickets.saveLearnings(input.scope, input.text);
+          } else {
+            const folder = input.key ? pipeline.tickets.folder(checkKey(input.key)) : join(pipeline.tickets.root, 'aprendizajes');
+            await mkdir(folder, { recursive: true, mode: 0o700 });
+            await openPath(folder);
+          }
+          return json(res, { jira: await jiraBoard() });
         }
         if (path === '/api/pr-finding') {
           const data = structuredClone(store.data), finding = findReview(data, input.id).findings.find(f => f.id === input.findingId);
@@ -602,15 +781,17 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
-    const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'reviews.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    // Every section has its own address (/jira, /revision-prs/…): the page is the same.
+    const route = /^\/(planificacion|mi-iteracion|mantenimiento|revision-prs|jira|permisos)(\/[^.]*)?$/.test(path);
+    const file = path === '/' || route ? 'index.html' : path.slice(1);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'reviews.js', 'jira.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {
     if (res.headersSent) { res.destroy(); return; }
     // Internal failures are server errors; Azure and validation answers keep 400.
     const status = error.status || (isInternalError(error) ? 500 : 400);
-    json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.reason ? { reason: error.reason } : {}), ...(error.stateReview ? { stateReview: error.stateReview } : {}), ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) }, status);
+    json(res, { error: error.message || 'No se pudo completar la operación.', ...(error.reason ? { reason: error.reason } : {}), ...(error.field ? { field: error.field } : {}), ...(error.stateReview ? { stateReview: error.stateReview } : {}), ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) }, status);
   }
 });
 server.on('error', error => {
@@ -630,6 +811,7 @@ async function shutdown() {
   if (stopping) return;
   stopping = true;
   server.close();
+  await Promise.all([...jiraPipelines.values()].map(p => p.stop().catch(() => {})));
   await azure.close();
   process.exit(0);
 }

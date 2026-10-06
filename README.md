@@ -40,6 +40,7 @@ La aplicación abre en **Inicio**. Pulsar el logotipo **neoteam** vuelve siempre
   - **Uso:** se consulta al entrar y con **Actualizar**; el resultado solo se guarda en memoria. Es de solo lectura y cada título abre el elemento en Azure DevOps. En el ejemplo se usan datos simulados.
 
 - **Revisión de PRs**: revisa pull requests de Azure DevOps con GitHub Copilot y publica los comentarios que confirmes. Se describe en [Revisión de pull requests](#revisión-de-pull-requests).
+- **Tickets de Jira**: agentes de GitHub Copilot que recolectan, reproducen, corrigen y verifican los tickets de un filtro de Jira. Se describe en [Tickets de Jira](#tickets-de-jira).
 
 ## Revisión de pull requests
 
@@ -76,6 +77,47 @@ Al abrir la sección se comprueba la sesión, aunque no haya un proyecto conecta
 
 En el ejemplo, los pull requests, la revisión y la publicación se simulan: no se contacta con Azure DevOps ni con GitHub.
 
+## Tickets de Jira
+
+Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **Recolectar → Reproducir → Solucionar → Verificar → Resueltos**; si la verificación falla vuelve a Solucionar con el informe del fallo, hasta el número de **iteraciones máximas** configurado. No depende de Azure DevOps: en modo **Real** se entra desde Inicio aunque Azure no esté conectado.
+
+**Conectar Jira.** Con el selector de la cabecera en **Real**, abre **Tickets de Jira**. La primera vez la sección es el formulario (después, **Configuración**):
+
+- **Jira:** URL (`https://empresa.atlassian.net` o la de Data Center), tipo, correo de la cuenta (Cloud), token y **filtro** (su número, su URL con `?filter=` o `?jql=`, o una consulta JQL; los filtros del sistema como `?filter=-1`, «Mis incidencias abiertas», se traducen a su consulta). El token es un [API token de Atlassian](https://id.atlassian.com/manage-profile/security/api-tokens) (Cloud, junto con el correo) o un token de acceso personal (Data Center: Perfil → Tokens de acceso personal). Se guarda solo en `.neo-team/jira-token` con permisos privados y nunca se envía a la interfaz; `NEO_TEAM_JIRA_TOKEN` lo sustituye.
+- **Aplicación:** repositorio local, rama base, comando de compilación y cómo arrancar la aplicación. Los dos comandos son opcionales: si faltan, el agente los averigua y los guarda como aprendizaje.
+- **Carpeta de tickets:** por defecto `.neo-team/jira/`.
+
+**Conectar** guarda y comprueba al momento la conexión con la cuenta del token; la barra muestra con qué cuenta está conectado, y si Jira la rechaza lo indica y la configuración queda guardada para corregirla. GitHub Copilot usa la misma sesión que la revisión de PRs: si no hay sesión, la sección muestra cómo iniciarla y **Copilot** en la barra la vuelve a comprobar.
+
+**Recolectar** consulta el filtro (hasta 200 tickets) y descarga los nuevos o los que han cambiado en Jira. Cada ticket queda en su carpeta:
+
+- `descripcion.md`: campos, descripción y lista de adjuntos; `comentarios.md`: los comentarios en orden. El formato de Jira se convierte a Markdown y las referencias a adjuntos (`!captura.png!`, `[^video.mp4]`) apuntan a la copia local.
+- `adjuntos/`: cada adjunto con su nombre de Jira, que es como lo citan los textos (si dos se llaman igual, el más antiguo lleva su id). De cada vídeo se extrae un fotograma cada 2 segundos en `adjuntos/<vídeo>.fotogramas/` si `ffmpeg` está instalado, para que los agentes puedan verlo.
+- Los informes de cada agente (`resumen.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`), `evidencias/`, `reproducir.ps1`, `compilacion-N.log` y `estado.json`.
+
+**Agentes y modelos.** Cada columna tiene su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: ligero para recolectar (Haiku, mini), medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
+
+- **Recolectar:** lee descripción, comentarios, imágenes y fotogramas y escribe el resumen: problema, pasos para reproducir, resultado esperado y obtenido, adjuntos relevantes e información que falta.
+- **Reproducir:** arranca la versión actual y la maneja con [winapp CLI](https://github.com/microsoft/winappcli) (`winapp ui inspect`, `invoke`, `set-value`, `wait-for`, `screenshot`, `record`…). Guarda evidencias y un `reproducir.ps1` que repite los pasos.
+- **Solucionar:** trabaja en una copia aparte del repositorio (`git worktree` en `<ticket>/codigo`, rama `neo/<ticket>`), así que no toca tu clon ni tus cambios. Busca la causa, corrige y compila. Si hay comando de compilación, Neo Team lo vuelve a ejecutar: si falla, el ticket vuelve a Solucionar con el registro. No hace commits.
+- **Verificar:** arranca la compilación corregida, repite `reproducir.ps1` y comprueba lo relacionado.
+
+**Semáforo de cada columna.** Verde (**autopilot**): su agente actúa solo. Ámbar (**avisar**): los tickets esperan en la columna marcados «Espera tu OK» y ▶ aprueba ese paso. Rojo (**nada**): su agente no actúa, ni siquiera con ▶.
+
+**Uso.** **Empezar**, arriba, procesa los tickets pendientes de las columnas en verde, uno tras otro y terminando cada uno antes de pasar al siguiente (un solo agente a la vez, porque manejan el escritorio); **Pausar** deja terminar el paso en curso y para. ▶ en una tarjeta trabaja solo sobre ese ticket: pausa el resto y lo lleva por las columnas siguientes mientras estén en verde. El ticket en proceso y su columna se resaltan, la tarjeta muestra lo último que hace el agente y ■ lo detiene al momento (el paso queda pendiente). La clave de cada tarjeta enlaza con el ticket en Jira.
+
+**Preguntas.** Cuando un agente no puede seguir (le falta información, una decisión o un acceso) se bloquea con una pregunta concreta, o el ticket se bloquea al agotar los intentos. La tarjeta muestra la pregunta y un campo para responder: **Responder** (o Ctrl+Enter) guarda la respuesta en el ticket y lo retoma; esa respuesta y las anteriores se pasan a todos los agentes que trabajen después en él.
+
+**Detalle.** Al pulsar un ticket se abre en una ventana con una pestaña por cada paso completado (resultado, fecha, modelo, tokens, pregunta y respuesta, informe y archivos de ese paso) y otra con la descripción, los comentarios y los archivos del ticket. Desde ahí se ejecuta su paso, se mueve a otra columna (reinicia los intentos), se abre su carpeta o se quita del tablero.
+
+**Aprendizaje.** Antes de actuar, cada agente lee los aprendizajes generales y los de su columna; cuando descubre algo reutilizable (cómo compilar o arrancar, selectores que funcionan, dónde está el código, trampas) lo guarda con la herramienta `neo_learn`. Están en `<carpeta de tickets>/aprendizajes/`; el botón con el libro de cada columna muestra cuántos tiene su agente y los abre para editarlos, junto con los comunes a todos.
+
+**Logs en Jira.** Desactivado por defecto. Al activarlo, cada paso que termina un agente se publica como comentario nuevo en su ticket de Jira: el agente, el resultado, la pregunta si la hay y un extracto del informe. Es lo único que Neo Team escribe en Jira; si falla, el paso continúa y su pestaña indica que no se publicó.
+
+**Permisos de los agentes.** Leen cualquier archivo, escriben solo en la carpeta del ticket (y Solucionar en su copia del código) y ejecutan comandos de terminal con tu usuario, salvo `git commit`, `push`, `reset`, `clean`, `rebase` y similares, que se rechazan. No usan MCP ni la web. Reproducir y Verificar necesitan Windows con escritorio desbloqueado; la barra indica si `winapp`, `ffmpeg` y Copilot están disponibles. Cada agente consume la asignación de Copilot de tu cuenta.
+
+En el ejemplo, tres tickets de una aplicación ficticia recorren el tablero con agentes simulados: uno se resuelve directamente, otro necesita una segunda corrección y otro se bloquea con una pregunta hasta que la respondes. Nada se pide a Jira ni a Copilot.
+
 ## Uso
 
 1. En modo **Azure DevOps** y sin conexión configurada, la página entera es el formulario **Conectar Azure DevOps** (no hay botón aparte en la cabecera). Introduce tu organización o cualquier URL suya copiada del navegador (`https://dev.azure.com/organización/…` o `https://organización.visualstudio.com`).
@@ -87,7 +129,7 @@ En el ejemplo, los pull requests, la revisión y la publicación se simulan: no 
 7. En **4 · Tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
 8. En **5 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
 
-Inicio muestra cinco recuadros con el icono y el título de Planificación, Mi iteración, Mantenimiento, Revisión de PRs y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Azure DevOps** y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
+Cada sección tiene su dirección (`/planificacion/capacidad`, `/mi-iteracion`, `/mantenimiento`, `/revision-prs/<revisión>`, `/jira`, `/jira/configuracion`, `/jira/<ticket>`, `/permisos`): al recargar se vuelve al mismo sitio, con el ticket o la revisión abiertos, y los botones atrás y adelante del navegador recorren las secciones. Inicio muestra seis recuadros con el icono y el título de Planificación, Mi iteración, Mantenimiento, Revisión de PRs, Tickets de Jira y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Real** (Azure DevOps y Jira) y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
 
 Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar con un botón. La revisión de PRs muestra cuántos comentarios se publicarán y solo habilita la publicación cuando hay una selección pendiente y el pull request está activo.
 

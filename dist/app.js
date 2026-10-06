@@ -3,6 +3,7 @@ import { permissionsView, filterPermissions, filterGroups, resetPermissionFilter
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder } from './reviews.js';
+import { jiraView, ticketDetail, settingsFrom as jiraSettingsFrom, learningsForm, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -14,6 +15,8 @@ const date = value => value ? new Date(value).toLocaleDateString('es', { day:'nu
 let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null, myIterationSnapshot = null;
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
+// Jira: the board comes from the server and is polled while the section is open.
+let jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {} };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
@@ -82,6 +85,7 @@ function setState(next) {
     prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
     maintenanceSnapshot = null; maintenanceSetup = null; resetMaintenanceFilters();
   }
+  if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {} };
   if (scope(state) !== scope(next) || state?.config?.team !== next?.config?.team) myIterationSnapshot = null;
   state = next; markSnapshot(state?.workspace);
 }
@@ -141,7 +145,7 @@ async function request(path, input = {}) {
       ({ response, data } = await send(path, input));
     }
     if (!response.ok) {
-      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { reason: data.reason, stateReview: data.stateReview, diagnostics: data.diagnostics });
+      throw Object.assign(new Error(data.error || 'No se pudo completar la operación.'), { reason: data.reason, field: data.field, stateReview: data.stateReview, diagnostics: data.diagnostics });
     }
     if (data.state) setState(data.state);
     else if (data.csrf) setState(data);
@@ -379,7 +383,7 @@ async function importWithProgress(target, existing = null, start = null) {
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
-  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status'].includes(start?.path || existing?.path)) {
+  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status', '/api/jira-collect'].includes(start?.path || existing?.path)) {
     $('.import-progress-phase', target).textContent = 'Preparando la simulación con datos de ejemplo…';
     $('.import-progress-note', target).textContent = 'Esta operación no contacta con Azure DevOps ni con GitHub.';
   }
@@ -396,7 +400,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/jira-collect', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -531,6 +535,7 @@ async function resumeOperation() {
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
     if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
     if (current.path === '/api/my-iteration') { await loadMyIteration(); tab = 'my-iteration'; render(); }
+    if (current.path === '/api/jira-collect') { tab = 'jira'; render(); startJiraPolling(); }
     if (current.path.startsWith('/api/pr-')) { if (current.path === '/api/pr-review') prUi.reviewId = state.prReviews?.[0]?.id ?? null; tab = 'reviews'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
@@ -1078,6 +1083,7 @@ function board(iteration, planned) {
 }
 
 function render() {
+  syncUrl();
   const ws=state.workspace;
   $('#save-status').textContent=ws ? savedStatus() : '';
   const syncButton=$('#sync-button'), changes=pendingCount();
@@ -1088,7 +1094,7 @@ function render() {
   syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
   syncButton.title=`Sincronización: ${savedStatus()}`;
   renderSyncPanel();
-  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', reviews: 'Revisión de PRs' })[tab] || 'Planificación';
+  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', reviews: 'Revisión de PRs', jira: 'Tickets de Jira' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
   const demo = state.mode === 'demo';
@@ -1096,7 +1102,8 @@ function render() {
     button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
     button.disabled = !!state.busy;
   });
-  const connecting = needsConnection();
+  // Inicio and Jira do not depend on Azure DevOps: only its sections ask to connect it.
+  const connecting = needsConnection() && !['home', 'jira'].includes(tab);
   $('#mode-banner').hidden = connecting;
   if (connecting) {
     $('.workspace-label').textContent = 'Conexión';
@@ -1106,9 +1113,11 @@ function render() {
     return;
   }
   $('#mode-banner').classList.toggle('is-demo', demo);
+  const jiraLine = state.jira && !demo ? `Jira · ${escape(state.jira.url.replace(/^https:\/\//, ''))}` : 'Jira sin configurar';
+  const azureLine = ws ? `Azure DevOps · ${escape(state.config?.organization ?? '')}` : state.config ? 'Azure DevOps sin importar' : 'Azure DevOps sin conectar';
   $('#mode-banner span').innerHTML = demo
-    ? '<strong>Modo de prueba</strong> · Sin conexión a Azure DevOps. Datos de ejemplo; los cambios y las publicaciones se simulan.'
-    : `<strong>Modo Azure DevOps</strong> · ${ws ? 'Datos reales. Los cambios se guardan en local hasta que confirmas la sincronización.' : state.config ? 'Conexión configurada. Importa el equipo para cargar los datos reales.' : 'Sin conexión configurada. Conecta tu organización para empezar.'}`;
+    ? `<strong>Modo de prueba</strong> · ${tab === 'jira' ? 'Tickets y agentes simulados: nada se pide a Jira ni a Copilot.' : 'Datos de ejemplo; los cambios y las publicaciones se simulan.'}`
+    : `<strong>Modo real</strong> · ${tab === 'jira' ? jiraLine : tab === 'home' ? `${azureLine} · ${jiraLine}` : ws ? 'Los cambios se guardan en local hasta que confirmas la sincronización.' : state.config ? 'Conexión configurada. Importa el equipo para cargar los datos reales.' : 'Sin conexión configurada. Conecta tu organización para empezar.'}`;
   if (section === 'Planificación') lastPlanningTab = tab;
   if (renderedTab !== tab) {
     const firstRender = renderedTab === undefined;
@@ -1122,6 +1131,7 @@ function render() {
   if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state, maintenanceSetup); return; }
   if (tab === 'my-iteration') { $('#app').innerHTML = myIterationView(myIterationSnapshot, state); return; }
   if (tab === 'reviews') { $('#app').innerHTML = reviewsView(state, prUi); return; }
+  if (tab === 'jira') { renderJira(); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><p>${state.config ? `Importa ${escape(state.config.project)} / ${escape(state.config.team)} para traer sus iteraciones, capacidad y tareas abiertas. Solo se lee Azure DevOps: nada se modifica hasta que revises y sincronices.` : 'Conecta tu organización de Azure DevOps para traer iteraciones, capacidad y tareas, o prueba antes con un ejemplo que nunca contacta con Azure.'}</p><div class="actions"><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>`;return;
@@ -1385,6 +1395,7 @@ function homeView() {
     <button class="home-card my-iteration" data-action="open-my-iteration"><span class="home-icon" aria-hidden="true">▦</span><strong>Mi iteración</strong></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
     <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong></button>
+    <button class="home-card jira" data-action="open-jira"><span class="home-icon" aria-hidden="true">◫</span><strong>Tickets de Jira</strong></button>
     <button class="home-card permissions" data-action="permissions" ${state.mode === 'demo' ? 'disabled title="Disponible en el modo Azure DevOps"' : ''}><span class="home-icon" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg></span><strong>Permisos</strong></button>
   </div></section>`;
 }
@@ -1457,6 +1468,91 @@ async function saveFinding(el, change) {
   render();
   if (focus) $(focus)?.focus();
 }
+// Jira board: read from the server, redrawn only when it changes and never while a
+// field of the section has the focus, so nothing jumps under the cursor.
+function renderJira() {
+  const focus = document.activeElement?.dataset?.focus;
+  $('#app').innerHTML = jiraView(state, jiraUi, prUi.copilot);
+  restoreJiraForm();
+  if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
+}
+// What was typed in the Jira form survives a failed save or a redraw; the token is
+// only put back as the field's value, never in the HTML.
+function restoreJiraForm() {
+  const form = $('#jira-settings-form'), draft = jiraUi.settingsDraft;
+  if (!form || !draft) return;
+  for (const [name, value] of Object.entries(draft)) {
+    const field = form.elements[name];
+    if (!field) continue;
+    if (field.type === 'checkbox') field.checked = !!value; else field.value = value ?? '';
+  }
+  form.querySelectorAll('[aria-invalid]').forEach(el => el.removeAttribute('aria-invalid'));
+  const wrong = jiraUi.settingsError && form.elements[jiraUi.settingsError];
+  if (wrong) { wrong.setAttribute('aria-invalid', 'true'); wrong.focus(); wrong.select?.(); }
+}
+let jiraPolling = false, jiraSeen = '', pointerDown = false;
+// The ticket popup: redrawn in place, keeping the open sections and its scroll.
+const ticketOpen = () => modal.open && !!jiraUi.detail && !!$('#jira-ticket');
+const jiraFileUrl = path => `/api/jira-file?key=${encodeURIComponent(jiraUi.detail?.key ?? '')}&path=${encodeURIComponent(path)}&s=${encodeURIComponent(state.csrf)}`;
+function refreshTicket() {
+  const current = $('#jira-ticket');
+  if (!current || !modal.open) return;
+  const open = new Set([...current.querySelectorAll('details[data-part]')].map(d => [d.dataset.part, d.open]).filter(([, isOpen]) => isOpen).map(([part]) => part));
+  const closed = new Set([...current.querySelectorAll('details[data-part]')].filter(d => !d.open).map(d => d.dataset.part));
+  const body = $('.modal-body', modal), scroll = body?.scrollTop ?? 0;
+  current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl);
+  $('#jira-ticket').querySelectorAll('details[data-part]').forEach(d => { if (open.has(d.dataset.part)) d.open = true; if (closed.has(d.dataset.part)) d.open = false; });
+  if (body) body.scrollTop = scroll;
+}
+// The close event arrives a moment later: if the popup was opened again meanwhile, it stays.
+modal.addEventListener('close', () => { if (jiraUi.detail && !modal.open) { jiraUi.detail = null; syncUrl(); } });
+// A redraw between pressing and releasing would lose the click.
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+document.addEventListener('pointerup', () => { setTimeout(() => { pointerDown = false; }, 0); }, true);
+document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+async function loadJira() {
+  let response = await fetch('/api/jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+  let data = await response.json().catch(() => ({}));
+  // The server restarted: renew the local session and read again.
+  if (response.status === 403 && data.reason === 'session') {
+    await loadState(false);
+    response = await fetch('/api/jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+    data = await response.json().catch(() => ({}));
+  }
+  jiraUi.board = response.ok ? data.jira : { error: data.error || 'No se pudo leer el tablero de Jira.' };
+  const ticket = ticketOpen() && jiraUi.board.tickets?.find(t => t.key === jiraUi.detail?.key);
+  if (ticket && ticket.changedAt !== jiraUi.detail.changedAt) await loadJiraTicket(ticket.key);
+}
+async function loadJiraTicket(key) {
+  const response = await fetch(`/api/jira-ticket?key=${encodeURIComponent(key)}`, { headers: { 'X-Neo-CSRF': state.csrf } });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error);
+  jiraUi.detail = data.ticket;
+}
+async function startJiraPolling() {
+  if (jiraPolling) return;
+  jiraPolling = true;
+  try {
+    while (tab === 'jira' && state.jira) {
+      await loadJira().catch(() => {});
+      const seen = JSON.stringify([jiraUi.board, jiraUi.detail?.changedAt]);
+      const editing = $('#app').contains(document.activeElement) && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+      const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+      if (seen !== jiraSeen && !pointerDown && !pending && tab === 'jira') {
+        if (ticketOpen() && !typing) { jiraSeen = seen; refreshTicket(); }
+        else if (jiraUi.view === 'board' && !editing && !modal.open) { jiraSeen = seen; renderJira(); }
+      }
+      await new Promise(done => setTimeout(done, jiraUi.board?.pipeline?.running ? 1000 : 4000));
+    }
+  } finally { jiraPolling = false; }
+}
+async function jiraAction(path, input) {
+  const data = await request(path, input);
+  if (data.jira) jiraUi.board = data.jira;
+  if (ticketOpen()) { await loadJiraTicket(jiraUi.detail.key).catch(() => {}); refreshTicket(); }
+  render();
+  return data;
+}
 async function switchMode(mode) {
   if (mode === state.mode) return;
   if (pending || state.busy) return;
@@ -1466,7 +1562,7 @@ async function switchMode(mode) {
   planningPeriod = null; previousGroupOrder = null;
   lastPlanningTab = 'configuration'; tab = 'home';
   render();
-  toast(mode === 'demo' ? 'Modo de prueba activado. Tus datos de Azure DevOps se conservan.' : 'Modo Azure DevOps activado. Tus pruebas se conservan por separado.');
+  toast(mode === 'demo' ? 'Modo de prueba activado. Tus datos reales se conservan.' : 'Modo real activado. Tus pruebas se conservan por separado.');
 }
 const actions = {
   permissions: async () => { if (state.mode === 'demo') { toast('Cambia al modo Azure DevOps para consultar permisos.'); return; } await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
@@ -1502,10 +1598,67 @@ const actions = {
     await loadMyPullRequests();
   },
   'pr-mine-refresh': () => loadMyPullRequests(true),
+  'open-jira': async () => {
+    jiraUi.view = 'board'; tab = 'jira'; render(); window.scrollTo({ top: 0 });
+    if (!state.jira) return;
+    await loadJira().catch(() => {}); render(); startJiraPolling();
+    if (state.mode !== 'demo' && !prUi.copilot && !state.busy) {
+      const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
+      if (response?.ok && data.copilot) { prUi.copilot = data.copilot; await loadJira().catch(() => {}); if (tab === 'jira') render(); }
+    }
+  },
+  'jira-collect': async () => {
+    const data = await runOperation('/api/jira-collect', {}, 'Recolectar tickets', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : state.jira.filter);
+    jiraUi.board = data.jira; render();
+    const r = data.result;
+    toast(`${r.found} tickets en el filtro · ${r.downloaded} descargados${r.left ? ` · ${r.left} ya no están` : ''}${r.limited ? ' · solo los primeros 200' : ''}.`);
+  },
+  'jira-run': el => jiraAction('/api/jira-run', { key: el.dataset.key }),
+  'jira-mode': el => jiraAction('/api/jira-mode', { stage: el.dataset.stage, mode: el.dataset.mode }),
+  'jira-answer': async el => {
+    const key = el.dataset.key, answer = (jiraUi.answers[key] ?? '').trim();
+    if (!answer) { $(`[data-jira-answer="${CSS.escape(key)}"]`)?.focus(); throw new Error('Escribe la respuesta para el agente.'); }
+    await jiraAction('/api/jira-answer', { key, answer });
+    delete jiraUi.answers[key]; jiraSeen = ''; render();
+    toast(`Respuesta guardada. ${key} se retoma.`);
+  },
+  'jira-logs': async el => {
+    await jiraAction('/api/jira-logs', { on: el.dataset.on === 'true' });
+    toast(state.jira.logs ? 'Logs activados: cada paso se publicará como comentario en su ticket de Jira.' : 'Logs desactivados: no se publica nada en Jira.');
+  },
+  'jira-auto': el => jiraAction('/api/jira-auto', { on: el.dataset.on === 'true' }),
+  'jira-stop': () => jiraAction('/api/jira-stop', {}),
+  'jira-archive': el => jiraAction('/api/jira-archive', { key: el.dataset.key, archived: el.dataset.archived === 'true' }),
+  'jira-open-folder': el => jiraAction('/api/jira-open', el.dataset.key ? { key: el.dataset.key } : {}),
+  'jira-learnings': async el => {
+    const response = await fetch('/api/jira-learnings', { headers: { 'X-Neo-CSRF': state.csrf } });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    const name = JIRA_COLUMNS.find(c => c.id === el.dataset.stage)?.name ?? '';
+    showModal(`Aprendizajes · ${name}`, '', learningsForm(el.dataset.stage, data.learnings), `${state.jira?.demo ? '' : '<button class="button" data-action="jira-open-folder">Abrir carpeta</button>'}<button class="button" data-action="close">Cancelar</button><button class="button primary" type="submit" form="jira-learnings-form">Guardar</button>`);
+    modal.classList.add('wide-modal');
+    $('#jira-learnings-form').dataset.saved = JSON.stringify(data.learnings);
+  },
+  'jira-show-archived': () => { jiraUi.showArchived = !jiraUi.showArchived; render(); },
+  'jira-open-ticket': async el => {
+    const ticket = jiraUi.board?.tickets?.find(t => t.key === el.dataset.key);
+    jiraUi.detail = { key: el.dataset.key }; jiraUi.ticketTab = null;
+    showModal(`${el.dataset.key}${ticket ? ` · ${ticket.summary}` : ''}`, '', ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, null, jiraFileUrl));
+    modal.classList.add('wide-modal');
+    syncUrl();
+    await loadJiraTicket(el.dataset.key); refreshTicket();
+  },
+  'jira-tab': el => { jiraUi.ticketTab = el.dataset.tab; refreshTicket(); },
+  'jira-view': async el => {
+    if (el.dataset.view === 'settings') { jiraUi.settingsDraft = null; jiraUi.settingsError = null; }
+    jiraUi.view = el.dataset.view; render(); window.scrollTo({ top: 0 });
+    if (el.dataset.view === 'board') { await loadJira().catch(() => {}); render(); startJiraPolling(); }
+  },
   'pr-edit-suggestion': el => { prUi.editSuggestion = prUi.editSuggestion === el.dataset.finding ? null : el.dataset.finding; render(); if (prUi.editSuggestion) $(`[data-pr-suggestion="${CSS.escape(el.dataset.finding)}"]`)?.focus(); },
   'pr-copy': async el => { await navigator.clipboard.writeText(el.dataset.copy); toast(`Copiado: ${el.dataset.copy}`); },
   'pr-copilot-status': async () => {
     prUi.copilot = (await request('/api/copilot-status', {})).copilot;
+    if (tab === 'jira') await loadJira().catch(() => {});
     render(); toast(prUi.copilot.isAuthenticated ? `GitHub Copilot está listo con la cuenta ${prUi.copilot.login || 'de GitHub'}.` : 'No hay una sesión de GitHub con Copilot. Revisa las indicaciones.', prUi.copilot.isAuthenticated ? 'info' : 'error');
   },
   'pr-load-repositories': async () => {
@@ -1622,6 +1775,8 @@ document.addEventListener('click', async event => {
   // Fields and comments inside a card are edited in place; they do not open it.
   if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
+  // The answer field of a stuck ticket is written in place, without opening it.
+  if (event.target.closest('.jira-answer') && !event.target.closest('button')) return;
   if (!target || pending || target.disabled) return;
   if (target.closest('summary')) event.preventDefault();
   const action = actions[target.dataset.action];
@@ -1639,6 +1794,9 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
+  if (event.target.dataset?.jiraAnswer && event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); actions['jira-answer'](event.target.nextElementSibling).catch(errorInModal); return; }
+  const jiraCard = event.target.classList?.contains('jira-card') ? event.target : null;
+  if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
   const card = event.target.closest('.task-card');
   if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)).catch(errorInModal); }
   // Arrow keys move between the planning steps; Enter or Space opens one.
@@ -1658,6 +1816,25 @@ document.addEventListener('submit', async event => {
       await request('/api/maintenance-settings', { type: event.target.dataset.type, states: maintenanceSetup?.states ?? [], closedStates });
       maintenanceSetup = null; maintenanceSnapshot = null; render();
       await maintenanceQuery();
+      return;
+    }
+    if (event.target.id === 'jira-learnings-form') {
+      const saved = JSON.parse(event.target.dataset.saved);
+      for (const area of event.target.querySelectorAll('textarea')) if (area.value !== (saved[area.name] ?? '')) await request('/api/jira-learnings', { scope: area.name, text: area.value });
+      modal.close(); await loadJira().catch(() => {}); jiraSeen = ''; render(); toast('Aprendizajes guardados.');
+      return;
+    }
+    if (event.target.id === 'jira-settings-form') {
+      // On an error the form keeps everything written, token included, and points to the field.
+      jiraUi.view = 'settings';
+      const input = jiraSettingsFrom(event.target);
+      jiraUi.settingsDraft = { ...input.settings, token: input.token, clearToken: input.clearToken };
+      let data;
+      try { data = await request('/api/jira-settings', input); }
+      catch (error) { jiraUi.settingsError = error.field ?? null; restoreJiraForm(); throw error; }
+      jiraUi.settingsDraft = null; jiraUi.settingsError = null;
+      jiraUi.view = 'board'; await loadJira().catch(() => {}); render(); startJiraPolling();
+      toast(`Conectado a Jira como ${data.jiraAccount ?? 'tu cuenta'}.`);
       return;
     }
     if (event.target.id === 'pr-url-form') { await startReview({ url: new FormData(event.target).get('url') }); return; }
@@ -1687,6 +1864,8 @@ document.addEventListener('change',async event=>{
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
+    if(el.dataset.jiraModel){await request('/api/jira-model',{stage:el.dataset.jiraModel,model:el.value});await loadJira().catch(()=>{});render();return;}
+    if(el.dataset.jiraMove){await jiraAction('/api/jira-move',{key:el.dataset.jiraMove,stage:el.value,resetIterations:true});return;}
     if('copilotModel' in el.dataset){await request('/api/copilot-model',{model:el.value});render();toast(el.value ? `Las revisiones se harán con ${el.selectedOptions[0]?.textContent ?? el.value}.` : 'Las revisiones usarán el modelo predeterminado.');return;}
     if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}
     if(el.dataset.description){const data=await request('/api/description',{id:Number(el.dataset.description),field:el.dataset.field,description:el.value});review=data.review;render();return;}
@@ -1719,6 +1898,8 @@ document.addEventListener('input',event=>{
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
+  if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
+  if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
@@ -1776,6 +1957,41 @@ window.addEventListener('pagehide',()=>lifecycle.abort(),{once:true});
 window.addEventListener('unhandledrejection',event=>toast(event.reason?.message || 'Se produjo un error inesperado. Recarga la página si algo no responde.','error'));
 window.addEventListener('error',event=>{ if (event.message) toast(`Error inesperado en la interfaz: ${event.message}. Recarga la página si algo no responde.`,'error'); });
 $('#toast').addEventListener('click',()=>{ $('#toast').hidden=true; });
-loadState().then(() => { registerTools(); if (!state.busy && state.stateReview) showStateReview(state.stateReview); else return resumeOperation(); }).catch(error=>{
+// Each section has its own address, so reloading or going back returns to it.
+const PLANNING_ROUTES = { configuration: 'configuracion', iteration: 'iteracion', capacity: 'capacidad', planning: 'tareas' };
+function currentPath() {
+  if (tab === 'home') return '/';
+  if (PLANNING_ROUTES[tab]) return `/planificacion/${PLANNING_ROUTES[tab]}`;
+  if (tab === 'jira') return jiraUi.detail?.key && modal.open ? `/jira/${encodeURIComponent(jiraUi.detail.key)}` : jiraUi.view === 'settings' && state.jira ? '/jira/configuracion' : '/jira';
+  if (tab === 'reviews') return prUi.reviewId ? `/revision-prs/${encodeURIComponent(prUi.reviewId)}` : '/revision-prs';
+  return { 'my-iteration': '/mi-iteracion', maintenance: '/mantenimiento', permissions: '/permisos' }[tab] ?? '/';
+}
+// Until the address of the page is opened, redraws do not change it.
+let routing = true;
+function syncUrl() {
+  if (routing || !state) return;
+  const path = currentPath();
+  if (location.pathname !== path) history.pushState(null, '', path);
+}
+async function openRoute(path) {
+  routing = true;
+  try {
+    const [section, sub] = path.split('/').filter(Boolean).map(part => { try { return decodeURIComponent(part); } catch { return part; } });
+    if (modal.open && !pending) modal.close();
+    if (section === 'planificacion') { tab = Object.entries(PLANNING_ROUTES).find(([, name]) => name === sub)?.[0] ?? lastPlanningTab; render(); }
+    else if (section === 'mi-iteracion') await actions['open-my-iteration']();
+    else if (section === 'mantenimiento') await actions['open-maintenance']();
+    else if (section === 'permisos') await actions.permissions();
+    else if (section === 'revision-prs') { await actions['open-reviews'](); if (sub && state.prReviews?.some(r => r.id === sub)) { prUi.reviewId = sub; render(); } }
+    else if (section === 'jira') {
+      await actions['open-jira']();
+      if (sub === 'configuracion' && state.jira) { jiraUi.view = 'settings'; render(); }
+      else if (sub && jiraUi.board?.tickets?.some(t => t.key === sub)) await actions['jira-open-ticket']({ dataset: { key: sub } });
+    } else { tab = 'home'; render(); }
+  } catch (error) { errorInModal(error); }
+  finally { routing = false; if (state) history.replaceState(null, '', currentPath()); }
+}
+window.addEventListener('popstate', () => { if (!pending) openRoute(location.pathname); });
+loadState().then(async () => { registerTools(); await openRoute(location.pathname); if (!state.busy && state.stateReview) showStateReview(state.stateReview); else return resumeOperation(); }).catch(error=>{
   $('#app').innerHTML=`<div class="notice error">${escape(error.message)} Recarga esta página cuando el servidor local esté disponible.</div>`;
 });
