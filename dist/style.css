@@ -574,3 +574,4 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-comments{display:flex;flex-direction:column;gap:10px;margin-top:10px}
 .jira-comment{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fbfcfb}
 .jira-comment>header{display:flex;align-items:baseline;gap:8px;margin-bottom:6px;font-size:13px}.jira-comment>header small{color:var(--muted);font-size:12px}
+.jira-no-ai{height:30px;display:inline-flex;align-items:center;padding:0 10px;font-size:12px}

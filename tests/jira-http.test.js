@@ -118,7 +118,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([byKey['NEO-103'].stage, byKey['NEO-103'].status], ['done', 'done']);
   assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'reproduce:reproduced', 'fix:fixed', 'verify:not_fixed', 'fix:fixed', 'verify:verified']);
   const detail = (await get('/api/jira-ticket?key=NEO-102')).ticket;
-  assert.ok(detail.history.every(h => h.posted === true), 'with logs on every step is published (simulated in the example)');
+  assert.ok(detail.history.every(h => h.stage === 'collect' ? h.posted === undefined : h.posted === true), 'with logs on every agent step is published (simulated in the example); collecting is not');
   assert.equal(detail.reports.length, 6);
   assert.match(detail.reports.at(-1).text, /ya no ocurre/);
   assert.ok(detail.files.includes('resumen.md') && detail.files.includes('verificacion-2.md'));

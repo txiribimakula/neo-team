@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
+import { collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
 import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
@@ -133,7 +133,7 @@ test('each column gets a model fit for its difficulty unless one is chosen', () 
   assert.equal(defaultModel('medium', models), 'claude-sonnet-4.5');
   assert.equal(defaultModel('high', models), 'claude-opus-4.5');
   assert.equal(modelFor('fix', { fix: 'gpt-5' }, models), 'gpt-5');
-  assert.equal(modelFor('collect', {}, [{ id: 'gpt-5-mini' }]), 'gpt-5-mini');
+  assert.equal(modelFor('collect', {}, models), null, 'collecting uses no model');
   assert.equal(modelFor('collect', {}, []), null, 'without a list, the plan default');
 });
 
@@ -233,7 +233,8 @@ test('the board shows a column per agent with its model and the live step', () =
     tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }, { key: 'NEO-3', summary: 'Tres', stage: 'done', status: 'done', archived: true }] };
   const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3 }] });
   for (const name of ['Recolectar', 'Reproducir', 'Solucionar', 'Verificar', 'Resueltos']) assert.match(html, new RegExp(`<h2>${name} `));
-  assert.match(html, /Auto · claude-haiku-4\.5/);
+  assert.match(html, /<section class="jira-column mode-auto" aria-label="Recolectar">[\s\S]*?Sin IA[\s\S]*?<\/header>/, 'collecting has no model: it is done by code');
+  assert.doesNotMatch(html, /data-jira-model="collect"/);
   assert.match(html, /<option value="claude-opus-4\.5" selected>Claude Opus 4\.5 · ×3/);
   assert.match(html, /data-action="jira-auto" data-on="false"[^>]*>.*Pausar/, 'started: the button pauses');
   assert.match(html, /data-action="jira-learnings" data-stage="fix"/, 'each column opens its own lessons');
@@ -331,4 +332,35 @@ test('ticket texts, comments and reports are shown formatted and safe', () => {
   assert.match(html, /<a href="https:\/\/jira\/x" target="_blank"/);
   assert.match(markdown('![x](adjuntos/a.png)'), /<code title="adjuntos\/a\.png">x<\/code>/, 'without fileUrl images are named');
   assert.match(markdown('![x](../../secreto.png)', { fileUrl: p => p }), /<code/, 'paths out of the ticket are not requested');
+});
+
+test('collecting is done by code, without AI: an index of the ticket', async t => {
+  const root = await temp(t), folder = join(root, 'NEO-5');
+  await mkdir(join(folder, 'adjuntos', 'grabacion.mp4.fotogramas'), { recursive: true });
+  await writeFile(join(folder, 'descripcion.md'), '# NEO-5 · Falla\n\n## Descripción\n\n1. Abrir **Facturas**\n2. Pulsar `Exportar`\n\nSale mal.\n\n## Adjuntos\n\n- x\n');
+  await writeFile(join(folder, 'comentarios.json'), JSON.stringify([{ author: 'Ana', body: 'También:\n1. Repetir con importes negativos' }]));
+  await writeFile(join(folder, 'adjuntos', 'captura.png'), 'png');
+  await writeFile(join(folder, 'adjuntos', 'grabacion.mp4'), 'mp4');
+  for (const n of ['001', '002']) await writeFile(join(folder, 'adjuntos', 'grabacion.mp4.fotogramas', `${n}.png`), 'png');
+  const result = await collectSummary(folder, { key: 'NEO-5', summary: 'Falla', type: 'Bug', priority: 'High' });
+  assert.deepEqual([result.outcome, result.model, result.usage], ['ok', null, null]);
+  assert.match(result.report, /1\. Abrir \*\*Facturas\*\*\n2\. Pulsar `Exportar`\n3\. Repetir con importes negativos/, 'steps of the description and the comments');
+  assert.match(result.report, /1 · el último de Ana/);
+  assert.match(result.report, /\[captura\.png\]\(adjuntos\/captura\.png\) · imagen/);
+  assert.match(result.report, /\[grabacion\.mp4\]\(adjuntos\/grabacion\.mp4\) · vídeo · 2 fotogramas en adjuntos\/grabacion\.mp4\.fotogramas\//);
+  const empty = join(root, 'NEO-6');
+  await mkdir(empty, { recursive: true });
+  await writeFile(join(empty, 'descripcion.md'), '# NEO-6 · Nada\n\n## Descripción\n\n(sin descripción)\n');
+  const blocked = await collectSummary(empty, { key: 'NEO-6', summary: 'Nada' });
+  assert.equal(blocked.outcome, 'blocked', 'with nothing to go on it asks instead of spending an agent');
+  assert.match(blocked.question, /Qué hay que reproducir/);
+
+  // The pipeline runs it without calling any agent or listing Copilot models.
+  const tickets = new TicketStore(root);
+  await tickets.update('NEO-5', () => newTicket({ summary: 'Falla' }));
+  const pipeline = new JiraPipeline({ tickets, agent: { run: () => { throw new Error('no agent'); } }, settings: async () => ({ models: {} }), models: () => { throw new Error('no models'); } });
+  await pipeline.runStage('NEO-5');
+  const ticket = await tickets.get('NEO-5');
+  assert.deepEqual([ticket.stage, ticket.history[0].outcome, ticket.history[0].model], ['reproduce', 'ok', null]);
+  assert.match(await readFile(join(folder, 'resumen.md'), 'utf8'), /Resumen de NEO-5 \(automático\)/);
 });

@@ -95,10 +95,10 @@ Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **
 - `adjuntos/`: cada adjunto con su nombre de Jira, que es como lo citan los textos (si dos se llaman igual, el más antiguo lleva su id). De cada vídeo se extrae un fotograma cada 2 segundos en `adjuntos/<vídeo>.fotogramas/` si `ffmpeg` está instalado, para que los agentes puedan verlo.
 - Los informes de cada agente (`resumen.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`), `evidencias/`, `reproducir.ps1`, `compilacion-N.log` y `estado.json`.
 
-**Agentes y modelos.** Cada columna tiene su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: ligero para recolectar (Haiku, mini), medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
+**Agentes y modelos.** Recolectar no usa IA. Las demás columnas tienen su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
 
-- **Recolectar:** lee descripción, comentarios, imágenes y fotogramas y escribe el resumen: problema, pasos para reproducir, resultado esperado y obtenido, adjuntos relevantes e información que falta.
-- **Reproducir:** arranca la versión actual y la maneja con [winapp CLI](https://github.com/microsoft/winappcli) (`winapp ui inspect`, `invoke`, `set-value`, `wait-for`, `screenshot`, `record`…). Guarda evidencias y un `reproducir.ps1` que repite los pasos.
+- **Recolectar (sin IA):** se hace con código y no consume tokens. Escribe `resumen.md`, un índice del ticket: los pasos que enumeran la descripción y los comentarios, los comentarios y cada adjunto con su tipo y sus fotogramas. Un ticket sin descripción, comentarios ni adjuntos se queda con una pregunta en vez de llegar a un agente.
+- **Reproducir:** entiende el ticket (descripción, comentarios, imágenes y fotogramas), arranca la versión actual y la maneja con [winapp CLI](https://github.com/microsoft/winappcli) (`winapp ui inspect`, `invoke`, `set-value`, `wait-for`, `screenshot`, `record`…). Guarda evidencias y un `reproducir.ps1` que repite los pasos.
 - **Solucionar:** trabaja en una copia aparte del repositorio (`git worktree` en `<ticket>/codigo`, rama `neo/<ticket>`), así que no toca tu clon ni tus cambios. Busca la causa, corrige y compila. Si hay comando de compilación, Neo Team lo vuelve a ejecutar: si falla, el ticket vuelve a Solucionar con el registro. No hace commits.
 - **Verificar:** arranca la compilación corregida, repite `reproducir.ps1` y comprueba lo relacionado.
 
