@@ -677,7 +677,48 @@ function sectionRefreshButton() {
   return `<div class="workspace-controls"><button class="button small" data-action="refresh-section" data-section="${section}">Actualizar ${label}</button><small class="text-muted">Solo ${label}${at ? ' · '+new Date(at).toLocaleTimeString('es') : ''}</small></div>`;
 }
 function stepView() {
-  return `${sectionRefreshButton()}${stepContent()}`;
+  return `${sectionRefreshButton()}${assistantView()}${stepContent()}`;
+}
+// Each planning tab has its own AI prompt. Copilot only gets the tools of that tab,
+// which search and change the local copy; its changes stay pending like any other.
+const ASSISTANT_HINTS={configuration:'Pide a la IA… «no importes los bugs resueltos»',iteration:'Pide a la IA… «planifica la siguiente iteración»',capacity:'Pide a la IA… «Ana libra el viernes»',planning:'Pide a la IA… «reparte las tareas sin asignar»'};
+const assistantUi={};
+const assistantOf=which=>assistantUi[`${state.mode}|${which}`] ??= {draft:'',history:[],running:false};
+function assistantOutput(ui) {
+  if (ui.running) return `<div class="assistant-status" role="status"><span class="spinner" aria-hidden="true"></span><span>${escape(ui.status || 'Preguntando a GitHub Copilot…')}</span><button type="button" class="button small subtle" data-assistant-cancel data-cancel-operation>Cancelar</button></div>`;
+  if (!ui.asked) return '';
+  const changes=ui.changes?.length ? `<ul class="assistant-changes" aria-label="Cambios guardados en local">${ui.changes.map(line=>`<li>${escape(line)}</li>`).join('')}</ul>` : '';
+  return `<div class="assistant-answer ${ui.error ? 'failed' : ''}"><div class="assistant-answer-head"><span class="assistant-asked">${escape(ui.asked)}</span><button type="button" class="close" data-action="assistant-clear" aria-label="Cerrar la respuesta">×</button></div>${ui.error ? `<p class="inline-error">${escape(ui.error)}</p>` : `<p class="assistant-reply">${escape(ui.reply)}</p>`}${changes}</div>`;
+}
+function assistantView() {
+  if (!ASSISTANT_HINTS[tab]) return '';
+  const ui=assistantOf(tab);
+  return `<section class="assistant" aria-label="IA de esta pestaña"><form id="assistant-form" class="assistant-form" data-tab="${tab}"><span class="assistant-mark" aria-hidden="true">✦</span><input id="assistant-prompt" name="prompt" maxlength="2000" autocomplete="off" placeholder="${escape(ASSISTANT_HINTS[tab])}" aria-label="Petición a la IA, solo sobre esta pestaña" value="${escape(ui.draft)}" ${ui.running ? 'disabled' : ''}><button type="submit" class="button small primary" ${ui.running ? 'disabled' : ''} title="Solo cambia esta pestaña y en local: los cambios quedan pendientes de sincronizar">Pedir</button></form><div id="assistant-output">${assistantOutput(ui)}</div></section>`;
+}
+function updateAssistant(which) {
+  if (tab===which && $('#assistant-output')) $('#assistant-output').innerHTML=assistantOutput(assistantOf(which));
+}
+async function askAssistant(form) {
+  const which=form.dataset.tab, ui=assistantOf(which), prompt=ui.draft.trim();
+  if (!prompt || ui.running) return;
+  const operationId=crypto.randomUUID();
+  Object.assign(ui,{running:true,operationId,status:'',asked:prompt,reply:'',changes:[],error:''});
+  updateAssistant(which);
+  const stop=followOperation(operationId,progress=>{ui.status=progress.message;updateAssistant(which);});
+  try {
+    const {assistant}=await request('/api/assistant',{tab:which,prompt,history:ui.history,iterationId:selectedIteration,operationId});
+    Object.assign(ui,{draft:'',reply:assistant.reply,changes:assistant.changes,history:[...ui.history,{prompt,reply:assistant.reply}].slice(-4)});
+    if (assistant.select) { selectedIteration=assistant.select; planningPeriod=null; laneOrder=null; previousGroupOrder=null; }
+    if (assistant.changes.length) review=null;
+  } catch (error) { ui.error=error.message; }
+  finally { stop(); ui.running=false; render(); }
+  if (tab===which) $('#assistant-prompt')?.focus({preventScroll:true});
+}
+async function cancelAssistant() {
+  const ui=assistantOf(tab);
+  if (!ui.running) return;
+  ui.status='Cancelando…'; updateAssistant(tab);
+  await fetch('/api/cancel-operation',{method:'POST',headers:{'Content-Type':'application/json','X-Neo-CSRF':state.csrf},body:JSON.stringify({id:ui.operationId})}).catch(()=>{});
 }
 function stepContent() {
   const iteration=selected();
@@ -1048,6 +1089,10 @@ function lane(member, allItems, index, iteration) {
 // The left panel alternates between the available backlog and the sprint's
 // unassigned tasks; people take one row each on the right.
 let leftPanel='backlog', laneOrder=null;
+// The backlog can take most of the width to read it better; the choice is remembered.
+let backlogWide=false;
+try { backlogWide=localStorage.getItem('neo-team:backlog-wide')==='1'; } catch { /* Without storage it starts narrow. */ }
+const expandIcon=icon('<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/>'), shrinkIcon=icon('<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="m14 10 7-7"/><path d="m3 21 7-7"/>');
 function unassignedTasks(iteration=selected()) {
   return state.workspace.effectiveItems.filter(i=>isExecutable(i) && iteration && i.iterationPath===iteration.path && !i.assignedTo);
 }
@@ -1077,9 +1122,10 @@ function board(iteration, planned) {
   const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
-  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
+  const widen=`<button type="button" class="icon-button backlog-width" data-action="toggle-backlog-width" aria-pressed="${backlogWide}" title="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}" aria-label="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}">${backlogWide ? shrinkIcon : expandIcon}</button>`;
+  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i)).join('')}</div></section>` : '';
-  return `<div class="board">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
+  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
 function render() {
@@ -1723,6 +1769,8 @@ const actions = {
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
   'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
+  'toggle-backlog-width':()=>{backlogWide=!backlogWide;try{localStorage.setItem('neo-team:backlog-wide',backlogWide ? '1' : '0');}catch{/* Kept for this visit only. */}updatePlanningView();$('[data-action="toggle-backlog-width"]')?.focus({preventScroll:true});},
+  'assistant-clear':()=>{const ui=assistantOf(tab);Object.assign(ui,{asked:'',reply:'',changes:[],error:''});updateAssistant(tab);$('#assistant-prompt')?.focus({preventScroll:true});},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
   'download-choice':async el=>{
     const choice=el.dataset.choice;
@@ -1788,6 +1836,7 @@ document.addEventListener('click', async event => {
   // Fields and comments inside a card are edited in place; they do not open it.
   if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
+  if (event.target.closest('[data-assistant-cancel]')) { cancelAssistant(); return; }
   // The answer field of a stuck ticket is written in place, without opening it.
   if (event.target.closest('.jira-answer') && !event.target.closest('button')) return;
   if (!target || pending || target.disabled) return;
@@ -1850,6 +1899,7 @@ document.addEventListener('submit', async event => {
       toast(`Conectado a Jira como ${data.jiraAccount ?? 'tu cuenta'}.`);
       return;
     }
+    if (event.target.id === 'assistant-form') { await askAssistant(event.target); return; }
     if (event.target.id === 'pr-url-form') { await startReview({ url: new FormData(event.target).get('url') }); return; }
     if (event.target.id === 'state-rules-form') {
       const choices = [...event.target.querySelectorAll('select[data-state]')].filter(el => el.value).map(el => ({ state: el.dataset.state, action: el.value }));
@@ -1915,6 +1965,7 @@ document.addEventListener('input',event=>{
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
+  if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
 });
 document.addEventListener('toggle',event=>{

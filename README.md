@@ -130,7 +130,7 @@ En el ejemplo, tres tickets de una aplicación ficticia recorren el tablero con 
 4. En **1 · Configuración**, marca los estados que se importan para cada tipo de tarea o bug y proyecto. **Sincronizar**, al principio de Configuración, actualiza las tareas; las reglas también se usan en las siguientes importaciones. En Prueba se aplican sobre el ejemplo. La configuración de mantenimiento está en su propia sección.
 5. En **2 · Iteración**, elige el período que vas a planificar. Los pasos siguientes trabajan sobre él.
 6. En **3 · Capacidad**, define las horas diarias, las ausencias personales y los días libres comunes. Con varios proyectos es una única disponibilidad.
-7. En **4 · Tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes.
+7. En **4 · Tareas**, revisa las tareas de la iteración anterior cuando esté disponible y prepara la elegida. Puedes arrastrar tareas a una persona o abrirlas para cambiar responsable, iteración y horas pendientes. El botón junto a **Backlog / Sin asignar** amplía el backlog para que ocupe la mayor parte de la página (las personas quedan en una columna estrecha a la derecha, donde se pueden seguir soltando tareas); vuelve a pulsarlo para reducirlo. La elección se recuerda en este navegador.
 8. En **5 · Cambios pendientes**, compara el borrador con Azure y revisa las asignaciones, capacidades y comentarios antes de sincronizar.
 
 Cada sección tiene su dirección (`/planificacion/capacidad`, `/mi-iteracion`, `/mantenimiento`, `/revision-prs/<revisión>`, `/jira`, `/jira/configuracion`, `/jira/<ticket>`, `/permisos`): al recargar se vuelve al mismo sitio, con el ticket o la revisión abiertos, y los botones atrás y adelante del navegador recorren las secciones. Inicio muestra seis recuadros con el icono y el título de Planificación, Mi iteración, Mantenimiento, Revisión de PRs, Tickets de Jira y Permisos. El logotipo vuelve a Inicio. Al volver a Planificación se conserva el paso abierto durante la sesión. Los cambios pendientes se revisan desde el paso **Cambios pendientes**. El selector de la cabecera alterna entre **Prueba** y **Real** (Azure DevOps y Jira) y el aviso de modo permanece visible en todas las secciones, salvo mientras el formulario de conexión ocupa la página. Prueba usa datos de ejemplo y simula los cambios sin conectarse a Azure DevOps; Permisos solo está disponible en modo Azure DevOps. Los datos y cambios locales de ambos modos se conservan por separado al alternar.
@@ -138,6 +138,19 @@ Cada sección tiene su dirección (`/planificacion/capacidad`, `/mi-iteracion`, 
 Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar con un botón. La revisión de PRs muestra cuántos comentarios se publicarán y solo habilita la publicación cuando hay una selección pendiente y el pull request está activo.
 
 **Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior.
+
+### IA en cada pestaña
+
+Configuración, Iteración, Capacidad y Tareas tienen arriba un campo **Pide a la IA…**. Lo que escribas lo resuelve GitHub Copilot solo dentro de esa pestaña y sobre la copia local:
+
+- **Configuración:** qué estados de cada tipo se importan.
+- **Iteración:** qué iteración se planifica.
+- **Capacidad:** horas por día de cada persona y días libres (personales y del equipo) en la iteración elegida.
+- **Tareas:** buscar tareas y bugs (por texto, persona, padre, iteración anterior, backlog…) y cambiar responsable, iteración, prioridad, estimaciones, estado o título.
+
+Copilot recibe los datos de la pestaña y solo puede usar sus herramientas, que aplican las mismas validaciones que la interfaz: no tiene terminal, archivos, MCP ni web, y no puede consultar ni sincronizar con Azure DevOps. Si pides algo de otra pestaña, lo indica sin cambiar nada. Cada cambio se guarda en local al momento y queda pendiente de sincronizar, como los que haces a mano, así que se revisa y se descarta desde **Cambios pendientes**. La respuesta muestra lo que ha hecho y cada pestaña recuerda las últimas preguntas para poder seguir la conversación. Mientras responde se puede **Cancelar**: lo ya guardado se conserva.
+
+Usa la misma sesión de GitHub Copilot y el mismo modelo elegido que la [revisión de pull requests](#revisión-de-pull-requests), y consume la asignación de Copilot de tu cuenta. En el ejemplo también se usa Copilot, con los datos de ejemplo.
 
 ### Cambios de estado en local
 

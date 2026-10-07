@@ -18,6 +18,7 @@ import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText
 import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
+import { runAssistant, assistantRequest, setImportRule } from './assistant.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
 
@@ -263,15 +264,15 @@ const server = http.createServer(async (req, res) => {
         if (!busy || !operation || input.id !== operation.id) throw fail('La operación ya terminó o cambió. Actualiza su estado.', 409);
         if (!operation.cancellable) throw fail('Esta operación no se puede cancelar mientras guarda o sincroniza datos.', 409);
         operation = { ...operation, cancelRequested: true, cancellable: false, message: 'Cancelando la consulta…', updatedAt: Date.now() };
-        if (operation.path === '/api/pr-review' || operation.path === '/api/copilot-status') await copilot.abort();
+        if (['/api/pr-review', '/api/copilot-status', '/api/assistant'].includes(operation.path)) await copilot.abort();
         await azure.close();
         return json(res, { cancelling: true });
       }
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-sync': 'Sincronizando con Jira', '/api/jira-collect': 'Recolectando tickets de Jira' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/jira-collect', '/api/jira-sync', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-sync': 'Sincronizando con Jira', '/api/jira-collect': 'Recolectando tickets de Jira', '/api/assistant': 'Consultando a GitHub Copilot' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/assistant', '/api/jira-collect', '/api/jira-sync', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -447,6 +448,12 @@ const server = http.createServer(async (req, res) => {
           else delete data.localRepositories[key];
           await store.save(data);
           return json(res, publicState());
+        }
+        // The AI prompt of a planning tab: only the local copy of that tab changes.
+        if (path === '/api/assistant') {
+          const answer = await runAssistant({ request: assistantRequest(input), store, agent: copilot, model: store.data.copilotModel ?? null,
+            onActivity: message => { if (!operation.cancelRequested) step(message); }, onChange: () => { planner.review = null; } });
+          return json(res, { assistant: answer, state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/copilot-model') {
           // The model that reviews; empty: the default of the plan (or NEO_TEAM_COPILOT_MODEL).
@@ -717,15 +724,7 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/duplicate') {
           const data=structuredClone(store.data);duplicateItem(data[data.mode],input.id);await store.save(data);planner.review=null;
         } else if (path === '/api/import-rule') {
-          const data=structuredClone(store.data), workspace=data[data.mode];
-          if(!workspace) throw fail('Importa datos primero.');
-          const rules=data.mode==='demo' ? (workspace.importRules ??= []) : (data.stateRules ??= []);
-          const matches=r=>r.organization===input.organization && r.project===input.project && r.type===input.type && r.state===input.state;
-          const allowed=availableImportRules(workspace,rules).find(matches);
-          if (!allowed || !['include','exclude'].includes(input.action)) throw fail('Elige un estado disponible para importar.');
-          const rule=rules.find(matches);
-          if(rule) rule.action=input.action; else rules.push({...allowed,action:input.action});
-          await store.save(data);planner.review=null;
+          const data=structuredClone(store.data);setImportRule(data,input);await store.save(data);planner.review=null;
         } else if (path === '/api/complete-task') {
           const data=structuredClone(store.data);completeTask(data[data.mode],input.id);
           await store.save(data);planner.review=null;

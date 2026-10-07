@@ -584,3 +584,21 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-lock.locked{color:#8a5a12;background:#fff4dc;border-color:#ecd49c}
 .jira-card.locked{border-left-style:dashed}
 .jira-meta .jira-assignee{margin-right:6px}
+/* Tareas: the backlog can take most of the width; people stay in a narrow column. */
+.backlog-head{display:flex;gap:6px;align-items:flex-start}.backlog-head .panel-switch{flex:1;min-width:0}
+.backlog-width{width:34px;height:34px;margin-top:2px;color:#5d7056}.backlog-width[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:white}
+.board.backlog-wide{grid-template-columns:minmax(0,3fr) minmax(280px,1fr)}
+@media(max-width:740px){.board.backlog-wide{grid-template-columns:1fr}.backlog-width{display:none}}
+/* The AI prompt of each planning tab. */
+.assistant{margin-bottom:18px}
+.assistant-form{display:flex;align-items:center;gap:8px;background:white;border:1px solid var(--line);border-radius:10px;padding:5px 5px 5px 12px}
+.assistant-form:focus-within{border-color:#91ad81}
+.assistant-mark{color:#6b9a3c;font-size:15px;flex-shrink:0}
+.assistant-form input{border:0;padding:6px 4px;flex:1;min-width:0;background:transparent}.assistant-form input:focus-visible{outline:none}
+.assistant-status{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted);padding:10px 4px 0;min-width:0}.assistant-status>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assistant-answer{margin-top:8px;background:#f6f9f3;border:1px solid #e0e8d5;border-radius:10px;padding:10px 14px 12px;font-size:14px;line-height:1.55}
+.assistant-answer.failed{background:#fff6f4;border-color:#f5d3ce}
+.assistant-answer-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.assistant-answer-head .close{font-size:22px;padding:0}
+.assistant-asked{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.assistant-reply{margin:4px 0 0;white-space:pre-line;overflow-wrap:anywhere}.assistant-answer .inline-error{margin:4px 0 0;white-space:pre-line}
+.assistant-changes{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:13px;color:#47772f}.assistant-changes li:before{content:'✓ ';font-weight:700}

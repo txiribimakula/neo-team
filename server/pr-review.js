@@ -260,9 +260,12 @@ export async function publishReview({ azure, config, review, includeSummary, onP
 export const AUTH_HELP = 'No hay una sesión de GitHub con acceso a Copilot en este equipo. Copilot se ejecuta en el servidor local de Neo Team y no usa la sesión del navegador. Inicia sesión una vez en una terminal: «copilot» y después «/login» (Copilot CLI) o «gh auth login --web» (GitHub CLI; un token clásico ghp_ no sirve). Autoriza el código en una ventana privada con tu cuenta de la empresa, no con la personal. También puedes definir COPILOT_GITHUB_TOKEN con un token fine-grained con el permiso «Copilot Requests» antes de arrancar Neo Team.';
 const authError = () => Object.assign(fail(AUTH_HELP, 401), { reason: 'copilot-auth' });
 
+const REVIEW_WORDS = { cancelled: 'Revisión cancelada.', rejected: 'Esta revisión no permite usar herramientas: responde solo con el JSON pedido.', writing: 'GitHub Copilot está escribiendo la revisión', working: 'GitHub Copilot está revisando el pull request', incomplete: 'GitHub Copilot no pudo completar la revisión' };
+const ASK_WORDS = { cancelled: 'Consulta cancelada.', rejected: 'Solo puedes usar las herramientas de Neo Team.', writing: 'GitHub Copilot está escribiendo la respuesta', working: 'GitHub Copilot está trabajando', incomplete: 'GitHub Copilot no pudo completar la petición' };
 // Runs Copilot through its official SDK with the account signed in on this
-// machine. The session gets no tools, runs in an empty folder, reads no user
-// configuration and is deleted afterwards, so the code is not kept on disk.
+// machine. A review gets no tools and a question only the tools it is given;
+// both run in an empty folder, read no user configuration and are deleted
+// afterwards, so nothing is kept on disk.
 export class CopilotReviewer {
   constructor({ load = () => import('@github/copilot-sdk'), model = process.env.NEO_TEAM_COPILOT_MODEL || undefined, timeoutMs = 15 * 60000 } = {}) {
     this.load = load; this.model = model; this.timeoutMs = timeoutMs;
@@ -290,19 +293,28 @@ export class CopilotReviewer {
     });
   }
   async review({ prompt, model = null, onProgress = () => {} }) {
+    return this.converse({ prompt, model, onProgress, words: REVIEW_WORDS,
+      systemMessage: { mode: 'customize', sections: { code_change_rules: { action: 'remove' } }, content: SYSTEM_INSTRUCTIONS },
+      tools: { availableTools: [], excludedTools: ['builtin:*', 'mcp:*', 'custom:*'] } });
+  }
+  // A question answered with the given tools only: no shell, files, MCP or web.
+  async ask({ system, prompt, tools, model = null, onProgress = () => {} }) {
+    return this.converse({ prompt, model, onProgress, words: ASK_WORDS,
+      systemMessage: { mode: 'replace', content: system },
+      tools: { tools, availableTools: ['custom:*'], excludedTools: ['builtin:*', 'mcp:*'] } });
+  }
+  async converse({ prompt, model, onProgress, words, systemMessage, tools }) {
     const chosen = model || this.model;
     this.aborted = false;
     return this.withClient(async (client, directory) => {
       onProgress({ message: 'Comprobando la sesión de GitHub Copilot…' });
       const auth = await client.getAuthStatus();
       if (!auth.isAuthenticated) throw authError();
-      if (this.aborted) throw fail('Revisión cancelada.');
+      if (this.aborted) throw fail(words.cancelled);
       const session = await client.createSession({
         ...(chosen ? { model: chosen } : {}),
-        clientName: 'neo-team', workingDirectory: directory, streaming: true,
-        systemMessage: { mode: 'customize', sections: { code_change_rules: { action: 'remove' } }, content: SYSTEM_INSTRUCTIONS },
-        availableTools: [], excludedTools: ['builtin:*', 'mcp:*', 'custom:*'],
-        onPermissionRequest: () => ({ kind: 'reject', feedback: 'Esta revisión no permite usar herramientas: responde solo con el JSON pedido.' }),
+        clientName: 'neo-team', workingDirectory: directory, streaming: true, systemMessage, ...tools,
+        onPermissionRequest: () => ({ kind: 'reject', feedback: words.rejected }),
         enableConfigDiscovery: false, skipCustomInstructions: true, enableSkills: false, enableSessionStore: false, enableHostGitOperations: false,
         enableFileHooks: false, enableOnDemandInstructionDiscovery: false, infiniteSessions: { enabled: false }, memory: { enabled: false },
       });
@@ -310,19 +322,19 @@ export class CopilotReviewer {
       let written = 0, reported = 0, usage = {}, sessionError = null;
       session.on('assistant.message_delta', event => {
         written += String(event.data?.deltaContent ?? '').length;
-        if (Date.now() - reported > 1000) { reported = Date.now(); onProgress({ message: `GitHub Copilot está escribiendo la revisión… ${written} caracteres` }); }
+        if (Date.now() - reported > 1000) { reported = Date.now(); onProgress({ message: `${words.writing}… ${written} caracteres` }); }
       });
       session.on('assistant.usage', event => { usage = { model: event.data?.model, inputTokens: (usage.inputTokens ?? 0) + (event.data?.inputTokens ?? 0), outputTokens: (usage.outputTokens ?? 0) + (event.data?.outputTokens ?? 0) }; });
       session.on('session.error', event => { sessionError = event.data?.message ?? 'Error de GitHub Copilot.'; });
       try {
-        onProgress({ message: `GitHub Copilot está revisando el pull request${auth.login ? ` con la cuenta ${auth.login}` : ''}…` });
+        onProgress({ message: `${words.working}${auth.login ? ` con la cuenta ${auth.login}` : ''}…` });
         const reply = await session.sendAndWait({ prompt }, this.timeoutMs).catch(error => {
           if (/No GitHub OAuth token|Not authenticated|\b401\b/i.test(String(error?.message))) throw authError();
           throw error;
         });
-        if (this.aborted) throw fail('Revisión cancelada.');
+        if (this.aborted) throw fail(words.cancelled);
         const content = reply?.data?.content;
-        if (!content) throw new Error(sessionError ? `GitHub Copilot no pudo completar la revisión: ${sessionError}` : 'GitHub Copilot no devolvió ninguna respuesta.');
+        if (!content) throw new Error(sessionError ? `${words.incomplete}: ${sessionError}` : 'GitHub Copilot no devolvió ninguna respuesta.');
         return { text: content, login: auth.login ?? null, model: usage.model ?? chosen ?? null, usage };
       } finally {
         const id = session.sessionId;
