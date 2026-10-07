@@ -95,6 +95,10 @@ Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **
 - `adjuntos/`: cada adjunto con su nombre de Jira, que es como lo citan los textos (si dos se llaman igual, el más antiguo lleva su id). De cada vídeo se extrae un fotograma cada 2 segundos en `adjuntos/<vídeo>.fotogramas/` si `ffmpeg` está instalado, para que los agentes puedan verlo.
 - Los informes de cada agente (`resumen.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`), `evidencias/`, `reproducir.ps1`, `compilacion-N.log` y `estado.json`.
 
+**Sincronizar** consulta en Jira los tickets que ya están en el tablero: los terminados allí (estado de categoría *Done*) se quitan del tablero, conservando su carpeta y su rama, y aparecen en «Mostrar quitados» como «Cerrado en Jira»; los que han cambiado se vuelven a descargar, con sus comentarios y adjuntos nuevos, sin moverlos de columna. También actualiza a quién están asignados. Avisa de los que ya no existen o a los que no tienes acceso.
+
+**Asignado.** Cada tarjeta muestra a quién está asignado el ticket en Jira («tú» si es tu cuenta, o «Sin asignar»). Un ticket asignado a otra persona queda fuera del modo automático: solo se ejecuta con ▶ sobre ese ticket. El candado de la tarjeta (o «Incluir en automático» / «Solo manual» en su detalle) cambia esto ticket a ticket.
+
 **Agentes y modelos.** Recolectar no usa IA. Las demás columnas tienen su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
 
 - **Recolectar (sin IA):** se hace con código y no consume tokens. Escribe `resumen.md`, un índice del ticket: los pasos que enumeran la descripción y los comentarios, los comentarios y cada adjunto con su tipo y sus fotogramas. Un ticket sin descripción, comentarios ni adjuntos se queda con una pregunta en vez de llegar a un agente.
@@ -104,7 +108,7 @@ Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **
 
 **Semáforo de cada columna.** Verde (**autopilot**): su agente actúa solo. Ámbar (**avisar**): los tickets esperan en la columna marcados «Espera tu OK» y ▶ aprueba ese paso. Rojo (**nada**): su agente no actúa, ni siquiera con ▶.
 
-**Uso.** **Empezar**, arriba, procesa los tickets pendientes de las columnas en verde, uno tras otro y terminando cada uno antes de pasar al siguiente (un solo agente a la vez, porque manejan el escritorio); **Pausar** deja terminar el paso en curso y para. ▶ en una tarjeta trabaja solo sobre ese ticket: pausa el resto y lo lleva por las columnas siguientes mientras estén en verde. El ticket en proceso y su columna se resaltan, la tarjeta muestra lo último que hace el agente y ■ lo detiene al momento (el paso queda pendiente). La clave de cada tarjeta enlaza con el ticket en Jira.
+**Uso.** **Empezar**, arriba, procesa los tickets pendientes de las columnas en verde que no tengan el candado puesto, uno tras otro y terminando cada uno antes de pasar al siguiente (un solo agente a la vez, porque manejan el escritorio); **Pausar** deja terminar el paso en curso y para. ▶ en una tarjeta trabaja solo sobre ese ticket: pausa el resto y lo lleva por las columnas siguientes mientras estén en verde. El ticket en proceso y su columna se resaltan, la tarjeta muestra lo último que hace el agente y ■ lo detiene al momento (el paso queda pendiente). La clave de cada tarjeta enlaza con el ticket en Jira.
 
 **Preguntas.** Cuando un agente no puede seguir (le falta información, una decisión o un acceso) se bloquea con una pregunta concreta, o el ticket se bloquea al agotar los intentos. La tarjeta muestra la pregunta y un campo para responder: **Responder** (o Ctrl+Enter) guarda la respuesta en el ticket y lo retoma; esa respuesta y las anteriores se pasan a todos los agentes que trabajen después en él.
 

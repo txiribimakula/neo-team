@@ -13,9 +13,9 @@ import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS } from './demo.js';
-import { JiraClient, jiraSettingsFrom, hasFfmpeg, listFiles, readText, TOKEN_HELP } from './jira.js';
-import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, checkKey, defaultModel, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
+import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, TOKEN_HELP } from './jira.js';
+import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
@@ -49,7 +49,14 @@ async function jiraToken() {
   if (process.env.NEO_TEAM_JIRA_TOKEN) return process.env.NEO_TEAM_JIRA_TOKEN.trim();
   return (await readFile(jiraTokenFile(), 'utf8').catch(() => '')).trim();
 }
-let jiraHasToken = false, jiraAccount = null;
+let jiraHasToken = false;
+// The connected Jira account, kept to know which tickets are assigned to you.
+const jiraMe = () => store.data.mode === 'demo' ? DEMO_JIRA_ME : store.data.jiraMe ?? null;
+async function saveJiraMe(me) {
+  const account = accountOf(me);
+  if (!account || JSON.stringify(account) === JSON.stringify(store.data.jiraMe)) return;
+  const data = structuredClone(store.data); data.jiraMe = account; await store.save(data);
+}
 const refreshJiraToken = async () => { jiraHasToken = !!(await jiraToken()); };
 await refreshJiraToken();
 function jiraSettings() {
@@ -59,7 +66,7 @@ function jiraSettings() {
 const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 'jira-ejemplo') : resolve(settings?.ticketsDir || join(store.directory, 'jira'));
 function publicJira() {
   const settings = jiraSettings();
-  return settings ? { ...settings, account: store.data.mode === 'demo' ? 'ejemplo' : jiraAccount, demo: store.data.mode === 'demo', hasToken: store.data.mode === 'demo' || jiraHasToken, tokenFromEnv: !!process.env.NEO_TEAM_JIRA_TOKEN, root: jiraRoot(settings) } : null;
+  return settings ? { ...settings, account: jiraMe()?.name ?? null, demo: store.data.mode === 'demo', hasToken: store.data.mode === 'demo' || jiraHasToken, tokenFromEnv: !!process.env.NEO_TEAM_JIRA_TOKEN, root: jiraRoot(settings) } : null;
 }
 // Models the Copilot account may use, remembered from the last check.
 let copilotModels = [];
@@ -86,7 +93,7 @@ async function jiraBoard() {
   const settings = publicJira();
   if (!settings) return { settings: null };
   const pipeline = jiraPipeline();
-  const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, history: (t.history ?? []).map(({ usage, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
+  const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
   const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
   return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, demo: true } : await detectJiraTools() };
 }
@@ -178,7 +185,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-logs', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -263,8 +270,8 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-collect': 'Recolectando tickets de Jira' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/jira-collect', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-sync': 'Sincronizando con Jira', '/api/jira-collect': 'Recolectando tickets de Jira' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/jira-collect', '/api/jira-sync', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -457,14 +464,25 @@ const server = http.createServer(async (req, res) => {
           if (reviewer === copilot && status.isAuthenticated) { copilotModels = status.models ?? []; for (const pipeline of jiraPipelines.values()) { pipeline.needsCopilot = false; pipeline.error = null; } }
           return json(res, { copilot: status });
         }
+        if (path === '/api/jira-sync') {
+          const settings = jiraSettings();
+          if (!settings) throw fail('Configura Jira primero.');
+          const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
+          const pipeline = jiraPipeline();
+          const result = await syncTickets({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg: store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg, busyKey: pipeline.running?.key, onProgress: progress });
+          // A ticket finished in Jira is no longer waiting for an agent.
+          pipeline.queue = pipeline.queue.filter(q => !result.closed.includes(q.key));
+          if (result.closed.includes(pipeline.focus)) pipeline.focus = null;
+          return json(res, { result, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
+        }
         if (path === '/api/jira-collect') {
           const settings = jiraSettings();
           if (!settings) throw fail('Configura Jira primero.');
           const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
           const pipeline = jiraPipeline();
-          if (client instanceof JiraClient && !jiraAccount) jiraAccount = (await client.call('/rest/api/2/myself').catch(() => null))?.displayName ?? null;
-          const result = await collectFilter({ client, settings, tickets: pipeline.tickets, ffmpeg: store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg, busyKey: pipeline.running?.key, onProgress: progress });
-          return json(res, { result, jira: await jiraBoard() });
+          if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(() => null));
+          const result = await collectFilter({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg: store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg, busyKey: pipeline.running?.key, onProgress: progress });
+          return json(res, { result, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-settings') {
           if (store.data.mode === 'demo') throw fail('En el ejemplo la configuración de Jira es fija.');
@@ -483,8 +501,17 @@ const server = http.createServer(async (req, res) => {
           progress({ message: 'Comprobando la conexión con Jira…' });
           const me = await new JiraClient(data.jira, await jiraToken()).call('/rest/api/2/myself')
             .catch(error => { throw Object.assign(fail(`Configuración guardada, pero Jira no aceptó la conexión: ${error.message}`, error.status === 401 ? 401 : 400), { reason: error.reason, field: error.status === 401 ? 'token' : 'url' }); });
-          jiraAccount = me.displayName ?? me.emailAddress ?? me.name ?? null;
-          return json(res, { ...publicState({ operationComplete: true }), jiraAccount });
+          await saveJiraMe(me);
+          return json(res, { ...publicState({ operationComplete: true }), jiraAccount: jiraMe()?.name ?? null });
+        }
+        if (path === '/api/jira-autolock') {
+          // Whether the automatic mode may take this ticket; ▶ on it always works.
+          const pipeline = jiraPipeline(), key = checkKey(input.key);
+          if (typeof input.locked !== 'boolean') throw fail('Valor no válido.');
+          if (!(await pipeline.tickets.get(key))) throw fail('El ticket ya no está disponible.', 404);
+          await pipeline.tickets.update(key, t => ({ ...t, autoLock: input.locked }));
+          if (!input.locked) pipeline.setAuto(pipeline.auto);
+          return json(res, { jira: await jiraBoard() });
         }
         if (path === '/api/jira-logs') {
           if (typeof input.on !== 'boolean') throw fail('Valor no válido.');

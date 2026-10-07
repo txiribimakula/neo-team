@@ -77,13 +77,19 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   const idle = async () => {
     for (let i = 0; i < 200; i++) {
       board = (await get('/api/jira')).jira;
-      if (!board.pipeline.running && board.tickets.every(t => t.status !== 'running' && (t.status !== 'pending' || ['off', 'ask'].includes(board.settings.modes?.[t.stage])))) return;
+      if (!board.pipeline.running && board.tickets.every(t => t.status !== 'running' && (t.status !== 'pending' || t.locked || ['off', 'ask'].includes(board.settings.modes?.[t.stage])))) return;
       await new Promise(done => setTimeout(done, 50));
     }
   };
   await idle();
   assert.deepEqual(board.tickets.filter(t => t.stage === 'fix').map(t => [t.key, t.status, t.iterations]), [['NEO-101', 'pending', 0], ['NEO-102', 'pending', 0]]);
   assert.equal((await post('/api/jira-run', { key: 'NEO-101' })).status, 409, 'nor by hand');
+  // Who each ticket is assigned to; one assigned to someone else is left out of the automatic mode.
+  assert.deepEqual(board.tickets.map(t => [t.key, t.assignee?.name ?? null, t.assignee?.me ?? null, t.locked]), [['NEO-101', 'Cuenta de ejemplo', true, false], ['NEO-102', null, null, false], ['NEO-103', 'Lucía Martín', false, true]]);
+  assert.deepEqual([board.tickets[2].stage, board.tickets[2].status, board.tickets[2].history.length], ['collect', 'pending', 0], 'the automatic mode did not touch it');
+  board = (await post('/api/jira-autolock', { key: 'NEO-103', locked: false })).data.jira;
+  assert.equal(board.tickets[2].locked, false, 'it can be let in');
+  await idle();
   // The agent that gets stuck asks; the ticket waits for the answer.
   let stuck = board.tickets.find(t => t.key === 'NEO-103');
   assert.deepEqual([stuck.stage, stuck.status, stuck.question], ['reproduce', 'blocked', '¿Qué modelo de impresora de red y qué versión de Windows usa el cliente?']);
@@ -130,6 +136,16 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.equal((await post('/api/jira-learnings', { scope: '../x', text: 'a' })).status, 400);
 
   assert.equal((await post('/api/jira-move', { key: 'NEO-103', stage: 'collect', resetIterations: true })).status, 200);
+  // Synchronizing: NEO-101 was closed in Jira and NEO-102 has a new comment with a capture.
+  const synced = await post('/api/jira-sync');
+  assert.equal(synced.status, 200);
+  assert.deepEqual([synced.data.result.closed, synced.data.result.updated], [['NEO-101'], [{ key: 'NEO-102', comments: 1, attachments: 1 }]]);
+  const closed = synced.data.jira.tickets.find(t => t.key === 'NEO-101');
+  assert.deepEqual([closed.archived, closed.closedInJira.status], [true, 'Cerrado'], 'it leaves the board, keeping its files');
+  assert.ok((await readdir(join(directory, 'jira-ejemplo', 'NEO-102', 'adjuntos'))).includes('filtro-atras.png'));
+  assert.match(await readFile(join(directory, 'jira-ejemplo', 'NEO-102', 'comentarios.md'), 'utf8'), /Pasa también al volver con \*\*Atrás\*\*: !\[filtro-atras\.png\]\(adjuntos\/filtro-atras\.png\)/);
+  assert.equal(synced.data.jira.tickets.find(t => t.key === 'NEO-102').stage, 'done', 'the column is kept');
+  assert.deepEqual((await post('/api/jira-sync')).data.result.updated, [], 'nothing new the second time');
   assert.equal((await post('/api/jira-archive', { key: 'NEO-101' })).status, 200);
   board = (await post('/api/jira-auto', { on: false })).data.jira;
   assert.ok(board.tickets.find(t => t.key === 'NEO-101').archived);

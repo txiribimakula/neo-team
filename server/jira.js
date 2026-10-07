@@ -222,6 +222,9 @@ export async function writeAtomic(file, content) {
 }
 
 const person = user => user?.displayName ?? user?.name ?? 'Desconocido';
+// A Jira account as the board keeps it: its id (Cloud accountId, Data Center key or
+// name) to compare it with the connected account, and its name to show it.
+export const accountOf = user => user ? { id: String(user.accountId ?? user.key ?? user.name ?? user.emailAddress ?? user.displayName), name: user.displayName ?? user.name ?? '' } : null;
 const day = value => value ? new Date(value).toISOString().replace('T', ' ').slice(0, 16) : '';
 export const ticketUrl = (settings, key) => `${settings.url}/browse/${encodeURIComponent(key)}`;
 

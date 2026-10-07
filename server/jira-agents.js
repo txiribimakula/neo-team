@@ -8,7 +8,7 @@ import { exec } from 'node:child_process';
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
-import { IMAGE, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
+import { IMAGE, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 
@@ -115,9 +115,14 @@ export const newTicket = meta => ({ ...meta, stage: 'collect', status: 'pending'
 
 // Reads the filter and downloads the tickets that are new or changed in Jira. A
 // ticket keeps its column; one that left the filter stays, marked, on the board.
-export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, onProgress = () => {} }) {
+// Whether the automatic mode leaves a ticket alone: by default when it is assigned
+// to someone else, who is working on it; it can be changed ticket by ticket. It
+// still runs with ▶ on that ticket.
+export const autoLocked = ticket => ticket.autoLock ?? !!(ticket.assignee && !ticket.assignee.me);
+const assigneeOf = (issue, me) => { const account = accountOf(issue.fields?.assignee); return account ? { ...account, me: !!me && account.id === String(me.id) } : null; };
+export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, onProgress = () => {} }) {
   onProgress({ message: 'Consultando el filtro en Jira…' });
-  const { issues, limited } = await client.search(jqlFrom(settings.filter), ['summary', 'status', 'updated', 'priority', 'issuetype'], count => onProgress({ message: `Consultando el filtro en Jira… ${count} tickets` }));
+  const { issues, limited } = await client.search(jqlFrom(settings.filter), ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee'], count => onProgress({ message: `Consultando el filtro en Jira… ${count} tickets` }));
   const found = new Set(issues.map(i => i.key));
   const counts = { found: issues.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
   for (const [index, issue] of issues.entries()) {
@@ -125,16 +130,17 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
     const known = await tickets.get(issue.key);
     const folder = tickets.folder(issue.key);
     const complete = !!(await stat(join(folder, 'descripcion.md')).catch(() => null));
+    const assignee = assigneeOf(issue, me);
     if (known && complete && known.updated === issue.fields?.updated) {
       counts.unchanged++;
-      if (known.inFilter === false) await tickets.update(issue.key, t => ({ ...t, inFilter: true }));
+      if (known.inFilter === false || JSON.stringify(known.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(issue.key, t => ({ ...t, inFilter: true, assignee }));
       continue;
     }
     // The ticket an agent is working on is downloaded again next time.
     if (issue.key === busyKey) { counts.skipped.push(issue.key); continue; }
     onProgress({ message: `Descargando ${issue.key} (${index + 1} de ${issues.length})…`, counts: { ...counts } });
     const meta = await collectTicket({ client, settings, key: issue.key, folder, ffmpeg, onProgress: message => onProgress({ message }) });
-    await tickets.update(issue.key, t => ({ ...(t ?? newTicket({})), ...meta, inFilter: true, collectedAt: new Date().toISOString() }));
+    await tickets.update(issue.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee, inFilter: true, collectedAt: new Date().toISOString() }));
     counts.downloaded++;
   }
   for (const ticket of await tickets.list()) {
@@ -175,6 +181,41 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 `;
   if (!hasBody && !comments.length && !attachments.length) return { outcome: 'blocked', report, question: 'El ticket no tiene descripción, comentarios ni adjuntos. ¿Qué hay que reproducir?', model: null, usage: null };
   return { outcome: 'ok', report, model: null, usage: null };
+}
+
+// Brings the local tickets up to date with Jira: those finished there (status of
+// category Done) leave the board, keeping their files, and those changed there are
+// downloaded again, which brings their new comments and attachments.
+export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, onProgress = () => {} }) {
+  const local = (await tickets.list()).filter(t => !t.archived);
+  const result = { checked: local.length, closed: [], updated: [], missing: [], skipped: [] };
+  const remote = new Map();
+  for (let i = 0; i < local.length; i += 100) {
+    const keys = local.slice(i, i + 100).map(t => t.key);
+    onProgress({ message: `Consultando en Jira ${Math.min(i + 100, local.length)} de ${local.length} tickets…` });
+    const { issues } = await client.search(`key in (${keys.join(', ')})`, ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee']);
+    for (const issue of issues) remote.set(issue.key, issue);
+  }
+  for (const [index, ticket] of local.entries()) {
+    const issue = remote.get(ticket.key);
+    if (!issue) { result.missing.push(ticket.key); continue; }
+    if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
+    const assignee = assigneeOf(issue, me), status = issue.fields?.status;
+    if (status?.statusCategory?.key === 'done') {
+      await tickets.update(ticket.key, t => ({ ...t, archived: true, closedInJira: { status: status.name ?? '', at: new Date().toISOString() }, jiraStatus: status.name ?? t.jiraStatus, assignee }));
+      result.closed.push(ticket.key);
+      continue;
+    }
+    if (issue.fields?.updated === ticket.updated) {
+      if (JSON.stringify(ticket.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(ticket.key, t => ({ ...t, assignee }));
+      continue;
+    }
+    onProgress({ message: `Descargando las novedades de ${ticket.key} (${index + 1} de ${local.length})…` });
+    const meta = await collectTicket({ client, settings, key: ticket.key, folder: tickets.folder(ticket.key), ffmpeg, onProgress: message => onProgress({ message }) });
+    await tickets.update(ticket.key, t => ({ ...t, ...meta, assignee }));
+    result.updated.push({ key: ticket.key, comments: Math.max(0, meta.comments - (ticket.comments ?? 0)), attachments: Math.max(0, meta.attachments - (ticket.attachments ?? 0)) });
+  }
+  return result;
 }
 
 // --- Prompts -----------------------------------------------------------------
@@ -444,7 +485,7 @@ export class JiraPipeline {
     }
     if (!this.auto) return null;
     const modes = (await this.settings()).modes ?? {};
-    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (modes[t.stage] ?? 'auto') === 'auto' && !t.archived && t.inFilter !== false);
+    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (modes[t.stage] ?? 'auto') === 'auto' && !autoLocked(t) && !t.archived && t.inFilter !== false);
     // Collecting costs nothing and takes no time: every pending ticket gets it first.
     return (pending.find(t => stageOf(t.stage)?.programmatic) ?? pending.find(t => t.key === this.lastKey) ?? pending[0])?.key ?? null;
   }

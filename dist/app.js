@@ -383,7 +383,7 @@ async function importWithProgress(target, existing = null, start = null) {
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
-  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status', '/api/jira-collect'].includes(start?.path || existing?.path)) {
+  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status', '/api/jira-collect', '/api/jira-sync'].includes(start?.path || existing?.path)) {
     $('.import-progress-phase', target).textContent = 'Preparando la simulación con datos de ejemplo…';
     $('.import-progress-note', target).textContent = 'Esta operación no contacta con Azure DevOps ni con GitHub.';
   }
@@ -400,7 +400,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/jira-collect', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/jira-collect', '/api/jira-sync', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -535,7 +535,7 @@ async function resumeOperation() {
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
     if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
     if (current.path === '/api/my-iteration') { await loadMyIteration(); tab = 'my-iteration'; render(); }
-    if (current.path === '/api/jira-collect') { tab = 'jira'; render(); startJiraPolling(); }
+    if (['/api/jira-collect', '/api/jira-sync'].includes(current.path)) { tab = 'jira'; render(); startJiraPolling(); }
     if (current.path.startsWith('/api/pr-')) { if (current.path === '/api/pr-review') prUi.reviewId = state.prReviews?.[0]?.id ?? null; tab = 'reviews'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
@@ -1613,6 +1613,18 @@ const actions = {
     const r = data.result;
     toast(`${r.found} tickets en el filtro · ${r.downloaded} descargados${r.left ? ` · ${r.left} ya no están` : ''}${r.limited ? ' · solo los primeros 200' : ''}.`);
   },
+  'jira-sync': async () => {
+    const data = await runOperation('/api/jira-sync', {}, 'Sincronizar con Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : 'Se consultan en Jira los tickets del tablero.');
+    jiraUi.board = data.jira; jiraSeen = ''; render();
+    const r = data.result, news = r.updated.filter(u => u.comments || u.attachments);
+    const parts = [
+      r.closed.length && `${r.closed.length} terminado${r.closed.length === 1 ? '' : 's'} en Jira quitado${r.closed.length === 1 ? '' : 's'} del tablero (${r.closed.join(', ')})`,
+      news.length && `novedades en ${news.map(u => `${u.key}${u.comments ? ` · ${u.comments} comentario${u.comments === 1 ? '' : 's'}` : ''}${u.attachments ? ` · ${u.attachments} adjunto${u.attachments === 1 ? '' : 's'}` : ''}`).join(', ')}`,
+      r.updated.length > news.length && `${r.updated.length - news.length} actualizado${r.updated.length - news.length === 1 ? '' : 's'}`,
+      r.missing.length && `${r.missing.length} ya no existe${r.missing.length === 1 ? '' : 'n'} o no tienes acceso (${r.missing.join(', ')})`,
+    ].filter(Boolean);
+    toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${r.checked} tickets comprobados.`, r.missing.length ? 'warning' : 'info');
+  },
   'jira-run': el => jiraAction('/api/jira-run', { key: el.dataset.key }),
   'jira-mode': el => jiraAction('/api/jira-mode', { stage: el.dataset.stage, mode: el.dataset.mode }),
   'jira-answer': async el => {
@@ -1626,6 +1638,7 @@ const actions = {
     await jiraAction('/api/jira-logs', { on: el.dataset.on === 'true' });
     toast(state.jira.logs ? 'Logs activados: cada paso se publicará como comentario en su ticket de Jira.' : 'Logs desactivados: no se publica nada en Jira.');
   },
+  'jira-autolock': el => jiraAction('/api/jira-autolock', { key: el.dataset.key, locked: el.dataset.locked === 'true' }),
   'jira-auto': el => jiraAction('/api/jira-auto', { on: el.dataset.on === 'true' }),
   'jira-stop': () => jiraAction('/api/jira-stop', {}),
   'jira-archive': el => jiraAction('/api/jira-archive', { key: el.dataset.key, archived: el.dataset.archived === 'true' }),

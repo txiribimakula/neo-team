@@ -5,8 +5,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
-import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown } from '../dist/jira.js';
+import { autoLocked, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
+import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
 
@@ -363,4 +363,27 @@ test('collecting is done by code, without AI: an index of the ticket', async t =
   const ticket = await tickets.get('NEO-5');
   assert.deepEqual([ticket.stage, ticket.history[0].outcome, ticket.history[0].model], ['reproduce', 'ok', null]);
   assert.match(await readFile(join(folder, 'resumen.md'), 'utf8'), /Resumen de NEO-5 \(automático\)/);
+});
+
+test('who a ticket is assigned to is visible, and tickets of others stay out of the automatic mode', async t => {
+  assert.match(assigneeView({ name: 'Lucía Martín', me: false }), /<span class="jira-avatar"[^>]*>LM<\/span>Lucía Martín<\/span>/);
+  assert.match(assigneeView({ name: 'Pablo T', me: true }), /class="jira-assignee me"[\s\S]*Pablo T · tú/);
+  assert.match(assigneeView(null), /Sin asignar/);
+  assert.equal(autoLocked({ assignee: { me: false } }), true, 'assigned to someone else');
+  assert.equal(autoLocked({ assignee: { me: true } }), false);
+  assert.equal(autoLocked({ assignee: null }), false);
+  assert.equal(autoLocked({ assignee: { me: false }, autoLock: false }), false, 'it can be let in');
+  assert.equal(autoLocked({ assignee: null, autoLock: true }), true, 'or kept out by hand');
+
+  const root = await temp(t), tickets = new TicketStore(root), ran = [];
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Otro' }), stage: 'reproduce', assignee: { id: 'x', name: 'Otra', me: false } }));
+  await tickets.update('NEO-2', () => ({ ...newTicket({ summary: 'Mío' }), stage: 'reproduce', assignee: { id: 'yo', name: 'Yo', me: true } }));
+  const pipeline = new JiraPipeline({ tickets, settings: async () => ({ models: {} }), agent: { run: async ({ ticket }) => { ran.push(ticket.key); return { outcome: 'blocked', report: 'r' }; }, abort: async () => {} } });
+  pipeline.setAuto(true);
+  for (let i = 0; i < 50 && (pipeline.looping || !ran.length); i++) await new Promise(done => setTimeout(done, 10));
+  assert.deepEqual(ran, ['NEO-2'], 'the automatic mode only took the ticket that is not someone else\'s');
+  pipeline.auto = false;
+  await pipeline.enqueue('NEO-1');
+  for (let i = 0; i < 50 && pipeline.looping; i++) await new Promise(done => setTimeout(done, 10));
+  assert.deepEqual(ran, ['NEO-2', 'NEO-1'], 'with ▶ on it, it runs');
 });
