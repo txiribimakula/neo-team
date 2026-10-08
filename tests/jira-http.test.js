@@ -104,7 +104,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([board.pipeline.auto, board.pipeline.focus], [false, 'NEO-102']);
   for (let i = 0; i < 200; i++) { board = (await get('/api/jira')).jira; if (!board.pipeline.running && !board.pipeline.focus) break; await new Promise(done => setTimeout(done, 50)); }
   let byKey = Object.fromEntries(board.tickets.map(t => [t.key, t]));
-  assert.deepEqual(byKey['NEO-102'].history.slice(-2).map(h => `${h.stage}:${h.outcome}`), ['fix:fixed', 'verify:not_fixed'], 'it went on to verify');
+  assert.deepEqual(byKey['NEO-102'].history.slice(-3).map(h => `${h.stage}:${h.outcome}`), ['fix:fixed', 'build:built', 'verify:not_fixed'], 'it went on to build and verify');
   assert.deepEqual([byKey['NEO-102'].stage, byKey['NEO-102'].status], ['fix', 'pending'], 'and waits again for approval in fix');
   assert.deepEqual([byKey['NEO-101'].stage, byKey['NEO-101'].iterations], ['fix', 0], 'the rest did nothing');
 
@@ -122,10 +122,10 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([byKey['NEO-101'].stage, byKey['NEO-101'].status], ['done', 'done']);
   assert.deepEqual([byKey['NEO-102'].stage, byKey['NEO-102'].iterations], ['done', 2], 'a failed verification goes back to fix');
   assert.deepEqual([byKey['NEO-103'].stage, byKey['NEO-103'].status], ['done', 'done']);
-  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'reproduce:reproduced', 'fix:fixed', 'verify:not_fixed', 'fix:fixed', 'verify:verified']);
+  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:not_fixed', 'fix:fixed', 'build:built', 'verify:verified']);
   const detail = (await get('/api/jira-ticket?key=NEO-102')).ticket;
-  assert.ok(detail.history.every(h => h.stage === 'collect' ? h.posted === undefined : h.posted === true), 'with logs on every agent step is published (simulated in the example); collecting is not');
-  assert.equal(detail.reports.length, 6);
+  assert.ok(detail.history.every(h => ['collect', 'build'].includes(h.stage) ? h.posted === undefined : h.posted === true), 'with logs on every agent step is published (simulated in the example); collecting and building are not');
+  assert.equal(detail.reports.length, 8);
   assert.match(detail.reports.at(-1).text, /ya no ocurre/);
   assert.ok(detail.files.includes('resumen.md') && detail.files.includes('verificacion-2.md'));
   const learnings = (await get('/api/jira-learnings')).learnings;

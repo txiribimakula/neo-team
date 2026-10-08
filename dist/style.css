@@ -475,7 +475,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-tools{display:inline-flex;gap:6px;flex-wrap:wrap}
 .jira-search{width:220px;max-width:100%;padding:7px 10px;font-size:14px}
 .jira-links{display:inline-flex;gap:8px;margin-left:auto}
-.jira-board{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
+.jira-board{display:grid;grid-template-columns:repeat(6,minmax(180px,1fr));gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
 .jira-column{background:#eef3ef;border-radius:10px;padding:10px;min-width:0}
 .jira-column>header{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .jira-column h2{font-size:15px;margin:0;display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -504,7 +504,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-report summary{display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap}
 .jira-report summary small{color:var(--muted);font-size:12px}
 .jira-files{margin:8px 0 0;padding-left:18px;font-size:13px}
-.pill.outcome-blocked,.pill.outcome-not_reproduced,.pill.outcome-failed,.pill.outcome-not_fixed,.pill.outcome-error{background:#fbe4e1;color:#9a3128}
+.pill.outcome-blocked,.pill.outcome-not_reproduced,.pill.outcome-failed,.pill.outcome-build_failed,.pill.outcome-not_fixed,.pill.outcome-error{background:#fbe4e1;color:#9a3128}
 .pill.outcome-stopped{background:#eef1ec;color:var(--muted)}
 .jira-column-tools{display:flex;gap:6px;align-items:center}.jira-column-tools select.jira-model{flex:1}
 .jira-learn{width:auto;padding:0 7px;gap:4px;display:inline-flex;align-items:center;height:30px}.jira-learn small{font-size:12px;font-variant-numeric:tabular-nums}
@@ -540,7 +540,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
 .jira-tab{border:1px solid transparent;border-bottom:0;background:none;padding:7px 12px;border-radius:8px 8px 0 0;font:inherit;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px}
 .jira-tab::before{content:'';width:7px;height:7px;border-radius:50%;background:#5d9440}
-.jira-tab.outcome-blocked::before,.jira-tab.outcome-not_reproduced::before,.jira-tab.outcome-failed::before,.jira-tab.outcome-not_fixed::before,.jira-tab.outcome-error::before{background:#c2564b}
+.jira-tab.outcome-blocked::before,.jira-tab.outcome-not_reproduced::before,.jira-tab.outcome-failed::before,.jira-tab.outcome-build_failed::before,.jira-tab.outcome-not_fixed::before,.jira-tab.outcome-error::before{background:#c2564b}
 .jira-tab.outcome-stopped::before{background:#b8c3ba}
 .jira-tab[data-tab="ticket"]::before,.jira-tab.is-live::before{display:none}
 .jira-tab[aria-selected="true"]{background:#fff;border-color:var(--line);color:var(--ink)}

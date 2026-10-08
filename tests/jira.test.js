@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
+import { autoLocked, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
 import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
@@ -118,7 +118,10 @@ test('tickets move between columns and back to fix while verification fails', ()
   assert.deepEqual(nextAfter(t, 'reproduce', 'reproduced'), { stage: 'fix', status: 'pending' });
   assert.deepEqual(nextAfter(t, 'reproduce', 'not_reproduced'), { stage: 'reproduce', status: 'pending' });
   assert.equal(nextAfter({ reproduceAttempts: 2 }, 'reproduce', 'not_reproduced').status, 'blocked');
-  assert.deepEqual(nextAfter(t, 'fix', 'fixed'), { stage: 'verify', status: 'pending' });
+  assert.deepEqual(nextAfter(t, 'fix', 'fixed'), { stage: 'build', status: 'pending' });
+  assert.deepEqual(nextAfter(t, 'build', 'built'), { stage: 'verify', status: 'pending' });
+  assert.deepEqual(nextAfter(t, 'build', 'build_failed', 3), { stage: 'fix', status: 'pending' });
+  assert.deepEqual(nextAfter({ iterations: 3 }, 'build', 'build_failed', 3), { stage: 'build', status: 'blocked', note: 'No compila tras 3 correcciones.' });
   assert.deepEqual(nextAfter(t, 'verify', 'not_fixed', 3), { stage: 'fix', status: 'pending' });
   assert.deepEqual(nextAfter({ iterations: 3 }, 'verify', 'not_fixed', 3).status, 'blocked');
   assert.deepEqual(nextAfter({ iterations: 3 }, 'fix', 'failed', 3).status, 'blocked');
@@ -164,12 +167,14 @@ test('prompts carry the lessons, the reports so far and how to drive the app', (
   const fix = stagePrompt({ stage: 'fix', ticket, folder: '/t/NEO-1', files: [], settings, worktree: { path: '/t/NEO-1/codigo', branch: 'neo/NEO-1' }, previous: { verify: '/t/NEO-1/verificacion-1.md' } });
   assert.match(fix, /\/t\/NEO-1\/codigo — a separate git worktree of \/r on branch neo\/NEO-1/);
   assert.match(fix, /previous fix did not pass verification/);
-  assert.match(fix, /Build command \(run it in the code folder\): dotnet build/);
+  assert.match(fix, /Do not build the application: the next step, «Compilar», builds it with `dotnet build`/);
+  assert.match(stagePrompt({ stage: 'fix', ticket: { ...ticket, lastOutcome: 'build_failed' }, folder: '/t/NEO-1', files: [], settings, previous: { build: '/t/NEO-1/compilacion-1.md' } }), /did not build: read the latest build report[\s\S]*Latest build report: \/t\/NEO-1\/compilacion-1\.md|Latest build report: \/t\/NEO-1\/compilacion-1\.md[\s\S]*did not build: read the latest build report/);
+  assert.match(stagePrompt({ stage: 'verify', ticket, folder: '/t/NEO-1', files: [], settings }), /«Compilar» step already built it[\s\S]*do not build again/);
   assert.doesNotMatch(fix, /winapp ui/);
   assert.match(systemMessage('verify'), /neo_learn/);
 });
 
-test('the pipeline checks the build, learns once and stops on request', async t => {
+test('the build is its own step: it runs the command and a failure goes back to fix', async t => {
   const root = await temp(t), tickets = new TicketStore(root);
   await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'fix' }));
   const runs = [];
@@ -179,22 +184,29 @@ test('the pipeline checks the build, learns once and stops on request', async t 
     await options.onLearn('general', 'Compilar con dotnet build');
     return { outcome: 'fixed', report: 'Cambio en A.cs', model: options.model, usage: { inputTokens: 10, outputTokens: 5 } };
   }, abort: async () => {} };
-  const builds = [{ ok: false, code: 1, log: 'error CS1002' }, { ok: true, code: 0, log: 'ok' }];
+  const builds = [{ ok: false, code: 1, log: 'error CS1002' }, { ok: true, code: 0, log: 'ok' }], built = [];
   const pipeline = new JiraPipeline({ tickets, agent, settings: async () => ({ repository: '/r', buildCommand: 'dotnet build', maxIterations: 3, models: {} }),
-    worktree: async () => ({ path: join(root, 'NEO-1', 'codigo'), branch: 'neo/NEO-1' }), build: async () => builds.shift(), models: async () => [{ id: 'claude-opus-4.5' }] });
+    worktree: async () => ({ path: join(root, 'NEO-1', 'codigo'), branch: 'neo/NEO-1' }), build: async (command, cwd) => { built.push([command, cwd]); return builds.shift(); }, models: async () => [{ id: 'claude-opus-4.5' }] });
   await pipeline.runStage('NEO-1');
   let ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.status, ticket.iterations, ticket.lastOutcome], ['fix', 'pending', 1, 'failed'], 'a fix that does not build goes back to fix');
-  assert.match(await readFile(join(root, 'NEO-1', 'solucion-1.md'), 'utf8'), /Compilación comprobada por Neo Team[\s\S]*error CS1002/);
-  assert.equal(await readFile(join(root, 'NEO-1', 'compilacion-1.log'), 'utf8'), 'error CS1002');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.iterations], ['build', 'pending', 1], 'the fix waits for the build step');
+  assert.equal(built.length, 0, 'fixing does not build');
   assert.equal(runs[0].model, 'claude-opus-4.5');
   assert.equal(runs[0].workingDirectory, join(root, 'NEO-1', 'codigo'));
   assert.deepEqual(runs[0].writable, [join(root, 'NEO-1'), join(root, 'NEO-1', 'codigo')]);
   assert.equal(runs[0].customInstructions, true, 'the fix agent follows the repository instructions');
   await pipeline.runStage('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => h.outcome)], ['verify', 2, ['failed', 'fixed']]);
-  assert.match(runs[1].prompt, /Latest fix report: .*solucion-1\.md/);
+  assert.deepEqual(built, [['dotnet build', join(root, 'NEO-1', 'codigo')]], 'the build runs in the worktree, without an agent');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.lastOutcome, runs.length], ['fix', 'pending', 'build_failed', 1], 'a build that fails goes back to fix');
+  assert.match(await readFile(join(root, 'NEO-1', 'compilacion-1.md'), 'utf8'), /No compila \(código 1\)[\s\S]*error CS1002/);
+  assert.equal(await readFile(join(root, 'NEO-1', 'compilacion-1.log'), 'utf8'), 'error CS1002');
+  await pipeline.runStage('NEO-1');
+  assert.match(runs[1].prompt, /did not build: read the latest build report/);
+  assert.match(runs[1].prompt, /Latest build report: .*compilacion-1\.md/);
+  await pipeline.runStage('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => `${h.stage}:${h.outcome}`)], ['verify', 2, ['fix:fixed', 'build:build_failed', 'fix:fixed', 'build:built']]);
   const lessons = await tickets.learnings('general');
   assert.equal(lessons.match(/Compilar con dotnet build/g).length, 1);
 
@@ -207,6 +219,32 @@ test('the pipeline checks the build, learns once and stops on request', async t 
   await pipeline.stop(); await running;
   ticket = await tickets.get('NEO-1');
   assert.deepEqual([ticket.stage, ticket.status, ticket.history.at(-1).outcome], ['verify', 'pending', 'stopped']);
+
+  // A build is stopped too, and without a command it asks for one.
+  await tickets.update('NEO-1', t => ({ ...t, stage: 'build' }));
+  pipeline.build = (command, cwd, { signal }) => new Promise(done => signal.addEventListener('abort', () => done({ ok: false, code: null, log: '', stopped: true })));
+  const building = pipeline.runStage('NEO-1');
+  await new Promise(done => setTimeout(done, 20));
+  await pipeline.stop(); await building;
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.history.at(-1).outcome], ['build', 'pending', 'stopped']);
+  pipeline.settings = async () => ({ repository: '/r', buildCommand: '', maxIterations: 3, models: {} });
+  await pipeline.runStage('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.status], ['build', 'blocked']);
+  assert.match(ticket.question, /comando de compilación/);
+});
+
+test('the build command runs in its folder and stops when asked', async t => {
+  const dir = await temp(t);
+  const ok = await runBuild('node -e "console.log(process.cwd())"', dir);
+  assert.deepEqual([ok.ok, ok.code, ok.stopped], [true, 0, false]);
+  assert.match(ok.log, new RegExp(dir.split('/').at(-1)));
+  assert.deepEqual([(await runBuild('node -e "process.exit(3)"', dir)).ok, (await runBuild('node -e "process.exit(3)"', dir)).code], [false, 3]);
+  const control = new AbortController();
+  const slow = runBuild('node -e "setTimeout(() => {}, 60000)"', dir, { signal: control.signal });
+  setTimeout(() => control.abort(), 50);
+  assert.deepEqual([(await slow).ok, (await slow).stopped], [false, true]);
 });
 
 test('a step the person already did is recorded as theirs and the ticket goes on', async t => {
@@ -222,13 +260,14 @@ test('a step the person already did is recorded as theirs and the ticket goes on
   assert.match(await readFile(join(root, 'NEO-1', 'reproduccion-1.md'), 'utf8'), /hecho por una persona[\s\S]*Lo reproduje con la HP del almacén\.\n$/);
   await pipeline.markDone('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.iterations], ['verify', 1]);
+  assert.deepEqual([ticket.stage, ticket.iterations], ['build', 1]);
   assert.equal(runs.length, 0, 'nothing runs while paused');
   // The verification knows the fix was made by hand.
   await pipeline.enqueue('NEO-1');
   for (let i = 0; i < 50 && (await tickets.get('NEO-1')).stage !== 'done'; i++) await new Promise(done => setTimeout(done, 10));
   assert.match(runs[0].prompt, /latest fix was made by a person/);
   assert.match(runs[0].prompt, /Latest fix report: .*solucion-1\.md/);
+  assert.deepEqual((await tickets.get('NEO-1')).history.map(h => `${h.stage}:${h.outcome}`), ['reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:verified'], 'the example simulates the build');
   await assert.rejects(pipeline.markDone('NEO-1'), /ya está resuelto/);
 });
 

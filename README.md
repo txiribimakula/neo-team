@@ -79,12 +79,12 @@ En el ejemplo, los pull requests, la revisión y la publicación se simulan: no 
 
 ## Tickets de Jira
 
-Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **Recolectar → Reproducir → Solucionar → Verificar → Resueltos**; si la verificación falla vuelve a Solucionar con el informe del fallo, hasta el número de **iteraciones máximas** configurado. No depende de Azure DevOps: en modo **Real** se entra desde Inicio aunque Azure no esté conectado.
+Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **Recolectar → Reproducir → Solucionar → Compilar → Verificar → Resueltos**; si no compila o la verificación falla vuelve a Solucionar con el registro o el informe del fallo, hasta el número de **iteraciones máximas** configurado. No depende de Azure DevOps: en modo **Real** se entra desde Inicio aunque Azure no esté conectado.
 
 **Conectar Jira.** Con el selector de la cabecera en **Real**, abre **Tickets de Jira**. La primera vez la sección es el formulario (después, **Configuración**):
 
 - **Jira:** URL (`https://empresa.atlassian.net` o la de Data Center), tipo, correo de la cuenta (Cloud), token y **filtro** (su número, su URL con `?filter=` o `?jql=`, o una consulta JQL; los filtros del sistema como `?filter=-1`, «Mis incidencias abiertas», se traducen a su consulta). El token es un [API token de Atlassian](https://id.atlassian.com/manage-profile/security/api-tokens) (Cloud, junto con el correo) o un token de acceso personal (Data Center: Perfil → Tokens de acceso personal). Se guarda solo en `.neo-team/jira-token` con permisos privados y nunca se envía a la interfaz; `NEO_TEAM_JIRA_TOKEN` lo sustituye.
-- **Aplicación:** repositorio local, rama base, comando de compilación y cómo arrancar la aplicación. Los dos comandos son opcionales: si faltan, el agente los averigua y los guarda como aprendizaje.
+- **Aplicación:** repositorio local, rama base, comando de compilación y cómo arrancar la aplicación. El comando de compilación lo necesita el paso Compilar; el de arrancar es opcional: si falta, el agente lo averigua y lo guarda como aprendizaje.
 - **Carpeta de tickets:** por defecto `.neo-team/jira/`.
 
 **Conectar** guarda y comprueba al momento la conexión con la cuenta del token; la barra muestra con qué cuenta está conectado, y si Jira la rechaza lo indica y la configuración queda guardada para corregirla. GitHub Copilot usa la misma sesión que la revisión de PRs: si no hay sesión, la sección muestra cómo iniciarla y **Copilot** en la barra la vuelve a comprobar.
@@ -93,18 +93,19 @@ Un tablero cuyas columnas son agentes de GitHub Copilot. Cada ticket pasa por **
 
 - `descripcion.md`: campos, descripción y lista de adjuntos; `comentarios.md`: los comentarios en orden. El formato de Jira se convierte a Markdown y las referencias a adjuntos (`!captura.png!`, `[^video.mp4]`) apuntan a la copia local.
 - `adjuntos/`: cada adjunto con su nombre de Jira, que es como lo citan los textos (si dos se llaman igual, el más antiguo lleva su id). De cada vídeo se extrae un fotograma cada 2 segundos en `adjuntos/<vídeo>.fotogramas/` si `ffmpeg` está instalado, para que los agentes puedan verlo.
-- Los informes de cada agente (`resumen.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`), `evidencias/`, `reproducir.ps1`, `compilacion-N.log` y `estado.json`.
+- Los informes de cada agente (`resumen.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`), el resultado de cada compilación (`compilacion-N.md` y su registro `compilacion-N.log`), `evidencias/`, `reproducir.ps1` y `estado.json`.
 
 **Sincronizar** consulta en Jira los tickets que ya están en el tablero: los terminados allí (estado de categoría *Done*) se quitan del tablero, conservando su carpeta y su rama, y aparecen en «Mostrar quitados» como «Cerrado en Jira»; los que han cambiado se vuelven a descargar, con sus comentarios y adjuntos nuevos, sin moverlos de columna. También actualiza a quién están asignados. Avisa de los que ya no existen o a los que no tienes acceso.
 
 **Asignado.** Cada tarjeta muestra a quién está asignado el ticket en Jira («tú» si es tu cuenta, o «Sin asignar»). Un ticket asignado a otra persona queda fuera del modo automático: solo se ejecuta con ▶ sobre ese ticket. El candado de la tarjeta (o «Incluir en automático» / «Solo manual» en su detalle) cambia esto ticket a ticket.
 
-**Agentes y modelos.** Recolectar no usa IA. Las demás columnas tienen su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
+**Agentes y modelos.** Recolectar y Compilar no usan IA. Las demás columnas tienen su agente y un selector de modelo; **Auto** elige el más reciente de tu cuenta de Copilot según la dificultad: medio para reproducir y verificar (Sonnet) y avanzado para solucionar (Opus).
 
 - **Recolectar (sin IA):** se hace con código y no consume tokens. Escribe `resumen.md`, un índice del ticket: los pasos que enumeran la descripción y los comentarios, los comentarios y cada adjunto con su tipo y sus fotogramas. Un ticket sin descripción, comentarios ni adjuntos se queda con una pregunta en vez de llegar a un agente.
 - **Reproducir:** entiende el ticket (descripción, comentarios, imágenes y fotogramas), arranca la versión actual y la maneja con [winapp CLI](https://github.com/microsoft/winappcli) (`winapp ui inspect`, `invoke`, `set-value`, `wait-for`, `screenshot`, `record`…). Guarda evidencias y un `reproducir.ps1` que repite los pasos.
-- **Solucionar:** trabaja en una copia aparte del repositorio (`git worktree` en `<ticket>/codigo`, rama `neo/<ticket>`), así que no toca tu clon ni tus cambios. Busca la causa, corrige y compila. Si hay comando de compilación, Neo Team lo vuelve a ejecutar: si falla, el ticket vuelve a Solucionar con el registro. No hace commits.
-- **Verificar:** arranca la compilación corregida, repite `reproducir.ps1` y comprueba lo relacionado.
+- **Solucionar:** trabaja en una copia aparte del repositorio (`git worktree` en `<ticket>/codigo`, rama `neo/<ticket>`), así que no toca tu clon ni tus cambios. Busca la causa y corrige, sin compilar. No hace commits.
+- **Compilar (sin IA):** ejecuta el comando de compilación en la copia del ticket y guarda el resultado y el registro. Si compila pasa a Verificar; si no, vuelve a Solucionar con el registro, que el agente lee primero. Con su semáforo en ámbar los tickets corregidos esperan a que pulses ▶, así decides cuándo se compila; ■ detiene la compilación. Sin comando configurado se queda esperando con una pregunta.
+- **Verificar:** arranca lo que ha compilado Compilar, sin volver a compilar, repite `reproducir.ps1` y comprueba lo relacionado.
 
 **Semáforo de cada columna.** Verde (**autopilot**): su agente actúa solo. Ámbar (**avisar**): los tickets esperan en la columna marcados «Espera tu OK» y ▶ aprueba ese paso. Rojo (**nada**): su agente no actúa, ni siquiera con ▶.
 

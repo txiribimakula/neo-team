@@ -8,13 +8,14 @@ const clock = at => new Date(at).toLocaleTimeString('es', { hour: '2-digit', min
 const minutes = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)} min ${s % 60} s`; };
 
 export const COLUMNS = [
-  { id: 'collect', name: 'Recolectar', automatic: true },
+  { id: 'collect', name: 'Recolectar', automatic: 'Se hace con código a partir de lo descargado: no usa IA ni consume tokens' },
   { id: 'reproduce', name: 'Reproducir', tier: 'Medio' },
   { id: 'fix', name: 'Solucionar', tier: 'Avanzado' },
+  { id: 'build', name: 'Compilar', automatic: 'Ejecuta el comando de compilación en la copia del ticket: no usa IA ni consume tokens. Si no compila, vuelve a Solucionar con el registro' },
   { id: 'verify', name: 'Verificar', tier: 'Medio' },
   { id: 'done', name: 'Resueltos' },
 ];
-export const OUTCOMES = { ok: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', verified: 'Verificado', not_fixed: 'Sigue fallando', stopped: 'Detenido', error: 'Error' };
+export const OUTCOMES = { ok: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', built: 'Compila', build_failed: 'No compila', verified: 'Verificado', not_fixed: 'Sigue fallando', stopped: 'Detenido', error: 'Error' };
 // Traffic light of each column: what its agent may do.
 const LIGHTS = [['off', 'Nada: el agente no actúa'], ['ask', 'Avisar: espera tu aprobación antes de actuar'], ['auto', 'Autopilot: actúa solo']];
 const STATUS = { pending: 'Pendiente', running: 'En curso', blocked: 'Necesita ayuda', done: 'Resuelto' };
@@ -145,7 +146,7 @@ function boardView(board, copilot, showArchived, drafts, search = '') {
     const mode = board.settings.modes?.[column.id] ?? 'auto';
     const lights = `<span class="jira-light mode-${mode}" role="group" aria-label="Semáforo de ${escape(column.name)}">${LIGHTS.map(([id, title]) => `<button data-action="jira-mode" data-stage="${column.id}" data-mode="${id}" class="light-${id}" aria-pressed="${mode === id}" title="${escape(title)}" aria-label="${escape(title)}"></button>`).join('')}</span>`;
     const steps = column.id !== 'done';
-    return `<section class="jira-column${active ? ' is-active' : ''} mode-${steps ? mode : 'auto'}" aria-label="${escape(column.name)}"><header><h2>${escape(column.name)} <span class="jira-column-count">${steps ? lights : ''}<span class="count">${tickets.length}</span></span></h2>${column.tier ? `<div class="jira-column-tools">${modelSelect(column, board.settings, board.defaults, copilot)}<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg><small>${board.lessons?.[column.id] ?? 0}</small></button></div>` : column.automatic ? '<div class="jira-column-tools"><span class="pill jira-no-ai" title="Se hace con código a partir de lo descargado: no usa IA ni consume tokens">Sin IA</span></div>' : ''}</header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, steps ? mode : 'auto', drafts, board.settings.demo)).join('')}</div></section>`;
+    return `<section class="jira-column${active ? ' is-active' : ''} mode-${steps ? mode : 'auto'}" aria-label="${escape(column.name)}"><header><h2>${escape(column.name)} <span class="jira-column-count">${steps ? lights : ''}<span class="count">${tickets.length}</span></span></h2>${column.tier ? `<div class="jira-column-tools">${modelSelect(column, board.settings, board.defaults, copilot)}<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg><small>${board.lessons?.[column.id] ?? 0}</small></button></div>` : column.automatic ? `<div class="jira-column-tools"><span class="pill jira-no-ai" title="${escape(column.automatic)}">Sin IA</span></div>` : ''}</header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, steps ? mode : 'auto', drafts, board.settings.demo)).join('')}</div></section>`;
   }).join('');
   const error = board.pipeline?.error ? `<p class="inline-error">${escape(board.pipeline.error)}</p>` : '';
   // Without a Copilot session the agents cannot work: how to sign in, as in pull request reviews.
@@ -174,7 +175,7 @@ function settingsView(settings) {
     <div class="jira-settings-grid">
       ${field('repository', 'Repositorio local', s.repository, 'placeholder="C:\\repos\\aplicacion" title="Cada corrección se hace en una copia aparte (git worktree) en la rama neo/<ticket>"')}
       ${field('baseBranch', 'Rama base', s.baseBranch, 'placeholder="HEAD"')}
-      ${field('buildCommand', 'Compilar', s.buildCommand, 'placeholder="dotnet build App.sln -c Debug" title="Se ejecuta en la copia del ticket. Vacío: el agente lo averigua y lo aprende"')}
+      ${field('buildCommand', 'Compilar', s.buildCommand, 'placeholder="dotnet build App.sln -c Debug" title="Lo ejecuta el paso Compilar en la copia del ticket"')}
       ${field('launchCommand', 'Arrancar', s.launchCommand, 'placeholder="winapp run bin\\Debug\\App.exe --detach" title="Vacío: el agente lo averigua y lo aprende"')}
       ${field('maxIterations', 'Iteraciones máximas', s.maxIterations, 'type="number" min="1" max="10" required title="Correcciones que se intentan antes de pedir ayuda"')}
     </div>
@@ -282,7 +283,7 @@ const withoutTitle = text => String(text ?? '').replace(/^# [^\n]*\n+/, '');
 // that step, and a tab with the ticket itself. The answer field shows while it is stuck.
 const stepFiles = (entry, files) => files.filter(f => ({
   reproduce: f.startsWith('evidencias/') || f === 'reproducir.ps1',
-  fix: f === `compilacion-${entry.number}.log`,
+  build: f === `compilacion-${entry.number}.log`,
   verify: f.startsWith('evidencias/'),
 })[entry.stage]);
 const fileList = files => files.length ? `<ul class="jira-files">${files.map(f => `<li><code>${escape(f)}</code></li>`).join('')}</ul>` : '';
