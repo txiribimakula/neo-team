@@ -1143,6 +1143,7 @@ function render() {
   const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', reviews: 'Revisión de PRs', jira: 'Tickets de Jira' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
+  syncJiraDesktop();
   const demo = state.mode === 'demo';
   document.querySelectorAll('.mode-toggle button').forEach(button => {
     button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
@@ -1516,9 +1517,27 @@ async function saveFinding(el, change) {
 }
 // Jira board: read from the server, redrawn only when it changes and never while a
 // field of the section has the focus, so nothing jumps under the cursor.
+function syncJiraDesktop() {
+  const run = tab === 'jira' && ['reproduce', 'verify'].includes(jiraUi.board?.pipeline?.running?.stage) ? jiraUi.board.pipeline.running : null;
+  document.body.classList.toggle('jira-desktop', !!run);
+  if (run?.desktopTitle) document.title = run.desktopTitle;
+  else if (tab === 'jira') document.title = 'Tickets de Jira · Neo Team';
+}
+let jiraFocusedRun = null;
 function renderJira() {
+  syncJiraDesktop();
+  const run = document.body.classList.contains('jira-desktop') ? jiraUi.board?.pipeline?.running : null;
+  const focusRun = run ? `${run.key}:${run.startedAt}` : null;
+  const newRun = focusRun && focusRun !== jiraFocusedRun;
+  jiraFocusedRun = focusRun;
+  const log = $('#app .jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
+  const controlsOpen = $('#app .jira-other-tickets')?.open;
   const focus = document.activeElement?.dataset?.focus;
   $('#app').innerHTML = jiraView(state, jiraUi, prUi.copilot);
+  const nextLog = $('#app .jira-activity ol');
+  if (nextLog && logScroll > 0 && !newRun) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
+  if (controlsOpen && $('#app .jira-other-tickets')) $('#app .jira-other-tickets').open = true;
+  if (newRun) window.scrollTo({ top: 0 });
   restoreJiraForm();
   if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
 }
@@ -1546,9 +1565,12 @@ function refreshTicket() {
   const open = new Set([...current.querySelectorAll('details[data-part]')].map(d => [d.dataset.part, d.open]).filter(([, isOpen]) => isOpen).map(([part]) => part));
   const closed = new Set([...current.querySelectorAll('details[data-part]')].filter(d => !d.open).map(d => d.dataset.part));
   const body = $('.modal-body', modal), scroll = body?.scrollTop ?? 0;
+  const log = current.querySelector('.jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
   current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl);
   $('#jira-ticket').querySelectorAll('details[data-part]').forEach(d => { if (open.has(d.dataset.part)) d.open = true; if (closed.has(d.dataset.part)) d.open = false; });
   if (body) body.scrollTop = scroll;
+  const nextLog = $('#jira-ticket .jira-activity ol');
+  if (nextLog && logScroll > 0) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
 }
 // The close event arrives a moment later: if the popup was opened again meanwhile, it stays.
 modal.addEventListener('close', () => { if (jiraUi.detail && !modal.open) { jiraUi.detail = null; syncUrl(); } });
@@ -1566,6 +1588,14 @@ async function loadJira() {
     data = await response.json().catch(() => ({}));
   }
   jiraUi.board = response.ok ? data.jira : { error: data.error || 'No se pudo leer el tablero de Jira.' };
+  syncJiraDesktop();
+  const run = jiraUi.board.pipeline?.running;
+  if (ticketOpen() && ['reproduce', 'verify'].includes(run?.stage) && jiraUi.detail.key !== run.key) {
+    await loadJiraTicket(run.key);
+    jiraUi.ticketTab = null;
+    $('#modal-title').textContent = `${run.key} · ${jiraUi.detail.summary ?? ''}`;
+    syncUrl();
+  }
   const ticket = ticketOpen() && jiraUi.board.tickets?.find(t => t.key === jiraUi.detail?.key);
   if (ticket && ticket.changedAt !== jiraUi.detail.changedAt) await loadJiraTicket(ticket.key);
 }
@@ -1679,6 +1709,11 @@ const actions = {
     await jiraAction('/api/jira-answer', { key, answer });
     delete jiraUi.answers[key]; jiraSeen = ''; render();
     toast(`Respuesta guardada. ${key} se retoma.`);
+  },
+  'jira-done': async el => {
+    const key = el.dataset.key;
+    await jiraAction('/api/jira-done', { key, note: (jiraUi.answers[key] ?? '').trim() });
+    delete jiraUi.answers[key]; jiraSeen = ''; render();
   },
   'jira-logs': async el => {
     await jiraAction('/api/jira-logs', { on: el.dataset.on === 'true' });
@@ -1963,6 +1998,7 @@ document.addEventListener('input',event=>{
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
+  if(event.target.dataset.jiraSearch!==undefined){const {selectionStart,selectionEnd}=event.target;jiraUi.search=event.target.value;renderJira();$('[data-jira-search]')?.setSelectionRange(selectionStart,selectionEnd);}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}

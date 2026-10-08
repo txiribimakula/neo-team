@@ -473,6 +473,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .jira-auto{min-width:116px}
 .jira-tools{display:inline-flex;gap:6px;flex-wrap:wrap}
+.jira-search{width:220px;max-width:100%;padding:7px 10px;font-size:14px}
 .jira-links{display:inline-flex;gap:8px;margin-left:auto}
 .jira-board{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
 .jira-column{background:#eef3ef;border-radius:10px;padding:10px;min-width:0}
@@ -579,6 +580,8 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-avatar{flex-shrink:0;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font-size:9.5px;font-weight:700;background:#dfe6f3;color:#3a4f7a}
 .jira-assignee.me .jira-avatar{background:var(--green);color:#fff}
 .jira-assignee.unassigned{color:var(--muted);font-weight:500}.jira-assignee.unassigned .jira-avatar{background:#eef1ee;color:var(--muted)}
+.jira-done{color:#47772f}
+.jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-foot .jira-done{width:22px;min-width:22px;height:22px}
 .jira-lock{width:24px;height:24px;border-color:transparent;background:transparent;color:#a3ada6}
 .jira-lock:hover{border-color:#d5dfce;background:#fff}
 .jira-lock.locked{color:#8a5a12;background:#fff4dc;border-color:#ecd49c}
@@ -602,3 +605,34 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .assistant-asked{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .assistant-reply{margin:4px 0 0;white-space:pre-line;overflow-wrap:anywhere}.assistant-answer .inline-error{margin:4px 0 0;white-space:pre-line}
 .assistant-changes{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:13px;color:#47772f}.assistant-changes li:before{content:'✓ ';font-weight:700}
+
+/* A narrow browser remains useful while the application occupies the right. */
+.jira-desktop-focus{display:flex;flex-direction:column;gap:12px;min-width:0}
+.jira-desktop-focus>h2{font-size:17px;margin:0}
+.jira-desktop-focus>.jira-card{cursor:pointer}
+.jira-activity{border:1px solid var(--line);border-radius:8px;background:#fff;min-width:0;overflow:hidden}
+.jira-activity>header{display:flex;flex-wrap:wrap;gap:6px 12px;padding:10px;font-size:13px;border-bottom:1px solid var(--line)}
+.jira-activity>header>span{color:var(--muted)}
+.jira-activity ol{list-style:none;margin:0;padding:0;max-height:52vh;overflow:auto;overflow-anchor:none}
+.jira-activity li{padding:8px 10px;border-bottom:1px solid #edf0ed;font-size:12px}
+.jira-activity time{color:var(--muted);font-variant-numeric:tabular-nums}
+.jira-activity pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.jira-activity .log-warning{background:#fff4e9;color:#8a3d18}
+.jira-activity .log-result{border-left:3px solid #5d9440}
+.jira-other-tickets>summary{cursor:pointer;font-size:13px;margin:8px 0}
+.jira-desktop .jira-page,.jira-desktop .jira-detail{min-width:0;max-width:100%}
+.jira-desktop .jira-board{grid-template-columns:minmax(0,1fr);min-width:0;overflow:visible}
+@media(max-width:650px){
+  body.jira-desktop .topbar{height:auto;min-height:44px;padding:8px;flex-wrap:wrap;gap:8px}
+  body.jira-desktop .workspace-label,body.jira-desktop .divider,body.jira-desktop #sync-button{display:none}
+  body.jira-desktop main{padding:10px 8px}
+  body.jira-desktop .mode-banner{padding:6px 8px;font-size:11px}
+  body.jira-desktop dialog#modal{width:calc(100vw - 8px);max-width:calc(100vw - 8px);max-height:calc(100dvh - 8px);margin:4px;padding:0}
+  body.jira-desktop .modal-body,body.jira-desktop .modal-head,body.jira-desktop .modal-footer{padding:10px}
+  body.jira-desktop #modal-title{overflow-wrap:anywhere;font-size:16px}
+  body.jira-desktop .jira-detail-actions>span{gap:5px}
+  body.jira-desktop .jira-tab{padding:6px;font-size:12px}
+  body.jira-desktop .jira-toolbar{flex-wrap:wrap}
+  body.jira-desktop .jira-tools{flex-wrap:wrap;min-width:0}
+  body.jira-desktop .jira-live{white-space:normal;overflow-wrap:anywhere}
+}

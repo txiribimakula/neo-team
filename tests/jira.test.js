@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
 import { autoLocked, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
-import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView } from '../dist/jira.js';
+import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
 
@@ -209,6 +209,29 @@ test('the pipeline checks the build, learns once and stops on request', async t 
   assert.deepEqual([ticket.stage, ticket.status, ticket.history.at(-1).outcome], ['verify', 'pending', 'stopped']);
 });
 
+test('a step the person already did is recorded as theirs and the ticket goes on', async t => {
+  const root = await temp(t), tickets = new TicketStore(root);
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'reproduce', status: 'blocked', question: '¿Qué impresora?', note: 'El agente necesita ayuda' }));
+  const runs = [];
+  const agent = { run: async options => { runs.push(options); return { outcome: 'verified', report: 'Ya no falla', model: null, usage: null }; }, abort: async () => {} };
+  const pipeline = new JiraPipeline({ tickets, agent, demo: true, settings: async () => ({ repository: '/r', maxIterations: 3, models: {} }) });
+  await pipeline.markDone('NEO-1', '  Lo reproduje con la HP del almacén.  ');
+  let ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.question, ticket.note, ticket.reproduceAttempts], ['fix', 'pending', null, null, 1]);
+  assert.deepEqual(ticket.history.map(h => [h.stage, h.outcome, h.by, h.report]), [['reproduce', 'reproduced', 'person', 'reproduccion-1.md']]);
+  assert.match(await readFile(join(root, 'NEO-1', 'reproduccion-1.md'), 'utf8'), /hecho por una persona[\s\S]*Lo reproduje con la HP del almacén\.\n$/);
+  await pipeline.markDone('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.iterations], ['verify', 1]);
+  assert.equal(runs.length, 0, 'nothing runs while paused');
+  // The verification knows the fix was made by hand.
+  await pipeline.enqueue('NEO-1');
+  for (let i = 0; i < 50 && (await tickets.get('NEO-1')).stage !== 'done'; i++) await new Promise(done => setTimeout(done, 10));
+  assert.match(runs[0].prompt, /latest fix was made by a person/);
+  assert.match(runs[0].prompt, /Latest fix report: .*solucion-1\.md/);
+  await assert.rejects(pipeline.markDone('NEO-1'), /ya está resuelto/);
+});
+
 test('each ticket is fixed in its own worktree and branch', async t => {
   const root = await temp(t), repo = join(root, 'repo');
   const run = (...args) => execFileSync('git', args, { cwd: repo });
@@ -269,7 +292,24 @@ test('the ticket popup has a tab per completed step and the answer field while s
   const first = ticketDetail(board, detail, false, {}, 'step-0');
   assert.match(first, /Resumen del ticket/);
   assert.match(first, /En Jira/, 'and whether it was published in Jira');
+  assert.match(html, /data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, 'the step can be marked as done by hand');
+  const byHand = ticketDetail(board, { ...detail, history: [{ ...detail.history[0], by: 'person', model: null }] }, false, {}, 'step-0');
+  assert.match(byHand, /Hecho por ti/);
+  const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
+  assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3"/, 'and from its card');
   assert.match(ticketDetail(board, detail, false, {}, 'ticket'), /data-part="description" open/);
+});
+
+test('the board is filtered by key or title while typing', () => {
+  const ticket = { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver' };
+  for (const search of ['', 'neo-102', '102', 'CLIENTES', 'filtro volver', 'NEO clientés']) assert.ok(matchesTicket(ticket, search), search);
+  for (const search of ['NEO-103', 'impresora', 'filtro impresora']) assert.ok(!matchesTicket(ticket, search), search);
+  const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
+  const board = { settings: state.jira, pipeline: {}, tickets: [{ ...ticket, stage: 'reproduce', status: 'pending' }, { key: 'NEO-103', summary: 'Error al imprimir', stage: 'fix', status: 'pending' }] };
+  const html = jiraView(state, { view: 'board', board, search: 'impri' }, null);
+  assert.match(html, /<input type="search" class="jira-search" data-jira-search data-focus="jira-search" value="impri"/);
+  assert.match(html, /Error al imprimir/);
+  assert.doesNotMatch(html, /El filtro de clientes/, 'in every column');
 });
 
 test('with logs on, each step is published as a Jira comment', async () => {

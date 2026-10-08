@@ -94,7 +94,7 @@ async function jiraBoard() {
   const settings = publicJira();
   if (!settings) return { settings: null };
   const pipeline = jiraPipeline();
-  const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
+  const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
   const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
   return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, demo: true } : await detectJiraTools() };
 }
@@ -186,7 +186,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-done', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -558,6 +558,13 @@ const server = http.createServer(async (req, res) => {
           if (ticket.status !== 'blocked') throw fail('Este ticket no está esperando una respuesta.', 409);
           await pipeline.tickets.update(key, t => ({ ...t, status: 'pending', note: null, question: null, answers: [...(t.answers ?? []), { at: new Date().toISOString(), stage: t.stage, question: t.question ?? null, answer }] }));
           if ((jiraSettings().modes?.[ticket.stage] ?? 'auto') !== 'off') await pipeline.enqueue(key);
+          return json(res, { jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-done') {
+          // The person already did the step of the ticket's column: it goes on to the next.
+          const note = input.note ?? '';
+          if (typeof note !== 'string' || note.length > 10000) throw fail('La nota no puede superar 10000 caracteres.');
+          await jiraPipeline().markDone(checkKey(input.key), note);
           return json(res, { jira: await jiraBoard() });
         }
         if (['/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-move', '/api/jira-archive', '/api/jira-learnings', '/api/jira-open'].includes(path)) {

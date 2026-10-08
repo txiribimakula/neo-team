@@ -5,6 +5,7 @@
 // for the next tickets and reports an outcome that moves the ticket on, or back to
 // fix while the verification fails, up to the configured number of iterations.
 import { exec } from 'node:child_process';
+import { JiraDesktop, desktopStage, desktopTitle, desktopTool } from './jira-desktop.js';
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
@@ -227,6 +228,8 @@ export const WINAPP_GUIDE = `Drive the application only through the winapp CLI (
 - Act: prefer \`winapp ui invoke <selector> -a <app>\` and \`winapp ui set-value <selector> <value> -a <app>\`; use \`winapp ui click\`, \`winapp ui send-keys\` or \`winapp ui scroll\` only when those cannot do it.
 - Prove: \`winapp ui screenshot -a <app>\` and \`winapp ui record\`. Add \`--json\` to read results. Run \`winapp ui <command> --help\` when unsure of an option.
 - Give the same WINAPP_UI_WORKFLOW_ID to every command of one sequence and run \`winapp ui yield\` when the sequence ends.
+- Immediately after launching or selecting the application, obtain its actual process ID (PID) from window inspection or Get-Process and call neo_desktop. Register again after every restart or when switching application processes. Neo Team continuously keeps its browser at minimum width on the left and that application on the right; do not maximize or rearrange either window.
+- Before each meaningful UI step, explain in Spanish what you are trying and what you expect; after it, describe what actually happened, any wait or failure, and the evidence file. Never include credentials or personal data in progress messages.
 - Save screenshots and recordings that prove what you saw in the evidencias/ folder of the ticket. Close the application when you finish.`;
 
 export function systemMessage(stage) {
@@ -274,7 +277,7 @@ ${previous.verify && ticket.lastOutcome === 'not_fixed' ? 'The previous fix did 
 Find the root cause, make the smallest correct change following the conventions of the code, and build until it compiles without errors. Do not commit.
 Your report: cause, changed files and why, build result, risks and what the verification should check.
 Outcome "fixed" only when it builds; "failed" when you could not fix it or it does not build (explain why); "blocked" when you need a decision or information from a person.`,
-    verify: `Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one).
+    verify: `${ticket.history?.findLast(h => h.stage === 'fix')?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one).
 ${launch}
 ${build}
 ${WINAPP_GUIDE}
@@ -370,7 +373,8 @@ const learnTool = (stage, onLearn) => ({
   },
 });
 
-const short = value => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+export const activityText = value => String(value ?? '').replace(/(Bearer\s+)[^\s"']+/gi, '$1[oculto]').replace(/((?:token|password|secret|authorization|api[_-]?key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[oculto]').slice(0, 2000);
+const short = value => activityText(value).replace(/\s+/g, ' ').trim().slice(0, 600);
 export function describeTool(data) {
   const args = data?.arguments ?? {};
   const detail = args.command ?? args.path ?? args.file_path ?? args.pattern ?? args.scope ?? args.outcome ?? '';
@@ -382,7 +386,7 @@ export function describeTool(data) {
 // rejected; the session is deleted at the end.
 export class CopilotAgent {
   constructor({ load = () => import('@github/copilot-sdk') } = {}) { this.load = load; }
-  async run({ stage, system, prompt, model, workingDirectory, writable, attachments = [], customInstructions = false, onLearn, onActivity = () => {} }) {
+  async run({ stage, system, prompt, model, workingDirectory, writable, attachments = [], customInstructions = false, desktop = null, onLearn, onActivity = () => {} }) {
     const { CopilotClient } = await this.load();
     const client = new CopilotClient({ workingDirectory, logLevel: 'error' });
     this.client = client; this.aborted = false;
@@ -394,7 +398,7 @@ export class CopilotAgent {
       session = await client.createSession({
         ...(model ? { model } : {}), clientName: 'neo-team', workingDirectory, streaming: true,
         systemMessage: { mode: 'append', content: system },
-        tools: [reportTool(stage, value => { result = value; }), learnTool(stage, onLearn)],
+        tools: [reportTool(stage, value => { result = value; }), learnTool(stage, onLearn), ...(desktop ? [desktopTool(desktop)] : [])],
         excludedTools: ['mcp:*'],
         onPermissionRequest: request => {
           const decision = permissionFor(request, { writable, cwd: workingDirectory });
@@ -406,9 +410,24 @@ export class CopilotAgent {
       });
       this.session = session;
       session.on('assistant.intent', event => onActivity({ kind: 'info', message: short(event.data?.intent) }));
-      session.on('tool.execution_start', event => { if (!['report_intent'].includes(event.data?.toolName)) onActivity({ kind: 'tool', message: describeTool(event.data) }); });
+      const tools = new Map();
+      session.on('assistant.message', event => { if (event.data?.content?.trim()) onActivity({ kind: 'info', message: activityText(event.data.content) }); });
+      session.on('tool.execution_start', ({ data }) => {
+        if (data?.toolName === 'report_intent') return;
+        const description = describeTool(data);
+        tools.set(data.toolCallId, { description, at: Date.now() });
+        onActivity({ kind: 'tool', message: `Iniciando ${description}` });
+      });
+      session.on('tool.execution_progress', ({ data }) => onActivity({ kind: 'tool', message: activityText(data?.progressMessage) }));
+      session.on('tool.execution_complete', ({ data }) => {
+        const tool = tools.get(data?.toolCallId);
+        if (!tool) return;
+        tools.delete(data.toolCallId);
+        const detail = data.error?.message ?? data.result?.content;
+        onActivity({ kind: data.success ? 'result' : 'warning', message: `${data.success ? 'Completado' : 'Falló'} ${tool.description} · ${((Date.now() - tool.at) / 1000).toFixed(1)} s${detail ? `\n${activityText(detail)}` : ''}` });
+      });
       session.on('assistant.usage', event => { used = event.data?.model ?? used; usage = { inputTokens: usage.inputTokens + (event.data?.inputTokens ?? 0), outputTokens: usage.outputTokens + (event.data?.outputTokens ?? 0) }; });
-      session.on('session.error', event => { sessionError = event.data?.message ?? 'Error de GitHub Copilot.'; });
+      session.on('session.error', event => { sessionError = event.data?.message ?? 'Error de GitHub Copilot.'; onActivity({ kind: 'warning', message: sessionError }); });
       onActivity({ kind: 'info', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'} · cuenta ${auth.login ?? 'de GitHub'}` });
       await session.sendAndWait({ prompt, attachments }, stageOf(stage).timeoutMs);
       if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
@@ -443,15 +462,15 @@ export class CopilotAgent {
 // Runs one step at a time (the desktop is driven by one agent at a time). With
 // «automático» it keeps taking pending tickets, finishing the current one first.
 export class JiraPipeline {
-  constructor({ tickets, agent, settings, build = runBuild, worktree = ensureWorktree, models = async () => [], demo = false, comment = null }) {
-    Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment });
+  constructor({ tickets, agent, settings, build = runBuild, worktree = ensureWorktree, models = async () => [], demo = false, comment = null, desktop = () => new JiraDesktop() }) {
+    Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment, desktop });
     this.queue = []; this.auto = false; this.running = null; this.lastKey = null; this.error = null; this.log = [];
   }
   snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false }; }
   activity(entry) {
     if (!this.running) return;
-    const item = { at: Date.now(), kind: entry.kind ?? 'info', message: String(entry.message ?? '').slice(0, 300) };
-    this.running = { ...this.running, activity: [...this.running.activity, item].slice(-120), updatedAt: item.at };
+    const item = { at: Date.now(), kind: entry.kind ?? 'info', message: activityText(entry.message) };
+    this.running = { ...this.running, activity: [...this.running.activity, item].slice(-250), updatedAt: item.at };
   }
   // Each column has a traffic light: «auto» runs on its own, «ask» waits for the
   // person to approve each step (▶) and «off» does nothing.
@@ -470,6 +489,28 @@ export class JiraPipeline {
   async stop() {
     this.auto = false; this.queue = []; this.focus = null;
     if (this.running) { this.running = { ...this.running, stopping: true }; await this.agent.abort(); }
+  }
+  // The person did the step of the column by hand: it is recorded as theirs, with
+  // what they say they did as its report, and the ticket goes on as if the agent had
+  // succeeded (the first outcome of each step). Later agents read that report.
+  async markDone(key, note = '') {
+    checkKey(key);
+    if (this.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
+    const ticket = await this.tickets.get(key);
+    if (!ticket) throw fail('El ticket ya no está disponible.', 404);
+    const stage = stageOf(ticket.stage);
+    if (!stage) throw fail('Este ticket ya está resuelto.', 409);
+    const settings = await this.settings(), outcome = stage.outcomes[0], at = new Date().toISOString();
+    const number = (ticket.history ?? []).filter(h => h.stage === stage.id).length + 1, report = stage.report(number);
+    const text = String(note ?? '').trim().slice(0, 10000);
+    await writeAtomic(join(this.tickets.folder(key), report), `# ${stage.name} · ${key} (hecho por una persona)\n\nEste paso lo hizo una persona a mano, no el agente.${text ? `\n\n${text}` : ''}\n`);
+    const entry = { stage: stage.id, number, outcome, report, by: 'person', question: null, model: null, usage: null, startedAt: at, finishedAt: at, error: null };
+    await this.tickets.update(key, t => {
+      const counted = { ...t, ...(stage.id === 'fix' ? { iterations: (t.iterations ?? 0) + 1 } : {}), ...(stage.id === 'reproduce' ? { reproduceAttempts: (t.reproduceAttempts ?? 0) + 1 } : {}) };
+      return { ...counted, ...nextAfter(counted, stage.id, outcome, settings.maxIterations ?? 3), note: null, question: null, lastOutcome: outcome, history: [...(t.history ?? []), entry] };
+    });
+    this.queue = this.queue.filter(q => q.key !== key);
+    if (this.auto || this.focus === key) void this.loop();
   }
   async nextKey() {
     while (this.queue.length) {
@@ -512,7 +553,15 @@ export class JiraPipeline {
     this.running = { key, stage: stage.id, model, startedAt, updatedAt: startedAt, activity: [] };
     ticket = await this.tickets.update(key, t => ({ ...t, status: 'running', note: null, ...(stage.id === 'fix' ? { iterations: (t.iterations ?? 0) + 1 } : {}), ...(stage.id === 'reproduce' ? { reproduceAttempts: (t.reproduceAttempts ?? 0) + 1 } : {}) }));
     let outcome, report = null, result = {}, failure = null, reportText = null;
+    const desktop = !this.demo && desktopStage(stage.id) ? this.desktop() : null;
+    if (desktopStage(stage.id)) this.running.desktopTitle = desktopTitle(this.running);
+    this.activity({ message: `${key} · ${stage.name} · intento ${number}. Preparando archivos y entorno…` });
+    const heartbeat = setInterval(() => {
+      const idle = Math.floor((Date.now() - this.running.updatedAt) / 1000);
+      if (idle >= 20) this.activity({ message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
+    }, 20000);
     try {
+      if (desktop) await desktop.start(this.running, entry => this.activity(entry)).catch(error => this.activity({ kind: 'warning', message: `No se pudo preparar la distribución: ${error.message}` }));
       // Fixing needs the code; the example has none.
       const worktree = !this.demo && (stage.id === 'fix' || (stage.id === 'verify' && settings.repository)) ? await this.worktree(settings, ticket, folder) : null;
       await mkdir(join(folder, 'evidencias'), { recursive: true });
@@ -520,8 +569,9 @@ export class JiraPipeline {
       const previous = latestReports(ticket, folder);
       const images = stage.id === 'fix' ? [] : files.filter(f => f.startsWith('adjuntos/') && IMAGE.test(f) && !f.includes('.fotogramas/')).slice(0, 8);
       this.activity({ message: `${stage.name} · ${files.length} archivos del ticket${worktree ? ` · código en ${worktree.path}` : ''}` });
+      if (this.running.stopping) throw Object.assign(fail('Detenido.'), { stopped: true });
       result = stage.programmatic ? await collectSummary(folder, ticket) : await this.agent.run({
-        stage: stage.id, ticket, folder, model, settings,
+        stage: stage.id, ticket, folder, model, settings, desktop,
         system: systemMessage(stage.id),
         prompt: stagePrompt({ stage: stage.id, ticket, folder, files, settings, worktree, lessons: { general, [stage.id]: own }, previous }),
         workingDirectory: worktree?.path ?? folder,
@@ -547,9 +597,14 @@ export class JiraPipeline {
     } catch (error) {
       failure = error;
       outcome = error.stopped ? 'stopped' : 'error';
+      this.activity({ kind: 'warning', message: failure.message });
+    } finally {
+      clearInterval(heartbeat);
+      await desktop?.stop().catch(error => this.activity({ kind: 'warning', message: `No se pudo cerrar el control de ventanas: ${error.message}` }));
     }
+    this.activity({ message: `${stage.name} finalizado: ${OUTCOME_LABELS[outcome] ?? outcome}${report ? ` · informe ${report}` : ''}.` });
     const finishedAt = Date.now();
-    const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null };
+    const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null, activity: this.running.activity };
     // With logs on, what the agent achieved is published as a comment on the ticket.
     if (settings.logs && this.comment && outcome !== 'stopped' && !stage.programmatic) {
       try {
@@ -558,6 +613,7 @@ export class JiraPipeline {
         this.activity({ message: 'Publicado en el ticket de Jira.' });
       } catch (error) { entry.posted = false; entry.postError = error.message; this.activity({ kind: 'warning', message: `No se pudo publicar en Jira: ${error.message}` }); }
     }
+    entry.activity = this.running.activity;
     await this.tickets.update(key, t => {
       const next = failure
         ? { stage: stage.id, status: failure.stopped || failure.reason === 'copilot-auth' ? 'pending' : 'blocked', note: failure.message }
