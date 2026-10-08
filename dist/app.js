@@ -1559,6 +1559,15 @@ let jiraPolling = false, jiraSeen = '', pointerDown = false;
 // The ticket popup: redrawn in place, keeping the open sections and its scroll.
 const ticketOpen = () => modal.open && !!jiraUi.detail && !!$('#jira-ticket');
 const jiraFileUrl = path => `/api/jira-file?key=${encodeURIComponent(jiraUi.detail?.key ?? '')}&path=${encodeURIComponent(path)}&s=${encodeURIComponent(state.csrf)}`;
+// Writing to the agent does not freeze its live log: the log is redrawn around the
+// prompt, which keeps the focus and the cursor where they were.
+function keepingTell(redraw) {
+  const box = document.activeElement?.dataset?.jiraTell !== undefined ? document.activeElement : null;
+  const inModal = !!box && modal.contains(box), start = box?.selectionStart, end = box?.selectionEnd;
+  redraw();
+  const next = box && (inModal ? $('#jira-ticket [data-jira-tell]') : $('#app [data-jira-tell]'));
+  if (next && !next.disabled) { next.focus({ preventScroll: true }); next.setSelectionRange(start, end); }
+}
 function refreshTicket() {
   const current = $('#jira-ticket');
   if (!current || !modal.open) return;
@@ -1566,7 +1575,7 @@ function refreshTicket() {
   const closed = new Set([...current.querySelectorAll('details[data-part]')].filter(d => !d.open).map(d => d.dataset.part));
   const body = $('.modal-body', modal), scroll = body?.scrollTop ?? 0;
   const log = current.querySelector('.jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
-  current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl);
+  current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl, jiraUi.tell);
   $('#jira-ticket').querySelectorAll('details[data-part]').forEach(d => { if (open.has(d.dataset.part)) d.open = true; if (closed.has(d.dataset.part)) d.open = false; });
   if (body) body.scrollTop = scroll;
   const nextLog = $('#jira-ticket .jira-activity ol');
@@ -1612,11 +1621,12 @@ async function startJiraPolling() {
     while (tab === 'jira' && state.jira) {
       await loadJira().catch(() => {});
       const seen = JSON.stringify([jiraUi.board, jiraUi.detail?.changedAt]);
-      const editing = $('#app').contains(document.activeElement) && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
-      const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+      const telling = document.activeElement?.dataset?.jiraTell !== undefined;
+      const editing = !telling && $('#app').contains(document.activeElement) && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+      const typing = !telling && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName);
       if (seen !== jiraSeen && !pointerDown && !pending && tab === 'jira') {
-        if (ticketOpen() && !typing) { jiraSeen = seen; refreshTicket(); }
-        else if (jiraUi.view === 'board' && !editing && !modal.open) { jiraSeen = seen; renderJira(); }
+        if (ticketOpen() && !typing) { jiraSeen = seen; keepingTell(refreshTicket); }
+        else if (jiraUi.view === 'board' && !editing && !modal.open) { jiraSeen = seen; keepingTell(renderJira); }
       }
       await new Promise(done => setTimeout(done, jiraUi.board?.pipeline?.running ? 1000 : 4000));
     }
@@ -1710,6 +1720,14 @@ const actions = {
     delete jiraUi.answers[key]; jiraSeen = ''; render();
     toast(`Respuesta guardada. ${key} se retoma.`);
   },
+  'jira-tell': async () => {
+    const message = (jiraUi.tell ?? '').trim();
+    if (!message) { $('[data-jira-tell]')?.focus(); throw new Error('Escribe el mensaje para el agente.'); }
+    await jiraAction('/api/jira-tell', { message });
+    jiraUi.tell = ''; jiraSeen = ''; render();
+    if (ticketOpen()) refreshTicket();
+    ($('#jira-ticket [data-jira-tell]') ?? $('[data-jira-tell]'))?.focus();
+  },
   'jira-done': async el => {
     const key = el.dataset.key;
     await jiraAction('/api/jira-done', { key, note: (jiraUi.answers[key] ?? '').trim() });
@@ -1737,7 +1755,7 @@ const actions = {
   'jira-open-ticket': async el => {
     const ticket = jiraUi.board?.tickets?.find(t => t.key === el.dataset.key);
     jiraUi.detail = { key: el.dataset.key }; jiraUi.ticketTab = null;
-    showModal(`${el.dataset.key}${ticket ? ` · ${ticket.summary}` : ''}`, '', ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, null, jiraFileUrl));
+    showModal(`${el.dataset.key}${ticket ? ` · ${ticket.summary}` : ''}`, '', ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, null, jiraFileUrl, jiraUi.tell));
     modal.classList.add('wide-modal');
     syncUrl();
     await loadJiraTicket(el.dataset.key); refreshTicket();
@@ -1891,6 +1909,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
+  if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell']().catch(errorInModal); return; }
   if (event.target.dataset?.jiraAnswer && event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); actions['jira-answer'](event.target.nextElementSibling).catch(errorInModal); return; }
   const jiraCard = event.target.classList?.contains('jira-card') ? event.target : null;
   if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
@@ -1997,6 +2016,7 @@ document.addEventListener('input',event=>{
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
+  if(event.target.dataset.jiraTell!==undefined){jiraUi.tell=event.target.value;document.querySelectorAll('[data-jira-tell]').forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if(event.target.dataset.jiraSearch!==undefined){const {selectionStart,selectionEnd}=event.target;jiraUi.search=event.target.value;renderJira();$('[data-jira-search]')?.setSelectionRange(selectionStart,selectionEnd);}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}

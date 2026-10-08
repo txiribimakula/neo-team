@@ -186,7 +186,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-done', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -558,6 +558,12 @@ const server = http.createServer(async (req, res) => {
           if (ticket.status !== 'blocked') throw fail('Este ticket no está esperando una respuesta.', 409);
           await pipeline.tickets.update(key, t => ({ ...t, status: 'pending', note: null, question: null, answers: [...(t.answers ?? []), { at: new Date().toISOString(), stage: t.stage, question: t.question ?? null, answer }] }));
           if ((jiraSettings().modes?.[ticket.stage] ?? 'auto') !== 'off') await pipeline.enqueue(key);
+          return json(res, { jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-tell') {
+          // What the person tells the agent at work, from its live log.
+          if (typeof input.message !== 'string') throw fail('Mensaje no válido.');
+          await jiraPipeline().tell(input.message);
           return json(res, { jira: await jiraBoard() });
         }
         if (path === '/api/jira-done') {

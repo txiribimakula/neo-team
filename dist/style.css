@@ -475,7 +475,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-tools{display:inline-flex;gap:6px;flex-wrap:wrap}
 .jira-search{width:220px;max-width:100%;padding:7px 10px;font-size:14px}
 .jira-links{display:inline-flex;gap:8px;margin-left:auto}
-.jira-board{display:grid;grid-template-columns:repeat(6,minmax(180px,1fr));gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
+.jira-board{display:grid;grid-template-columns:repeat(7,minmax(180px,1fr));gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
 .jira-column{background:#eef3ef;border-radius:10px;padding:10px;min-width:0}
 .jira-column>header{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .jira-column h2{font-size:15px;margin:0;display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -581,6 +581,10 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-assignee.me .jira-avatar{background:var(--green);color:#fff}
 .jira-assignee.unassigned{color:var(--muted);font-weight:500}.jira-assignee.unassigned .jira-avatar{background:#eef1ee;color:var(--muted)}
 .jira-done{color:#47772f}
+.jira-card-end{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.jira-ease{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;flex-shrink:0;cursor:help}
+.jira-ease rect{fill:#d9dfd9}.jira-ease.ease-3{color:#47772f}.jira-ease.ease-2{color:#a06f12}.jira-ease.ease-1{color:#9a3128}
+.jira-ease.ease-3 rect.on{fill:#5d9440}.jira-ease.ease-2 rect.on{fill:#d79a24}.jira-ease.ease-1 rect.on{fill:#c2564b}
 .jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-foot .jira-done{width:22px;min-width:22px;height:22px}
 .jira-lock{width:24px;height:24px;border-color:transparent;background:transparent;color:#a3ada6}
 .jira-lock:hover{border-color:#d5dfce;background:#fff}
@@ -618,6 +622,10 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-activity time{color:var(--muted);font-variant-numeric:tabular-nums}
 .jira-activity pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .jira-activity .log-warning{background:#fff4e9;color:#8a3d18}
+.jira-tell{display:flex;gap:6px;align-items:flex-end;padding:8px 10px;border-bottom:1px solid var(--line);background:#f7f9f7}
+.jira-tell textarea{flex:1;min-width:0;resize:vertical;min-height:32px;max-height:30vh;padding:6px 9px;font-family:inherit;font-size:13px;line-height:1.4}
+.jira-tell .button{flex-shrink:0}
+.jira-activity .log-person{background:#eef3fb;color:#2f4a80}
 .jira-activity .log-result{border-left:3px solid #5d9440}
 .jira-other-tickets>summary{cursor:pointer;font-size:13px;margin:8px 0}
 .jira-desktop .jira-page,.jira-desktop .jira-detail{min-width:0;max-width:100%}

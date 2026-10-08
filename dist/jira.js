@@ -9,13 +9,14 @@ const minutes = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${
 
 export const COLUMNS = [
   { id: 'collect', name: 'Recolectar', automatic: 'Se hace con código a partir de lo descargado: no usa IA ni consume tokens' },
+  { id: 'analyze', name: 'Analizar', tier: 'Medio' },
   { id: 'reproduce', name: 'Reproducir', tier: 'Medio' },
   { id: 'fix', name: 'Solucionar', tier: 'Avanzado' },
   { id: 'build', name: 'Compilar', automatic: 'Ejecuta el comando de compilación en la copia del ticket: no usa IA ni consume tokens. Si no compila, vuelve a Solucionar con el registro' },
   { id: 'verify', name: 'Verificar', tier: 'Medio' },
   { id: 'done', name: 'Resueltos' },
 ];
-export const OUTCOMES = { ok: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', built: 'Compila', build_failed: 'No compila', verified: 'Verificado', not_fixed: 'Sigue fallando', stopped: 'Detenido', error: 'Error' };
+export const OUTCOMES = { ok: 'Recolectado', analyzed: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', built: 'Compila', build_failed: 'No compila', verified: 'Verificado', not_fixed: 'Sigue fallando', stopped: 'Detenido', error: 'Error' };
 // Traffic light of each column: what its agent may do.
 const LIGHTS = [['off', 'Nada: el agente no actúa'], ['ask', 'Avisar: espera tu aprobación antes de actuar'], ['auto', 'Autopilot: actúa solo']];
 const STATUS = { pending: 'Pendiente', running: 'En curso', blocked: 'Necesita ayuda', done: 'Resuelto' };
@@ -70,6 +71,17 @@ export function priorityIcon(name) {
 function answerField(ticket, drafts = {}) {
   return `<div class="jira-answer"><textarea data-jira-answer="${escape(ticket.key)}" data-focus="jira-answer:${escape(ticket.key)}" rows="2" maxlength="10000" placeholder="Tu respuesta" aria-label="Respuesta para el agente de ${escape(stageName(ticket.stage))}">${escape(drafts[ticket.key] ?? '')}</textarea><button class="button small" data-action="jira-answer" data-key="${escape(ticket.key)}" title="Guardar la respuesta y retomar el ticket (Ctrl+Enter)">Responder</button></div>`;
 }
+// How easy the analysis found the ticket: three bars, as many lit as the harder of
+// reproducing it and fixing it allows. The details are in the tooltip.
+const EASE_LEVEL = { easy: 3, medium: 2, hard: 1 }, EASE_NAME = { 3: 'alta', 2: 'media', 1: 'baja' };
+const EASE_PART = { reproduce: { easy: 'fácil', medium: 'con dudas', hard: 'difícil' }, fix: { easy: 'sencilla', medium: 'media', hard: 'compleja' } };
+export function easeView(ease, label = false) {
+  if (!ease) return '';
+  const level = Math.min(EASE_LEVEL[ease.reproduce] ?? 1, EASE_LEVEL[ease.fix] ?? 1);
+  const title = `Facilidad ${EASE_NAME[level]} · reproducir: ${EASE_PART.reproduce[ease.reproduce] ?? '?'} · solución: ${EASE_PART.fix[ease.fix] ?? '?'}${ease.reason ? ` · ${ease.reason}` : ''}`;
+  const bars = [0, 1, 2].map(i => `<rect x="${i * 5}" y="${8 - i * 4}" width="4" height="${4 + i * 4}" rx="1"${i < level ? ' class="on"' : ''}/>`).join('');
+  return `<span class="jira-ease ease-${level}" role="img" title="${escape(title)}" aria-label="${escape(title)}"><svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true">${bars}</svg>${label ? `Facilidad ${EASE_NAME[level]}` : ''}</span>`;
+}
 // Who the ticket is assigned to, always visible: initials and name, «tú» for you.
 const initials = name => String(name ?? '').trim().split(/\s+/).slice(0, 2).map(part => part[0] ?? '').join('').toUpperCase();
 export function assigneeView(assignee) {
@@ -100,7 +112,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false) {
   return `<article class="jira-card status-${escape(status)}${awaiting ? ' awaiting' : ''}${ticket.locked ? ' locked' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
     <header>${typeIcon(ticket.type)}${!demo && ticket.url ? `<a class="jira-key" href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">${escape(ticket.key)} ↗</a>` : `<strong>${escape(ticket.key)}</strong>`}${priorityIcon(ticket.priority)}<span class="jira-status" title="${escape(STATUS[status] ?? status)}">${live ? '<span class="spinner" aria-hidden="true"></span>' : ''}</span>${ticket.stage === 'done' ? '' : lockButton(ticket)}${run}</header>
     <span class="jira-card-title">${escape(ticket.summary)}</span>
-    <span class="jira-card-foot">${assigneeView(ticket.assignee)}${!live && ticket.stage !== 'done' ? doneButton(ticket) : ''}</span>
+    <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${easeView(ticket.ease)}${!live && ticket.stage !== 'done' ? doneButton(ticket) : ''}</span></span>
     ${pills ? `<span class="jira-card-meta">${pills}</span>` : ''}
     ${live ? `<small class="jira-live" title="${escape(last?.message ?? '')}">${escape(last?.message ?? 'Iniciando…')}</small>`
       : status === 'blocked' ? `<p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts)}`
@@ -132,13 +144,20 @@ function toolbar(board, copilot, search = '') {
 }
 
 export const desktopRun = board => ['reproduce', 'verify'].includes(board?.pipeline?.running?.stage) ? board.pipeline.running : null;
-export function activityView(run, live = true) {
+// Over the live log, a prompt to tell the agent something while it works, and to
+// stop it. The steps without an agent can only be stopped.
+function tellView(run, draft = '') {
+  const column = COLUMNS.find(c => c.id === run.stage);
+  const input = column?.automatic ? '' : `<textarea data-jira-tell data-focus="jira-tell" rows="1" maxlength="4000" placeholder="Dile algo al agente" aria-label="Mensaje para el agente de ${escape(column?.name ?? '')}" ${run.stopping ? 'disabled' : ''}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" title="Enviar al agente (Enter; Mayús+Enter para otra línea)" ${run.stopping ? 'disabled' : ''}>Enviar</button>`;
+  return `<div class="jira-tell">${input}<button class="button small" data-action="jira-stop" title="Detener el paso al momento: queda pendiente" ${run.stopping ? 'disabled' : ''}>${run.stopping ? 'Deteniendo…' : 'Detener'}</button></div>`;
+}
+export function activityView(run, live = true, tell = '') {
   if (!run) return '';
   const entries = [...(run.activity ?? [])].reverse();
-  return `<section class="jira-activity" aria-label="${live ? 'Logs en vivo' : 'Registro de la fase'}"><header><strong>${live ? 'Logs en vivo' : 'Registro de la fase'}</strong>${live ? `<span>${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}</span>` : ''}</header><ol>${entries.length ? entries.map(entry => `<li class="log-${escape(entry.kind)}"><time>${clock(entry.at)}</time><pre>${escape(entry.message)}</pre></li>`).join('') : '<li>Preparando el agente…</li>'}</ol></section>`;
+  return `<section class="jira-activity" aria-label="${live ? 'Logs en vivo' : 'Registro de la fase'}"><header><strong>${live ? 'Logs en vivo' : 'Registro de la fase'}</strong>${live ? `<span>${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}</span>` : ''}</header>${live ? tellView(run, tell) : ''}<ol>${entries.length ? entries.map(entry => `<li class="log-${escape(entry.kind)}"><time>${clock(entry.at)}</time><pre>${escape(entry.message)}</pre></li>`).join('') : '<li>Preparando el agente…</li>'}</ol></section>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '') {
+function boardView(board, copilot, showArchived, drafts, search = '', tell = '') {
   const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
   const columns = COLUMNS.map(column => {
     const tickets = visible.filter(t => t.stage === column.id);
@@ -153,8 +172,8 @@ function boardView(board, copilot, showArchived, drafts, search = '') {
   const login = board.settings.demo ? '' : loginView({ copilot: board.pipeline?.needsCopilot ? { isAuthenticated: false } : copilot });
   const archivedButton = archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : '';
   const run = desktopRun(board), ticket = run && board.tickets.find(t => t.key === run.key);
-  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${toolbar(board, copilot, search)}${login}${error}<div class="jira-board">${columns}</div>${archivedButton}</details></div>`;
-  return `${activityView(board.pipeline?.running)}${toolbar(board, copilot, search)}${login}${login ? '' : error}<div class="jira-board">${columns}</div>${archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : ''}`;
+  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run, true, tell)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${toolbar(board, copilot, search)}${login}${error}<div class="jira-board">${columns}</div>${archivedButton}</details></div>`;
+  return `${activityView(board.pipeline?.running, true, tell)}${toolbar(board, copilot, search)}${login}${login ? '' : error}<div class="jira-board">${columns}</div>${archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : ''}`;
 }
 
 function settingsView(settings) {
@@ -294,13 +313,13 @@ function stepPanel(entry, detail, demo, options) {
   const person = entry.by === 'person' ? '<span class="pill" title="Paso hecho a mano, no por el agente">Hecho por ti</span>' : '';
   const posted = entry.posted ? `<span class="pill" title="Publicado como comentario en el ticket de Jira">${demo ? 'Publicado (simulado)' : 'En Jira'}</span>` : entry.posted === false ? `<span class="pill outcome-error" title="${escape(entry.postError ?? '')}">No publicado en Jira</span>` : '';
   const files = stepFiles(entry, detail.files ?? []);
-  return `<p class="jira-step-meta"><span class="pill outcome-${escape(entry.outcome)}">${escape(OUTCOMES[entry.outcome] ?? entry.outcome)}</span><small>${when(entry.finishedAt)}${entry.model ? ` · ${escape(entry.model)}` : ''}${tokens ? ` · ${tokens} tokens` : ''}</small>${person}${posted}</p>
+  return `<p class="jira-step-meta"><span class="pill outcome-${escape(entry.outcome)}">${escape(OUTCOMES[entry.outcome] ?? entry.outcome)}</span><small>${when(entry.finishedAt)}${entry.model ? ` · ${escape(entry.model)}` : ''}${tokens ? ` · ${tokens} tokens` : ''}</small>${entry.ease ? easeView(entry.ease, true) : ''}${person}${posted}</p>
     ${entry.question ? `<dl class="jira-answers"><dt>Pregunta</dt><dd>${escape(entry.question)}</dd>${answer ? `<dt>Tu respuesta · ${when(answer.at)}</dt><dd>${escape(answer.answer)}</dd>` : ''}</dl>` : ''}
     ${entry.error ? `<p class="inline-error">${escape(entry.error)}</p>` : ''}
     ${report?.text ? `<div class="jira-md">${markdown(report.text, options)}</div>` : ''}
     ${files.length ? `<h4 class="jira-step-files">Archivos del paso</h4>${fileList(files)}` : ''}`;
 }
-export function ticketDetail(board, detail, demo, drafts, selected = null, fileUrl = null) {
+export function ticketDetail(board, detail, demo, drafts, selected = null, fileUrl = null, tell = '') {
   const options = { fileUrl };
   const ticket = board.tickets.find(t => t.key === detail?.key);
   if (!detail?.history || !ticket) return '<section class="jira-detail" id="jira-ticket"><p class="text-muted"><span class="spinner"></span></p></section>';
@@ -309,7 +328,7 @@ export function ticketDetail(board, detail, demo, drafts, selected = null, fileU
   const tabs = [...steps.map((entry, index) => ({ id: `step-${index}`, label: `${stageName(entry.stage)}${entry.stage === 'collect' && steps.filter(e => e.stage === 'collect').length === 1 ? '' : ` ${entry.number}`}`, outcome: entry.outcome, entry })), { id: 'ticket', label: 'Ticket' }];
   const current = tabs.find(t => t.id === selected) ?? (steps.length ? tabs[steps.length - 1] : tabs.at(-1));
   const move = `<select data-jira-move="${escape(ticket.key)}" aria-label="Mover a otra columna" ${live ? 'disabled' : ''}>${COLUMNS.map(c => `<option value="${c.id}" ${c.id === ticket.stage ? 'selected' : ''}>${escape(c.name)}</option>`).join('')}</select>`;
-  const actions = `${move}${live ? '<button class="button small" data-action="jira-stop">Detener</button>' : ticket.stage === 'done' ? '' : `<button class="button small primary" data-action="jira-run" data-key="${escape(ticket.key)}" ${board.settings.modes?.[ticket.stage] === 'off' ? 'disabled title="El agente de esta columna está apagado"' : ''}>Ejecutar ${escape(stageName(ticket.stage))}</button><button class="button small" data-action="jira-done" data-key="${escape(ticket.key)}" title="${escape(doneTitle(ticket))}">Ya lo he hecho yo</button>`}${ticket.stage === 'done' ? '' : `<button class="button small" data-action="jira-autolock" data-key="${escape(ticket.key)}" data-locked="${!ticket.locked}" title="El modo automático ${ticket.locked ? 'no toma este ticket: solo se ejecuta con ▶' : 'toma este ticket'}">${ticket.locked ? 'Incluir en automático' : 'Solo manual'}</button>`}${demo ? '' : `<button class="button small" data-action="jira-open-folder" data-key="${escape(ticket.key)}">Abrir carpeta</button>`}<button class="button small" data-action="jira-archive" data-key="${escape(ticket.key)}" data-archived="${!ticket.archived}" ${live ? 'disabled' : ''}>${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero'}</button>`;
+  const actions = `${move}${live ? '' : ticket.stage === 'done' ? '' : `<button class="button small primary" data-action="jira-run" data-key="${escape(ticket.key)}" ${board.settings.modes?.[ticket.stage] === 'off' ? 'disabled title="El agente de esta columna está apagado"' : ''}>Ejecutar ${escape(stageName(ticket.stage))}</button><button class="button small" data-action="jira-done" data-key="${escape(ticket.key)}" title="${escape(doneTitle(ticket))}">Ya lo he hecho yo</button>`}${ticket.stage === 'done' ? '' : `<button class="button small" data-action="jira-autolock" data-key="${escape(ticket.key)}" data-locked="${!ticket.locked}" title="El modo automático ${ticket.locked ? 'no toma este ticket: solo se ejecuta con ▶' : 'toma este ticket'}">${ticket.locked ? 'Incluir en automático' : 'Solo manual'}</button>`}${demo ? '' : `<button class="button small" data-action="jira-open-folder" data-key="${escape(ticket.key)}">Abrir carpeta</button>`}<button class="button small" data-action="jira-archive" data-key="${escape(ticket.key)}" data-archived="${!ticket.archived}" ${live ? 'disabled' : ''}>${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero'}</button>`;
   const comments = detail.commentList
     ? (detail.commentList.length ? detail.commentList.map(c => `<article class="jira-comment"><header><strong>${escape(c.author)}</strong><small>${when(c.created)}${c.updated ? ` · editado ${when(c.updated)}` : ''}</small></header><div class="jira-md">${markdown(c.body, options)}</div></article>`).join('') : '<p class="text-muted">Sin comentarios.</p>')
     : `<div class="jira-md">${markdown(withoutTitle(detail.comments), options)}</div>`;
@@ -318,9 +337,9 @@ export function ticketDetail(board, detail, demo, drafts, selected = null, fileU
        <details class="jira-report" data-part="comments"><summary><strong>Comentarios${detail.commentList ? ` · ${detail.commentList.length}` : ''}</strong></summary><div class="jira-comments">${comments}</div></details>
        <details class="jira-report" data-part="files"><summary><strong>Archivos · ${detail.files.length}</strong></summary>${fileList(detail.files)}<p class="jira-folder"><code>${escape(detail.folder)}</code></p></details>`;
   return `<section class="jira-detail" id="jira-ticket" data-key="${escape(ticket.key)}">
-    <div class="jira-detail-actions"><p class="text-muted jira-meta">${assigneeView(ticket.assignee)}${typeIcon(ticket.type)}${escape(ticket.type ?? '')} ${priorityIcon(ticket.priority)}${escape([ticket.priority, stageName(ticket.stage), STATUS[live ? 'running' : ticket.status], ticket.iterations ? `${ticket.iterations} ${ticket.iterations === 1 ? 'corrección' : 'correcciones'}` : ''].filter(Boolean).join(' · '))}${demo ? '' : ` · <a href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer">Abrir en Jira ↗</a>`}</p><span>${actions}</span></div>
+    <div class="jira-detail-actions"><p class="text-muted jira-meta">${assigneeView(ticket.assignee)}${easeView(ticket.ease)}${typeIcon(ticket.type)}${escape(ticket.type ?? '')} ${priorityIcon(ticket.priority)}${escape([ticket.priority, stageName(ticket.stage), STATUS[live ? 'running' : ticket.status], ticket.iterations ? `${ticket.iterations} ${ticket.iterations === 1 ? 'corrección' : 'correcciones'}` : ''].filter(Boolean).join(' · '))}${demo ? '' : ` · <a href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer">Abrir en Jira ↗</a>`}</p><span>${actions}</span></div>
     ${ticket.status === 'blocked' && !live ? `<div class="notice warning jira-blocked"><p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts)}</div>` : ticket.note ? `<div class="notice warning">${escape(ticket.note)}</div>` : ''}
-    ${live ? activityView(board.pipeline.running) : current.entry?.activity ? activityView(current.entry, false) : ''}
+    ${live ? activityView(board.pipeline.running, true, tell) : current.entry?.activity ? activityView(current.entry, false) : ''}
     <div class="jira-tabs" role="tablist">${tabs.map(t => `<button role="tab" class="jira-tab${t.outcome ? ` outcome-${escape(t.outcome)}` : ''}" data-action="jira-tab" data-tab="${t.id}" aria-selected="${t.id === current.id}">${escape(t.label)}</button>`).join('')}${live ? `<span class="jira-tab is-live" title="${escape(board.pipeline.running.activity?.at(-1)?.message ?? '')}"><span class="spinner" aria-hidden="true"></span>${escape(stageName(board.pipeline.running.stage))}</span>` : ''}</div>
     <div class="jira-tab-panel" role="tabpanel">${panel}</div>
   </section>`;
@@ -332,7 +351,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira || ui.view === 'settings') return page(settingsView(state.jira));
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search));
+  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell));
 }
 
 export function settingsFrom(form) {

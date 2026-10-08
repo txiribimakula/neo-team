@@ -122,10 +122,12 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([byKey['NEO-101'].stage, byKey['NEO-101'].status], ['done', 'done']);
   assert.deepEqual([byKey['NEO-102'].stage, byKey['NEO-102'].iterations], ['done', 2], 'a failed verification goes back to fix');
   assert.deepEqual([byKey['NEO-103'].stage, byKey['NEO-103'].status], ['done', 'done']);
-  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:not_fixed', 'fix:fixed', 'build:built', 'verify:verified']);
+  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'analyze:analyzed', 'reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:not_fixed', 'fix:fixed', 'build:built', 'verify:verified']);
   const detail = (await get('/api/jira-ticket?key=NEO-102')).ticket;
   assert.ok(detail.history.every(h => ['collect', 'build'].includes(h.stage) ? h.posted === undefined : h.posted === true), 'with logs on every agent step is published (simulated in the example); collecting and building are not');
-  assert.equal(detail.reports.length, 8);
+  assert.equal(detail.reports.length, 9);
+  assert.deepEqual([detail.ease.reproduce, detail.ease.fix], ['easy', 'medium'], 'the analysis leaves how easy it looks');
+  assert.deepEqual(detail.history.find(h => h.stage === 'analyze').ease.reason, detail.ease.reason);
   assert.match(detail.reports.at(-1).text, /ya no ocurre/);
   assert.ok(detail.files.includes('resumen.md') && detail.files.includes('verificacion-2.md'));
   const learnings = (await get('/api/jira-learnings')).learnings;
@@ -153,7 +155,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   // Done by hand: the step is recorded as the person's and the ticket goes on.
   board = (await post('/api/jira-done', { key: 'NEO-103', note: 'Recogido a mano.' })).data.jira;
   const byHand = board.tickets.find(t => t.key === 'NEO-103');
-  assert.deepEqual([byHand.stage, byHand.status, byHand.history.at(-1).by, byHand.history.at(-1).outcome], ['reproduce', 'pending', 'person', 'ok']);
+  assert.deepEqual([byHand.stage, byHand.status, byHand.history.at(-1).by, byHand.history.at(-1).outcome], ['analyze', 'pending', 'person', 'ok']);
   assert.equal(board.pipeline.running, null, 'paused: nothing runs after it');
   assert.equal((await post('/api/jira-done', { key: 'NEO-102' })).status, 409, 'a resolved ticket has no step left');
   assert.equal((await post('/api/jira-done', { key: 'NEO-103', note: 7 })).status, 400);
