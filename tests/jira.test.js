@@ -360,6 +360,23 @@ test('the analysis estimates how easy a ticket is to reproduce and fix, shown as
   assert.match(html, /data-key="NEO-1"[\s\S]*class="jira-ease ease-3"/, 'and its card shows how easy it looks');
 });
 
+test('a step cut off when Neo Team stopped goes back to pending, to be run again', async t => {
+  const root = await temp(t), tickets = new TicketStore(root);
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Cortado' }), stage: 'fix', status: 'running', iterations: 1 }));
+  await tickets.update('NEO-2', () => ({ ...newTicket({ summary: 'En marcha' }), stage: 'reproduce', status: 'running' }));
+  await tickets.update('NEO-3', () => ({ ...newTicket({ summary: 'Bloqueado' }), stage: 'verify', status: 'blocked', note: 'Pregunta' }));
+  const pipeline = new JiraPipeline({ tickets, agent: {}, settings: async () => ({ models: {} }) });
+  pipeline.running = { key: 'NEO-2', stage: 'reproduce', activity: [] };
+  await pipeline.recover();
+  const [cut, busy, blocked] = await Promise.all(['NEO-1', 'NEO-2', 'NEO-3'].map(key => tickets.get(key)));
+  assert.deepEqual([cut.stage, cut.status, cut.iterations], ['fix', 'pending', 1]);
+  assert.match(cut.note, /Solucionar se interrumpió/);
+  assert.equal(busy.status, 'running', 'the step running now is left alone');
+  assert.deepEqual([blocked.status, blocked.note], ['blocked', 'Pregunta']);
+  const html = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { settings: { url: 'https://e', filter: '1' }, pipeline: {}, tickets: [cut] } }, null);
+  assert.match(html, /data-action="jira-run" data-key="NEO-1"/, 'and it can be run again from its card');
+});
+
 test('the person can tell the agent at work something, from its live log', async t => {
   const root = await temp(t), tickets = new TicketStore(root);
   await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'reproduce' }));

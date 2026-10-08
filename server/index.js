@@ -81,6 +81,8 @@ function jiraPipeline() {
     jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent(), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, logs: !!store.data.jiraLogs?.demo } : jiraSettings()),
       comment: async (key, body) => (demo ? new DemoJiraClient() : new JiraClient(jiraSettings(), await jiraToken())).addComment(key, body),
       models: async () => { if (!demo && !copilotModels.length) copilotModels = (await copilot.status()).models ?? []; return demo ? [] : copilotModels; } }));
+    const pipeline = jiraPipelines.get(root);
+    pipeline.recovered = pipeline.recover().catch(() => {});
   }
   return jiraPipelines.get(root);
 }
@@ -94,6 +96,7 @@ async function jiraBoard() {
   const settings = publicJira();
   if (!settings) return { settings: null };
   const pipeline = jiraPipeline();
+  await pipeline.recovered;
   const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
   const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
   return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, demo: true } : await detectJiraTools() };

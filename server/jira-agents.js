@@ -543,6 +543,16 @@ export class JiraPipeline {
   // The person did the step of the column by hand: it is recorded as theirs, with
   // what they say they did as its report, and the ticket goes on as if the agent had
   // succeeded (the first outcome of each step). Later agents read that report.
+  // A step that was running when Neo Team stopped (closed, restarted or reloaded)
+  // never finished: its ticket would stay «running» with no agent, so it goes back
+  // to pending, to be run again with ▶ or Empezar.
+  async recover() {
+    for (const ticket of await this.tickets.list()) {
+      if (ticket.status !== 'running' || this.running?.key === ticket.key) continue;
+      await this.tickets.update(ticket.key, t => t.status !== 'running' || this.running?.key === t.key ? t
+        : { ...t, status: 'pending', note: `${stageOf(t.stage)?.name ?? 'El paso'} se interrumpió al cerrarse Neo Team: vuelve a ejecutarlo.` });
+    }
+  }
   // A message from the person to the agent at work, kept in the log of the step.
   async tell(message) {
     const text = String(message ?? '').trim();
@@ -594,6 +604,7 @@ export class JiraPipeline {
     if (this.looping) return;
     this.looping = true;
     try {
+      await this.recovered;
       for (let key = await this.nextKey(); key; key = await this.nextKey()) {
         this.lastKey = key;
         const outcome = await this.runStage(key);
