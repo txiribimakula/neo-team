@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, CopilotAgent, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
+import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
 import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
@@ -377,44 +377,88 @@ test('a step cut off when Neo Team stopped goes back to pending, to be run again
   assert.match(html, /data-action="jira-run" data-key="NEO-1"/, 'and it can be run again from its card');
 });
 
-test('the person can tell the agent at work something, from its live log', async t => {
+test('talking to the agent works like a chat: interrupt, ask, get an answer and go on', async () => {
+  // A fake session: each turn waits until it is aborted or let finish.
+  const turns = [];
+  let finishTurn, reported = false;
+  const conversation = new AgentConversation({ waitMs: 60000,
+    send: next => new Promise(done => { turns.push(next); finishTurn = done; }),
+    abort: async () => finishTurn(),
+  });
+  const states = [];
+  conversation.onState = state => states.push(state);
+  const tick = () => new Promise(done => setTimeout(done, 5));
+  const running = conversation.run({ prompt: 'Arregla el ticket', timeoutMs: 1000, finished: () => reported });
+  await tick();
+  await conversation.tell('¿Qué estás mirando?');
+  await tick();
+  assert.equal(turns.length, 2, 'the message interrupts the turn in progress');
+  assert.equal(turns[1].person, true);
+  assert.match(turns[1].prompt, /<person_message>\n¿Qué estás mirando\?\n<\/person_message>/);
+  assert.match(turns[1].prompt, /If it is a question, answer it and end your turn/);
+  finishTurn(); await tick();
+  assert.equal(conversation.state, 'waiting', 'after answering, it waits for the person');
+  await conversation.tell('Mira primero Exportador.cs');
+  await tick();
+  assert.match(turns[2].prompt, /Mira primero Exportador\.cs/, 'a message while it waits is its next turn');
+  finishTurn(); await tick();
+  conversation.resume(); await tick();
+  assert.match(turns[3].prompt, /go on with your task where you left it/, 'Continuar lets it go on');
+  await conversation.pause(); await tick();
+  assert.equal(conversation.state, 'waiting', 'Pausar interrupts it and it waits');
+  conversation.resume(); await tick();
+  reported = true; finishTurn();
+  await running;
+  assert.equal(turns.length, 5);
+  assert.deepEqual([...new Set(states)], ['working', 'waiting']);
+
+  // Without an answer, it goes on alone after a while.
+  const alone = [];
+  const quiet = new AgentConversation({ waitMs: 10, send: async next => { alone.push(next.prompt); if (alone.length === 3) reported = true; }, abort: async () => {} });
+  reported = false;
+  quiet.inbox.push('¿Vas bien?');
+  await quiet.run({ prompt: 'Empieza', timeoutMs: 1000, finished: () => reported });
+  assert.match(alone.at(-1), /did not answer/);
+});
+
+test('the person talks to the agent from its live log, and the log stays after the step', async t => {
   const root = await temp(t), tickets = new TicketStore(root);
-  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'reproduce' }));
-  let release;
-  const told = [];
-  const agent = { run: () => new Promise(done => { release = () => done({ outcome: 'reproduced', report: 'Visto', model: null, usage: null }); }), tell: async message => { told.push(message); }, abort: async () => {} };
-  const pipeline = new JiraPipeline({ tickets, agent, demo: true, settings: async () => ({ models: {} }) });
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'fix' }));
+  const pipeline = new JiraPipeline({ tickets, agent: new DemoAgent({ delayMs: 30 }), demo: true, settings: async () => ({ models: {} }) });
   await assert.rejects(pipeline.tell('Hola'), /Ningún agente está trabajando/);
   const running = pipeline.runStage('NEO-1');
-  await new Promise(done => setTimeout(done, 20));
+  await new Promise(done => setTimeout(done, 15));
   await assert.rejects(pipeline.tell('   '), /Escribe el mensaje/);
-  await pipeline.tell('  Usa el cliente 4711, que tiene facturas negativas.  ');
-  assert.deepEqual(told, ['Usa el cliente 4711, que tiene facturas negativas.']);
-  assert.equal(pipeline.snapshot().running.activity.at(-1).message, 'Tú: Usa el cliente 4711, que tiene facturas negativas.');
-  release(); await running;
-  const entry = (await tickets.get('NEO-1')).history.at(-1);
-  assert.ok(entry.activity.some(a => a.kind === 'person'), 'the message stays in the log of the step');
+  await pipeline.tell('¿Dónde estás?');
+  for (let i = 0; i < 50 && pipeline.running?.conversation !== 'waiting'; i++) await new Promise(done => setTimeout(done, 10));
+  assert.equal(pipeline.snapshot().running.conversation, 'waiting', 'it answered and waits');
+  assert.deepEqual(pipeline.running.activity.filter(a => ['person', 'agent'].includes(a.kind)).map(a => a.kind), ['person', 'agent']);
+  assert.match(pipeline.running.activity.find(a => a.kind === 'agent').message, /Respuesta simulada/);
+  await pipeline.pause(false);
+  await running;
+  const ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.history.at(-1).outcome], ['build', 'fixed'], 'and then it finished its task');
+  assert.ok(ticket.history.at(-1).activity.some(a => a.kind === 'agent'), 'the conversation stays in the log of the step');
+  const last = pipeline.snapshot().last;
+  assert.deepEqual([last.key, last.outcome], ['NEO-1', 'fixed'], 'the log stays on view after the step');
   pipeline.running = { key: 'NEO-1', stage: 'build', activity: [] };
   await assert.rejects(pipeline.tell('Más rápido'), /Compilar no usa un agente/);
   pipeline.running = null;
 
-  // The message reaches the Copilot session at once, as the person's.
-  const copilot = new CopilotAgent(), sent = [];
-  await assert.rejects(copilot.tell('Hola'), /todavía no ha empezado/);
-  copilot.session = { send: async options => { sent.push(options); } };
-  await copilot.tell('Para y cuéntame lo que tienes');
-  assert.equal(sent[0].mode, 'immediate');
-  assert.match(sent[0].prompt, /<person_message>\nPara y cuéntame lo que tienes\n<\/person_message>/);
-  assert.match(sent[0].prompt, /if it tells you to stop, call neo_report now/);
-
-  // The prompt sits on the live log, with the button to stop.
+  // On the board: the prompt with Enviar, Pausar or Continuar and Detener; then the last log, closable.
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
-  const board = run => ({ settings: state.jira, pipeline: { running: { key: 'NEO-1', startedAt: Date.now(), activity: [], ...run } }, tickets: [{ key: 'NEO-1', summary: 'Uno', stage: run.stage, status: 'running' }] });
-  const html = jiraView(state, { view: 'board', board: board({ stage: 'reproduce' }), tell: 'Borrador' }, null);
-  assert.match(html, /<section class="jira-activity"[\s\S]*<textarea data-jira-tell[^>]*>Borrador<\/textarea><button[^>]*data-action="jira-tell"[\s\S]*data-action="jira-stop"/);
-  const building = jiraView(state, { view: 'board', board: board({ stage: 'build' }) }, null);
-  assert.doesNotMatch(building, /data-jira-tell/, 'a step without an agent can only be stopped');
-  assert.match(building, /<div class="jira-tell"><button[^>]*data-action="jira-stop"/);
+  const board = pipelineState => ({ settings: state.jira, pipeline: pipelineState, tickets: [{ key: 'NEO-1', summary: 'Uno', stage: pipelineState.running?.stage ?? 'build', status: pipelineState.running ? 'running' : 'pending' }] });
+  const live = run => jiraView(state, { view: 'board', board: board({ running: { key: 'NEO-1', startedAt: Date.now(), activity: [], ...run } }), tell: 'Borrador' }, null);
+  const working = live({ stage: 'fix', conversation: 'working' });
+  assert.match(working, /<section class="jira-activity"[\s\S]*<textarea data-jira-tell[^>]*>Borrador<\/textarea><button[^>]*data-action="jira-tell"[\s\S]*data-action="jira-pause" data-on="true"[\s\S]*data-action="jira-stop"/);
+  const waiting = live({ stage: 'fix', conversation: 'waiting' });
+  assert.match(waiting, /Esperando tu respuesta/);
+  assert.match(waiting, /data-action="jira-pause" data-on="false"[^>]*>Continuar/);
+  const building = live({ stage: 'build' });
+  assert.doesNotMatch(building, /data-jira-tell|jira-pause/, 'a step without an agent can only be stopped');
+  const after = jiraView(state, { view: 'board', board: board({ last }) }, null);
+  assert.match(after, /Registro de la fase<\/strong><span>NEO-1 · Solucionar · Corregido<\/span><button[^>]*data-action="jira-close-log"/);
+  assert.doesNotMatch(jiraView(state, { view: 'board', board: board({ last }), closedLog: String(last.startedAt) }, null), /jira-activity/, 'until it is closed');
 });
 
 test('the board is filtered by key or title while typing', () => {

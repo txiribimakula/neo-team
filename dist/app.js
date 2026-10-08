@@ -1728,6 +1728,8 @@ const actions = {
     if (ticketOpen()) refreshTicket();
     ($('#jira-ticket [data-jira-tell]') ?? $('[data-jira-tell]'))?.focus();
   },
+  'jira-pause': el => jiraAction('/api/jira-pause', { on: el.dataset.on === 'true' }),
+  'jira-close-log': el => { jiraUi.closedLog = el.dataset.started; render(); },
   'jira-done': async el => {
     const key = el.dataset.key;
     await jiraAction('/api/jira-done', { key, note: (jiraUi.answers[key] ?? '').trim() });

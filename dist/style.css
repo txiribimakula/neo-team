@@ -626,6 +626,10 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-tell textarea{flex:1;min-width:0;resize:vertical;min-height:32px;max-height:30vh;padding:6px 9px;font-family:inherit;font-size:13px;line-height:1.4}
 .jira-tell .button{flex-shrink:0}
 .jira-activity .log-person{background:#eef3fb;color:#2f4a80}
+.jira-activity .log-agent{background:#f1f7ee;border-left:3px solid #5d9440}
+.jira-activity .log-agent pre{font-family:inherit;font-size:13px}
+.jira-waiting{color:#a06f12;font-weight:600}
+.jira-close-log{margin-left:auto;width:24px;height:24px}
 .jira-activity .log-result{border-left:3px solid #5d9440}
 .jira-other-tickets>summary{cursor:pointer;font-size:13px;margin:8px 0}
 .jira-desktop .jira-page,.jira-desktop .jira-detail{min-width:0;max-width:100%}

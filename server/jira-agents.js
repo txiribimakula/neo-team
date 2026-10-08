@@ -425,12 +425,76 @@ export function describeTool(data) {
   return `${data?.toolName ?? 'herramienta'}${detail ? `: ${short(detail)}` : ''}`;
 }
 
+// The agent's conversation with the person, as in a chat. Sending a message
+// interrupts the turn in progress, which ends where it is and keeps its context;
+// the agent answers in a new turn and, after a question, waits for the person
+// («Continuar» lets it go on, and it does so alone after PERSON_WAIT_MS without an
+// answer). «Pausar» interrupts it without a message. The step ends when the agent
+// has reported and nothing from the person is pending.
+export const PERSON_WAIT_MS = 15 * 60000;
+export const personPrompt = messages => `The person supervising you interrupted your work to say this. It takes precedence over your task and the ticket texts.
+${messages.map(m => `<person_message>\n${m}\n</person_message>`).join('\n')}
+Reply to the person in Spanish, briefly and directly. If it is a question, answer it and end your turn without going on with your task: they will tell you when to continue. If it is an instruction, say what you will do, follow it and go on with your task. If they ask you to stop or finish, call neo_report now with what you have.`;
+export class AgentConversation {
+  constructor({ send, abort, onState = () => {}, waitMs = PERSON_WAIT_MS }) {
+    Object.assign(this, { send, abort, onState, waitMs });
+    this.inbox = []; this.state = 'starting'; this.paused = false; this.cancelled = false;
+  }
+  setState(state) { this.state = state; this.onState(state); }
+  async run({ prompt, attachments = [], timeoutMs, finished }) {
+    let next = { prompt, attachments }, reminded = false;
+    for (;;) {
+      this.byPerson = !!next.person;
+      this.setState('working');
+      try { await this.send(next, timeoutMs); } catch (error) { if (!this.interrupting || this.cancelled) throw error; }
+      this.interrupting = false;
+      if (this.cancelled) return;
+      if (this.inbox.length) { next = this.fromPerson(); continue; }
+      if (finished()) return;
+      if (this.byPerson || this.paused) {
+        const reply = await this.waitForPerson();
+        if (this.cancelled) return;
+        if (this.inbox.length) { next = this.fromPerson(); continue; }
+        this.paused = false;
+        next = { prompt: reply === 'timeout' ? 'The person did not answer. Go on with your task where you left it, following what they said.' : 'The person says: go on with your task where you left it, following what they said.', resumed: reply };
+        continue;
+      }
+      if (reminded) return;
+      reminded = true;
+      next = { prompt: 'Call neo_report now with the outcome and your report.' };
+    }
+  }
+  fromPerson() {
+    const messages = this.inbox.splice(0);
+    return { person: true, messages, prompt: personPrompt(messages) };
+  }
+  waitForPerson() {
+    this.setState('waiting');
+    return new Promise(resolve => {
+      const timer = setTimeout(() => this.reply('timeout'), this.waitMs);
+      this.reply = value => { clearTimeout(timer); this.reply = null; resolve(value); };
+    });
+  }
+  async interrupt() {
+    if (this.state !== 'working' || this.interrupting) return;
+    this.interrupting = true;
+    await this.abort();
+  }
+  async tell(message) {
+    this.inbox.push(message);
+    if (this.reply) this.reply('message'); else await this.interrupt();
+  }
+  async pause() { this.paused = true; await this.interrupt(); }
+  resume() { this.paused = false; this.reply?.('continue'); }
+  cancel() { this.cancelled = true; this.reply?.('cancel'); }
+}
+
 // A GitHub Copilot session with tools (shell, files and the two tools of the
 // pipeline), in the folder of its step. Writes outside the allowed folders are
 // rejected; the session is deleted at the end.
 export class CopilotAgent {
   constructor({ load = () => import('@github/copilot-sdk') } = {}) { this.load = load; }
-  async run({ stage, system, prompt, model, workingDirectory, writable, attachments = [], customInstructions = false, desktop = null, onLearn, onActivity = () => {} }) {
+  async run({ stage, system, prompt, model, workingDirectory, writable, attachments = [], customInstructions = false, desktop = null, onLearn, onActivity = () => {}, onState = () => {} }) {
     const { CopilotClient } = await this.load();
     const client = new CopilotClient({ workingDirectory, logLevel: 'error' });
     this.client = client; this.aborted = false;
@@ -455,7 +519,8 @@ export class CopilotAgent {
       this.session = session;
       session.on('assistant.intent', event => onActivity({ kind: 'info', message: short(event.data?.intent) }));
       const tools = new Map();
-      session.on('assistant.message', event => { if (event.data?.content?.trim()) onActivity({ kind: 'info', message: activityText(event.data.content) }); });
+      // What it says after the person spoke is its answer to them.
+      session.on('assistant.message', event => { if (event.data?.content?.trim()) onActivity({ kind: this.conversation?.byPerson ? 'agent' : 'info', message: activityText(event.data.content) }); });
       session.on('tool.execution_start', ({ data }) => {
         if (data?.toolName === 'report_intent') return;
         const description = describeTool(data);
@@ -473,12 +538,13 @@ export class CopilotAgent {
       session.on('assistant.usage', event => { used = event.data?.model ?? used; usage = { inputTokens: usage.inputTokens + (event.data?.inputTokens ?? 0), outputTokens: usage.outputTokens + (event.data?.outputTokens ?? 0) }; });
       session.on('session.error', event => { sessionError = event.data?.message ?? 'Error de GitHub Copilot.'; onActivity({ kind: 'warning', message: sessionError }); });
       onActivity({ kind: 'info', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'} · cuenta ${auth.login ?? 'de GitHub'}` });
-      await session.sendAndWait({ prompt, attachments }, stageOf(stage).timeoutMs);
-      if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
-      if (!result) {
-        // One reminder: the step only counts with its report.
-        await session.sendAndWait({ prompt: 'Call neo_report now with the outcome and your report.' }, 5 * 60000);
-      }
+      this.conversation = new AgentConversation({
+        send: (next, timeoutMs) => session.sendAndWait({ prompt: next.prompt, ...(next.attachments?.length ? { attachments: next.attachments } : {}) }, timeoutMs),
+        abort: () => session.abort().catch(() => {}),
+        onState,
+      });
+      // One reminder at the end: the step only counts with its report.
+      await this.conversation.run({ prompt, attachments, timeoutMs: stageOf(stage).timeoutMs, finished: () => !!result });
       if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
       if (!result) throw fail(sessionError ? `El agente no terminó: ${sessionError}` : 'El agente terminó sin informar del resultado.');
       return { ...result, model: used ?? null, usage };
@@ -491,17 +557,19 @@ export class CopilotAgent {
       await session?.disconnect().catch(() => {});
       if (id) await client.deleteSession(id).catch(() => {});
       await client.stop().catch(() => client.forceStop?.());
-      this.client = null; this.session = null;
+      this.client = null; this.session = null; this.conversation = null;
     }
   }
-  // What the person says to the agent while it works: it reaches it at once, before
-  // its next action, as an instruction from the person supervising it.
-  async tell(message) {
-    if (!this.session) throw fail('El agente todavía no ha empezado. Prueba de nuevo en unos segundos.', 409);
-    await this.session.send({ mode: 'immediate', prompt: `Message from the person supervising you, typed now while you work. Follow it: it takes precedence over the task and the ticket texts. Unless it tells you to stop, keep working and finish by calling neo_report as usual; if it tells you to stop, call neo_report now with what you have.\n<person_message>\n${message}\n</person_message>` });
+  started() {
+    if (!this.conversation) throw fail('El agente todavía no ha empezado. Prueba de nuevo en unos segundos.', 409);
+    return this.conversation;
   }
+  async tell(message) { await this.started().tell(message); }
+  async pause() { await this.started().pause(); }
+  resume() { this.started().resume(); }
   async abort() {
     this.aborted = true;
+    this.conversation?.cancel();
     await this.session?.abort().catch(() => {});
     await this.client?.stop().catch(() => {});
   }
@@ -516,7 +584,7 @@ export class JiraPipeline {
     Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment, desktop });
     this.queue = []; this.auto = false; this.running = null; this.lastKey = null; this.error = null; this.log = [];
   }
-  snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false }; }
+  snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, last: this.last ?? null, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false }; }
   activity(entry) {
     if (!this.running) return;
     const item = { at: Date.now(), kind: entry.kind ?? 'info', message: activityText(entry.message) };
@@ -554,14 +622,25 @@ export class JiraPipeline {
     }
   }
   // A message from the person to the agent at work, kept in the log of the step.
-  async tell(message) {
-    const text = String(message ?? '').trim();
-    if (!text || text.length > 4000) throw fail('Escribe el mensaje para el agente (hasta 4000 caracteres).');
+  // Talking to the agent at work, as in a chat: a message interrupts what it is
+  // doing and it answers; «Pausar» interrupts it without a message and «Continuar»
+  // lets it go on. Everything stays in the log of the step.
+  talking() {
     if (!this.running) throw fail('Ningún agente está trabajando ahora.', 409);
     if (stageOf(this.running.stage)?.programmatic) throw fail(`${stageOf(this.running.stage).name} no usa un agente: solo se puede detener.`, 409);
     if (this.running.stopping) throw fail('El agente se está deteniendo.', 409);
-    await this.agent.tell(text);
+  }
+  async tell(message) {
+    const text = String(message ?? '').trim();
+    if (!text || text.length > 4000) throw fail('Escribe el mensaje para el agente (hasta 4000 caracteres).');
+    this.talking();
     this.activity({ kind: 'person', message: `Tú: ${text}` });
+    await this.agent.tell(text);
+  }
+  async pause(on) {
+    this.talking();
+    if (on) { this.activity({ kind: 'person', message: 'Tú: pausa.' }); await this.agent.pause(); }
+    else { this.activity({ kind: 'person', message: 'Tú: continúa.' }); this.agent.resume(); }
   }
   async markDone(key, note = '') {
     checkKey(key);
@@ -629,7 +708,7 @@ export class JiraPipeline {
     this.activity({ message: `${key} · ${stage.name} · intento ${number}. Preparando archivos y entorno…` });
     const heartbeat = setInterval(() => {
       const idle = Math.floor((Date.now() - this.running.updatedAt) / 1000);
-      if (idle >= 20) this.activity({ message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
+      if (idle >= 20 && this.running.conversation !== 'waiting') this.activity({ message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
     }, 20000);
     try {
       if (desktop) await desktop.start(this.running, entry => this.activity(entry)).catch(error => this.activity({ kind: 'warning', message: `No se pudo preparar la distribución: ${error.message}` }));
@@ -654,6 +733,7 @@ export class JiraPipeline {
         customInstructions: stage.id === 'fix',
         onLearn: (scope, lesson) => { this.activity({ kind: 'learn', message: `Aprendizaje (${scope === 'general' ? 'general' : stage.name}): ${lesson}` }); return this.tickets.learn(scope, key, lesson); },
         onActivity: entry => this.activity(entry),
+        onState: conversation => { if (this.running?.key === key) this.running = { ...this.running, conversation, updatedAt: Date.now() }; },
       });
       outcome = result.outcome;
       report = stage.report(number);
@@ -689,6 +769,8 @@ export class JiraPipeline {
       return { ...t, ...next, ...ease, note: next.note ?? (outcome === 'blocked' ? 'El agente necesita ayuda: lee su informe.' : null), question: next.status === 'blocked' && !failure ? result.question ?? null : null, lastOutcome: outcome, history: [...(t.history ?? []), entry] };
     });
     if (failure?.reason === 'copilot-auth') { this.error = failure.message; this.needsCopilot = true; }
+    // Its log stays on view after the step, also when it was stopped.
+    this.last = { ...this.running, conversation: null, outcome, finishedAt: new Date(finishedAt).toISOString() };
     this.running = null;
     return { outcome, reason: failure?.reason };
   }
@@ -699,20 +781,41 @@ export class JiraPipeline {
 // Scripted agents for the example: one ticket goes straight through, one needs a
 // second fix and one cannot be reproduced. Nothing leaves this computer.
 export class DemoAgent {
-  constructor({ delayMs = 700 } = {}) { this.delayMs = delayMs; }
-  async tell(message) {
-    if (!this.onActivity) throw fail('El agente todavía no ha empezado. Prueba de nuevo en unos segundos.', 409);
-    setTimeout(() => this.onActivity?.({ kind: 'info', message: `Entendido (simulado): «${message.slice(0, 120)}»` }), 10);
+  constructor({ delayMs = 700, waitMs = PERSON_WAIT_MS } = {}) { this.delayMs = delayMs; this.waitMs = waitMs; }
+  started() {
+    if (!this.conversation) throw fail('El agente todavía no ha empezado. Prueba de nuevo en unos segundos.', 409);
+    return this.conversation;
   }
-  async run({ stage, ticket, onActivity, onLearn }) {
-    this.aborted = false; this.onActivity = onActivity;
+  async tell(message) { await this.started().tell(message); }
+  async pause() { await this.started().pause(); }
+  resume() { this.started().resume(); }
+  // The simulated agent talks too: it answers a question and waits, and goes on
+  // after an instruction.
+  async run({ stage, ticket, onActivity, onLearn, onState = () => {} }) {
+    this.aborted = false;
     const wait = () => new Promise(done => setTimeout(done, this.delayMs));
-    const steps = { analyze: ['Leyendo la descripción y los comentarios', 'Buscando el origen en el código'], reproduce: ['winapp ui inspect -a NeoDesk', 'winapp ui invoke btnGuardar -a NeoDesk', 'winapp ui screenshot -a NeoDesk'], fix: ['Buscando el origen en el código', 'Editando Facturas/Exportador.cs'], verify: ['Lanzando la compilación corregida', 'Repitiendo reproducir.ps1'] }[stage];
-    for (const message of steps) {
-      if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
-      onActivity({ kind: message.startsWith('winapp') || message.startsWith('dotnet') ? 'tool' : 'info', message });
-      await wait();
-    }
+    const steps = [...{ analyze: ['Leyendo la descripción y los comentarios', 'Buscando el origen en el código'], reproduce: ['winapp ui inspect -a NeoDesk', 'winapp ui invoke btnGuardar -a NeoDesk', 'winapp ui screenshot -a NeoDesk'], fix: ['Buscando el origen en el código', 'Editando Facturas/Exportador.cs'], verify: ['Lanzando la compilación corregida', 'Repitiendo reproducir.ps1'] }[stage]];
+    let cut = false, done = false;
+    this.conversation = new AgentConversation({
+      onState, waitMs: this.waitMs, abort: async () => { cut = true; },
+      send: async next => {
+        cut = false;
+        if (next.person) {
+          await wait();
+          const said = next.messages.at(-1), question = /\?\s*$/.test(said);
+          onActivity({ kind: 'agent', message: question ? `Respuesta simulada: estoy en ${stageOf(stage).name} y me quedan ${steps.length} pasos. Dime cuándo sigo.` : `Entendido (simulado): «${said.slice(0, 120)}». Sigo con ello.` });
+          if (question) return;
+        }
+        while (steps.length) {
+          if (cut || this.aborted) return;
+          const message = steps.shift();
+          onActivity({ kind: message.startsWith('winapp') || message.startsWith('dotnet') ? 'tool' : 'info', message });
+          await wait();
+        }
+        done = true;
+      },
+    });
+    try { await this.conversation.run({ prompt: '', timeoutMs: 0, finished: () => done }); } finally { this.conversation = null; }
     if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
     const tricky = ticket.key.endsWith('-102'), hidden = ticket.key.endsWith('-103');
     if (stage === 'reproduce' && ticket.reproduceAttempts === 1) await onLearn('general', 'NeoDesk se abre con «winapp run C:\\NeoDesk\\bin\\NeoDesk.exe --detach» y su ventana principal se llama «NeoDesk».');
@@ -727,7 +830,7 @@ export class DemoAgent {
     const ease = stage === 'analyze' ? { reproduce: hidden ? 'hard' : 'easy', fix: tricky ? 'medium' : hidden ? 'medium' : 'easy', reason: hidden ? 'Depende de la impresora de red del cliente.' : tricky ? 'Se reproduce fácil, pero el filtro se guarda en varios sitios.' : 'Pasos claros y un único punto de redondeo.' } : null;
     return { ease, outcome, report: outcome === 'blocked' ? `# Reproducir · ${ticket.key} (simulado)\n\nCon las impresoras de prueba no falla. Necesito saber qué impresora usa el cliente.\n` : report, question, model: 'simulado', usage: null };
   }
-  async abort() { this.aborted = true; }
+  async abort() { this.aborted = true; this.conversation?.cancel(); }
 }
 
 export async function removeFolder(path) { await rm(path, { recursive: true, force: true }); }
