@@ -325,7 +325,7 @@ test('the ticket popup has a tab per completed step and the answer field while s
       { stage: 'reproduce', number: 1, outcome: 'blocked', report: 'reproduccion-1.md', question: '¿Qué impresora?', finishedAt: '2026-10-06T10:05:00Z' }],
     reports: [{ stage: 'collect', number: 1, report: 'resumen.md', text: 'Resumen del ticket' }, { stage: 'reproduce', number: 1, report: 'reproduccion-1.md', text: 'No falla con mis impresoras' }] };
   const html = ticketDetail(board, detail, false, { 'NEO-3': 'Borrador' });
-  assert.deepEqual([...html.matchAll(/data-action="jira-tab" data-tab="([^"]+)" aria-selected="(true|false)">([^<]+)</g)].map(m => [m[1], m[2], m[3]]), [['step-0', 'false', 'Recolectar'], ['step-1', 'true', 'Reproducir 1'], ['ticket', 'false', 'Ticket']], 'the latest step is open');
+  assert.deepEqual([...html.matchAll(/data-action="jira-tab" data-tab="([^"]+)" aria-selected="(true|false)">([^<]+)</g)].map(m => [m[1], m[2], m[3]]), [['ticket', 'false', 'Ticket'], ['step-0', 'false', 'Recolectar'], ['step-1', 'true', 'Reproducir 1']], 'the ticket comes first and the latest step is open');
   assert.match(html, /No falla con mis impresoras/);
   assert.match(html, /evidencias\/1\.png/, 'with the files of that step');
   assert.match(html, /<textarea data-jira-answer="NEO-3"[^>]*>Borrador<\/textarea>/, 'the answer field keeps the draft');
@@ -454,11 +454,75 @@ test('the person talks to the agent from its live log, and the log stays after t
   const waiting = live({ stage: 'fix', conversation: 'waiting' });
   assert.match(waiting, /Esperando tu respuesta/);
   assert.match(waiting, /data-action="jira-pause" data-on="false"[^>]*>Continuar/);
-  const building = live({ stage: 'build' });
+  const building = live({ stage: 'build' }).match(/aria-label="Logs en vivo"[\s\S]*?<\/section>/)[0];
   assert.doesNotMatch(building, /data-jira-tell|jira-pause/, 'a step without an agent can only be stopped');
   const after = jiraView(state, { view: 'board', board: board({ last }) }, null);
   assert.match(after, /Registro de la fase<\/strong><span>NEO-1 · Solucionar · Corregido<\/span><button[^>]*data-action="jira-close-log"/);
-  assert.doesNotMatch(jiraView(state, { view: 'board', board: board({ last }), closedLog: String(last.startedAt) }, null), /jira-activity/, 'until it is closed');
+  assert.doesNotMatch(jiraView(state, { view: 'board', board: board({ last }), closedLog: String(last.startedAt) }, null), /jira-close-log/, 'until it is closed');
+});
+
+test('every step keeps its log in the ticket and its agent can be talked to afterwards', async t => {
+  const root = await temp(t), tickets = new TicketStore(root);
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Uno' }), stage: 'fix' }));
+  await tickets.update('NEO-2', () => ({ ...newTicket({ summary: 'Dos' }) }));
+  await mkdir(join(root, 'NEO-2'), { recursive: true });
+  await writeFile(join(root, 'NEO-2', 'descripcion.md'), '# NEO-2\n\n## Descripción\n\n1. Abrir\n2. Guardar\n');
+  const pipeline = new JiraPipeline({ tickets, agent: new DemoAgent({ delayMs: 20 }), demo: true, settings: async () => ({ models: {} }), chatAgent: () => new DemoAgent({ delayMs: 5, waitMs: 60000 }) });
+  const wait = async (check, label) => { for (let i = 0; i < 200 && !(await check()); i++) await new Promise(done => setTimeout(done, 10)); assert.ok(await check(), label); };
+
+  // ▶ on a ticket in Recolectar while another one is at work: it is collected now and queued.
+  await tickets.update('NEO-1', t => ({ ...t, autoLock: true }));
+  await pipeline.enqueue('NEO-1');
+  await wait(() => pipeline.running?.key === 'NEO-1', 'NEO-1 is at work');
+  await pipeline.enqueue('NEO-2');
+  let two = await tickets.get('NEO-2');
+  assert.deepEqual([two.stage, two.status, two.history[0].outcome], ['analyze', 'pending', 'ok'], 'collected at once, without waiting');
+  assert.deepEqual([pipeline.snapshot().queue, pipeline.running.key], [['NEO-2'], 'NEO-1'], 'and queued for Analizar');
+  assert.match(await readFile(join(root, 'NEO-2', 'registros', 'recolectar-1.log'), 'utf8'), /\[result\] Descripción: sí · 0 comentarios · 0 adjuntos · 2 pasos enumerados/);
+  await wait(() => !pipeline.looping, 'both are done');
+  assert.deepEqual((await tickets.get('NEO-2')).history.slice(0, 2).map(h => h.stage), ['collect', 'analyze'], 'then it went on with Analizar');
+
+  // The log of each step is in the ticket: in its history and complete in registros/.
+  let one = await tickets.get('NEO-1');
+  const fix = one.history[0];
+  assert.equal(fix.log, 'registros/solucionar-1.log');
+  await pipeline.writeLog('NEO-1', 'x', []);
+  assert.match(await readFile(join(root, 'NEO-1', fix.log), 'utf8'), /\[info\] Editando Facturas\/Exportador\.cs[\s\S]*Solucionar finalizado/);
+
+  // Talking to the agent of a step that ended: its answer goes to the log of that step.
+  await pipeline.talkToStep('NEO-1', 0, '¿Qué cambiaste?');
+  await wait(async () => (await tickets.get('NEO-1')).history[0].activity.some(a => a.kind === 'agent'), 'the agent of the step answers');
+  assert.equal(pipeline.snapshot().chats['NEO-1#0'], 'waiting');
+  await pipeline.talkToStep('NEO-1', 0, '¿Y por qué?');
+  await wait(async () => (await tickets.get('NEO-1')).history[0].activity.filter(a => a.kind === 'agent').length === 2, 'the same chat goes on');
+  await pipeline.stopChat('NEO-1', 0);
+  assert.equal(pipeline.snapshot().chats['NEO-1#0'], undefined);
+  one = await tickets.get('NEO-1');
+  assert.deepEqual(one.history[0].activity.filter(a => ['person', 'agent'].includes(a.kind)).map(a => a.kind), ['person', 'agent', 'person', 'agent', 'person']);
+  await pipeline.writeLog('NEO-1', 'x', []);
+  assert.match(await readFile(join(root, 'NEO-1', fix.log), 'utf8'), /Tú: ¿Qué cambiaste\?[\s\S]*Respuesta simulada a «¿Y por qué\?»/);
+  await assert.rejects(pipeline.talkToStep('NEO-1', 9, 'Hola'), /Ese paso ya no está/);
+
+  // The general assistant: its conversation is kept in the tickets folder until started anew.
+  await pipeline.talkGeneral('Quita los aprendizajes repetidos');
+  await wait(() => pipeline.general.activity.some(a => a.kind === 'agent'), 'the assistant answers');
+  assert.equal(pipeline.snapshot().general.conversation, 'waiting');
+  await pipeline.stopGeneral();
+  await pipeline.saveGeneral();
+  assert.match(await readFile(join(root, 'asistente.json'), 'utf8'), /Quita los aprendizajes repetidos/);
+  await pipeline.resetGeneral();
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'asistente.json'), 'utf8')), { sessionId: null, activity: [] });
+});
+
+test('nothing reaches Jira from the agents: no token, no Neo Team data and no web', () => {
+  const guard = { writable: ['/t/NEO-1'], cwd: '/t/NEO-1', hidden: ['/app/.neo-team'], visible: ['/app/.neo-team/jira'], blocked: ['empresa.atlassian.net', 'jira.empresa.local'] };
+  const shell = command => permissionFor({ kind: 'shell', fullCommandText: command }, guard).kind;
+  for (const command of ['curl -X POST https://jira.empresa.local/rest/api/2/issue/NEO-1/comment', 'Invoke-RestMethod -Uri $u -Method Post', 'iwr https://example.com', 'type C:\\app\\.neo-team\\jira-token', 'echo %NEO_TEAM_JIRA_TOKEN%', 'node -e "fetch(\'https://x\')"', 'cat /app/.neo-team/workspace.json']) assert.equal(shell(command), 'reject', command);
+  for (const command of ['dotnet build App.sln', 'winapp ui inspect -a App', 'cat /app/.neo-team/jira/NEO-1/descripcion.md']) assert.equal(shell(command), 'approve-once', command);
+  assert.equal(permissionFor({ kind: 'read', path: '/app/.neo-team/jira-token' }, guard).kind, 'reject');
+  assert.equal(permissionFor({ kind: 'read', path: '/app/.neo-team/jira/NEO-1/descripcion.md' }, guard).kind, 'approve-once');
+  assert.equal(permissionFor({ kind: 'url', url: 'https://empresa.atlassian.net' }, guard).kind, 'reject');
+  assert.match(systemMessage('fix'), /Never contact Jira or any web service and never publish anything/);
 });
 
 test('the board is filtered by key or title while typing', () => {

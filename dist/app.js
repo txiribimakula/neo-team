@@ -16,7 +16,7 @@ let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
 // Jira: the board comes from the server and is polled while the section is open.
-let jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {} };
+let jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {}, tells: {} };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
@@ -85,7 +85,7 @@ function setState(next) {
     prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
     maintenanceSnapshot = null; maintenanceSetup = null; resetMaintenanceFilters();
   }
-  if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {} };
+  if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {}, tells: {} };
   if (scope(state) !== scope(next) || state?.config?.team !== next?.config?.team) myIterationSnapshot = null;
   state = next; markSnapshot(state?.workspace);
 }
@@ -1561,11 +1561,19 @@ const ticketOpen = () => modal.open && !!jiraUi.detail && !!$('#jira-ticket');
 const jiraFileUrl = path => `/api/jira-file?key=${encodeURIComponent(jiraUi.detail?.key ?? '')}&path=${encodeURIComponent(path)}&s=${encodeURIComponent(state.csrf)}`;
 // Writing to the agent does not freeze its live log: the log is redrawn around the
 // prompt, which keeps the focus and the cursor where they were.
+// Who a chat box or button talks to: the agent at work (no target), the agent of a
+// step that ended ({ key, index }) or the general assistant ({ general: true }).
+function jiraChatTarget(el) {
+  if (el?.dataset?.general === 'true') return { general: true };
+  return el?.dataset?.index !== undefined ? { key: el.dataset.key, index: Number(el.dataset.index) } : {};
+}
+const jiraChatId = target => target.general ? 'general' : target.index !== undefined ? `${target.key}#${target.index}` : null;
 function keepingTell(redraw) {
   const box = document.activeElement?.dataset?.jiraTell !== undefined ? document.activeElement : null;
   const inModal = !!box && modal.contains(box), start = box?.selectionStart, end = box?.selectionEnd;
   redraw();
-  const next = box && (inModal ? $('#jira-ticket [data-jira-tell]') : $('#app [data-jira-tell]'));
+  const focus = box && `[data-focus="${CSS.escape(box.dataset.focus)}"]`;
+  const next = box && (inModal ? $(`#jira-ticket ${focus}`) : $(`#app ${focus}`));
   if (next && !next.disabled) { next.focus({ preventScroll: true }); next.setSelectionRange(start, end); }
 }
 function refreshTicket() {
@@ -1575,7 +1583,7 @@ function refreshTicket() {
   const closed = new Set([...current.querySelectorAll('details[data-part]')].filter(d => !d.open).map(d => d.dataset.part));
   const body = $('.modal-body', modal), scroll = body?.scrollTop ?? 0;
   const log = current.querySelector('.jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
-  current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl, jiraUi.tell);
+  current.outerHTML = ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, jiraUi.ticketTab, jiraFileUrl, jiraUi.tell, jiraUi.tells);
   $('#jira-ticket').querySelectorAll('details[data-part]').forEach(d => { if (open.has(d.dataset.part)) d.open = true; if (closed.has(d.dataset.part)) d.open = false; });
   if (body) body.scrollTop = scroll;
   const nextLog = $('#jira-ticket .jira-activity ol');
@@ -1628,7 +1636,8 @@ async function startJiraPolling() {
         if (ticketOpen() && !typing) { jiraSeen = seen; keepingTell(refreshTicket); }
         else if (jiraUi.view === 'board' && !editing && !modal.open) { jiraSeen = seen; keepingTell(renderJira); }
       }
-      await new Promise(done => setTimeout(done, jiraUi.board?.pipeline?.running ? 1000 : 4000));
+      const busy = jiraUi.board?.pipeline?.running || jiraUi.board?.pipeline?.general?.conversation || Object.keys(jiraUi.board?.pipeline?.chats ?? {}).length;
+      await new Promise(done => setTimeout(done, busy ? 1000 : 4000));
     }
   } finally { jiraPolling = false; }
 }
@@ -1720,14 +1729,18 @@ const actions = {
     delete jiraUi.answers[key]; jiraSeen = ''; render();
     toast(`Respuesta guardada. ${key} se retoma.`);
   },
-  'jira-tell': async () => {
-    const message = (jiraUi.tell ?? '').trim();
-    if (!message) { $('[data-jira-tell]')?.focus(); throw new Error('Escribe el mensaje para el agente.'); }
-    await jiraAction('/api/jira-tell', { message });
-    jiraUi.tell = ''; jiraSeen = ''; render();
-    if (ticketOpen()) refreshTicket();
-    ($('#jira-ticket [data-jira-tell]') ?? $('[data-jira-tell]'))?.focus();
+  // To the agent at work, to the agent of a step that ended or to the general assistant.
+  'jira-tell': async el => {
+    const target = jiraChatTarget(el), id = jiraChatId(target), message = ((id ? jiraUi.tells[id] : jiraUi.tell) ?? '').trim();
+    const focus = `[data-focus="${CSS.escape(`jira-tell${id ? `:${id}` : ''}`)}"]`;
+    if (!message) { $(focus)?.focus(); throw new Error('Escribe el mensaje.'); }
+    await jiraAction('/api/jira-tell', { message, ...target });
+    if (id) delete jiraUi.tells[id]; else jiraUi.tell = '';
+    jiraSeen = ''; render();
+    if (ticketOpen()) { await loadJiraTicket(jiraUi.detail.key).catch(() => {}); refreshTicket(); }
+    ($(`#jira-ticket ${focus}`) ?? $(focus))?.focus();
   },
+  'jira-general-reset': () => jiraAction('/api/jira-general-reset', {}),
   'jira-pause': el => jiraAction('/api/jira-pause', { on: el.dataset.on === 'true' }),
   'jira-close-log': el => { jiraUi.closedLog = el.dataset.started; render(); },
   'jira-done': async el => {
@@ -1741,7 +1754,7 @@ const actions = {
   },
   'jira-autolock': el => jiraAction('/api/jira-autolock', { key: el.dataset.key, locked: el.dataset.locked === 'true' }),
   'jira-auto': el => jiraAction('/api/jira-auto', { on: el.dataset.on === 'true' }),
-  'jira-stop': () => jiraAction('/api/jira-stop', {}),
+  'jira-stop': el => jiraAction('/api/jira-stop', jiraChatTarget(el)),
   'jira-archive': el => jiraAction('/api/jira-archive', { key: el.dataset.key, archived: el.dataset.archived === 'true' }),
   'jira-open-folder': el => jiraAction('/api/jira-open', el.dataset.key ? { key: el.dataset.key } : {}),
   'jira-learnings': async el => {
@@ -1757,7 +1770,7 @@ const actions = {
   'jira-open-ticket': async el => {
     const ticket = jiraUi.board?.tickets?.find(t => t.key === el.dataset.key);
     jiraUi.detail = { key: el.dataset.key }; jiraUi.ticketTab = null;
-    showModal(`${el.dataset.key}${ticket ? ` · ${ticket.summary}` : ''}`, '', ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, null, jiraFileUrl, jiraUi.tell));
+    showModal(`${el.dataset.key}${ticket ? ` · ${ticket.summary}` : ''}`, '', ticketDetail(jiraUi.board, jiraUi.detail, state.jira?.demo, jiraUi.answers, null, jiraFileUrl, jiraUi.tell, jiraUi.tells));
     modal.classList.add('wide-modal');
     syncUrl();
     await loadJiraTicket(el.dataset.key); refreshTicket();
@@ -1911,7 +1924,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
-  if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell']().catch(errorInModal); return; }
+  if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell'](event.target).catch(errorInModal); return; }
   if (event.target.dataset?.jiraAnswer && event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); actions['jira-answer'](event.target.nextElementSibling).catch(errorInModal); return; }
   const jiraCard = event.target.classList?.contains('jira-card') ? event.target : null;
   if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
@@ -2018,7 +2031,7 @@ document.addEventListener('input',event=>{
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
   if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
-  if(event.target.dataset.jiraTell!==undefined){jiraUi.tell=event.target.value;document.querySelectorAll('[data-jira-tell]').forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
+  if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if(event.target.dataset.jiraSearch!==undefined){const {selectionStart,selectionEnd}=event.target;jiraUi.search=event.target.value;renderJira();$('[data-jira-search]')?.setSelectionRange(selectionStart,selectionEnd);}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}

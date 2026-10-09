@@ -78,7 +78,12 @@ function jiraPipeline() {
   const root = jiraRoot(settings), demo = store.data.mode === 'demo';
   if (!jiraPipelines.has(root)) {
     const tickets = new TicketStore(root);
-    jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent(), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, logs: !!store.data.jiraLogs?.demo } : jiraSettings()),
+    // The agents cannot read Neo Team's data (the Jira token among it) apart from the
+    // tickets, nor run anything that names the Jira site.
+    const host = (() => { try { return new URL(settings.url).host; } catch { return ''; } })();
+    const guard = { hidden: [store.directory], visible: [root], blocked: [host] };
+    jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent({ guard }), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, logs: !!store.data.jiraLogs?.demo } : jiraSettings()),
+      chatAgent: demo ? () => new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : () => new CopilotAgent({ guard }),
       comment: async (key, body) => (demo ? new DemoJiraClient() : new JiraClient(jiraSettings(), await jiraToken())).addComment(key, body),
       models: async () => { if (!demo && !copilotModels.length) copilotModels = (await copilot.status()).models ?? []; return demo ? [] : copilotModels; } }));
     const pipeline = jiraPipelines.get(root);
@@ -97,6 +102,7 @@ async function jiraBoard() {
   if (!settings) return { settings: null };
   const pipeline = jiraPipeline();
   await pipeline.recovered;
+  await pipeline.generalState();
   const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
   const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
   return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, demo: true } : await detectJiraTools() };
@@ -189,7 +195,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-logs', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -565,8 +571,16 @@ const server = http.createServer(async (req, res) => {
         }
         if (path === '/api/jira-tell') {
           // What the person tells the agent at work, from its live log.
+          // To the agent at work, to the agent of a step that ended, or to the general assistant.
           if (typeof input.message !== 'string') throw fail('Mensaje no válido.');
-          await jiraPipeline().tell(input.message);
+          const pipeline = jiraPipeline();
+          if (input.general === true) await pipeline.talkGeneral(input.message);
+          else if (input.index !== undefined) await pipeline.talkToStep(checkKey(input.key), input.index, input.message);
+          else await pipeline.tell(input.message);
+          return json(res, { jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-general-reset') {
+          await jiraPipeline().resetGeneral();
           return json(res, { jira: await jiraBoard() });
         }
         if (path === '/api/jira-pause') {
@@ -586,7 +600,11 @@ const server = http.createServer(async (req, res) => {
           const pipeline = jiraPipeline();
           if (path === '/api/jira-run') await pipeline.enqueue(checkKey(input.key));
           else if (path === '/api/jira-auto') pipeline.setAuto(input.on === true);
-          else if (path === '/api/jira-stop') await pipeline.stop();
+          else if (path === '/api/jira-stop') {
+            if (input.general === true) await pipeline.stopGeneral();
+            else if (input.index !== undefined) await pipeline.stopChat(checkKey(input.key), input.index);
+            else await pipeline.stop();
+          }
           else if (path === '/api/jira-move' || path === '/api/jira-archive') {
             const key = checkKey(input.key);
             if (pipeline.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
