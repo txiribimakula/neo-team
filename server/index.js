@@ -199,7 +199,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-rewind', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -647,11 +647,9 @@ const server = http.createServer(async (req, res) => {
           await jiraPipeline().pause(input.on);
           return json(res, { jira: await jiraBoard() });
         }
-        if (path === '/api/jira-done') {
-          // The person already did the step of the ticket's column: it goes on to the next.
-          const note = input.note ?? '';
-          if (typeof note !== 'string' || note.length > 10000) throw fail('La nota no puede superar 10000 caracteres.');
-          await jiraPipeline().markDone(checkKey(input.key), note);
+        if (path === '/api/jira-rewind') {
+          // The latest step of the ticket is undone: it goes back to that column.
+          await jiraPipeline().rewind(checkKey(input.key));
           return json(res, { jira: await jiraBoard() });
         }
         if (['/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-move', '/api/jira-archive', '/api/jira-learnings', '/api/jira-open'].includes(path)) {

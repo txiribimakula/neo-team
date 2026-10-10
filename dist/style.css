@@ -572,12 +572,12 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-avatar{flex-shrink:0;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font-size:9.5px;font-weight:700;background:#dfe6f3;color:#3a4f7a}
 .jira-assignee.me .jira-avatar{background:var(--green);color:#fff}
 .jira-assignee.unassigned{color:var(--muted);font-weight:500}.jira-assignee.unassigned .jira-avatar{background:#eef1ee;color:var(--muted)}
-.jira-done{color:#47772f}
+.jira-rewind{color:#7a6a3a}
 .jira-card-end{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
 .jira-ease{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;flex-shrink:0;cursor:help}
 .jira-ease rect{fill:#d9dfd9}.jira-ease.ease-3{color:#47772f}.jira-ease.ease-2{color:#a06f12}.jira-ease.ease-1{color:#9a3128}
 .jira-ease.ease-3 rect.on{fill:#5d9440}.jira-ease.ease-2 rect.on{fill:#d79a24}.jira-ease.ease-1 rect.on{fill:#c2564b}
-.jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-foot .jira-done,.jira-card-foot .jira-run{width:22px;min-width:22px;height:22px}
+.jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-foot .jira-rewind,.jira-card-foot .jira-run{width:22px;min-width:22px;height:22px}
 .jira-lock{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#a3ada6}
 .jira-lock:hover{border-color:#d5dfce;background:#fff}
 .jira-lock.locked{color:#8a5a12;background:#fff4dc;border-color:#ecd49c}

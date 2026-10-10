@@ -183,13 +183,12 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   board = (await post('/api/jira-auto', { on: false })).data.jira;
   assert.ok(board.tickets.find(t => t.key === 'NEO-101').archived);
   assert.deepEqual([board.tickets.find(t => t.key === 'NEO-103').stage, board.tickets.find(t => t.key === 'NEO-103').reproduceAttempts], ['analyze', 0], 'updating indexed it again and it is back in Analizar');
-  // Done by hand: the step is recorded as the person's and the ticket goes on.
-  board = (await post('/api/jira-done', { key: 'NEO-103', note: 'Recogido a mano.' })).data.jira;
-  const byHand = board.tickets.find(t => t.key === 'NEO-103');
-  assert.deepEqual([byHand.stage, byHand.status, byHand.history.at(-1).by, byHand.history.at(-1).outcome], ['reproduce', 'pending', 'person', 'analyzed']);
+  // Rewinding a solved ticket: its verification is undone and it waits in Verificar.
+  board = (await post('/api/jira-rewind', { key: 'NEO-102' })).data.jira;
+  const rewound = board.tickets.find(t => t.key === 'NEO-102');
+  assert.deepEqual([rewound.stage, rewound.status, rewound.history.at(-1).stage, !!rewound.history.at(-1).rewound], ['verify', 'pending', 'verify', true]);
   assert.equal(board.pipeline.running, null, 'paused: nothing runs after it');
-  assert.equal((await post('/api/jira-done', { key: 'NEO-102' })).status, 409, 'a resolved ticket has no step left');
-  assert.equal((await post('/api/jira-done', { key: 'NEO-103', note: 7 })).status, 400);
+  assert.equal((await post('/api/jira-rewind', { key: 'NEO-999' })).status, 404);
   assert.equal((await post('/api/jira-run', { key: '../../etc' })).status, 400);
   // Updating can bring only your tickets or a single one.
   assert.equal((await post('/api/jira-collect', { mode: 'single', key: 'neo-102' })).data.jira.settings.collect.key, 'NEO-102');

@@ -139,6 +139,8 @@ export class TicketStore {
     await writeAtomic(this.learningFile(scope), String(text ?? '').slice(0, 200000));
   }
 }
+// The step rewinding would undo: the latest one not rewound yet, other than collecting.
+export const rewindable = ticket => { const index = (ticket.history ?? []).findLastIndex(h => !h.rewound); return index >= 0 && ticket.history[index].stage !== 'collect' ? index : -1; };
 export const newTicket = meta => ({ ...meta, stage: 'collect', status: 'pending', iterations: 0, reproduceAttempts: 0, history: [], inFilter: true });
 
 // Reads the filter and downloads the tickets that are new or changed in Jira. A
@@ -353,7 +355,7 @@ Code folder: ${worktree?.path ?? settings.repository} — ${worktree ? `a separa
 ${previous.build && ticket.lastOutcome === 'build_failed' ? 'The previous fix did not build: read the latest build report and its log first and correct those errors.\n' : previous.verify && ticket.lastOutcome === 'not_fixed' ? 'The previous fix did not pass verification: read that report first and correct what still fails.\n' : ''}Find the root cause and make the smallest correct change following the conventions of the code. Do not build the application: the next step, «Compilar», builds it${settings.buildCommand ? ` with \`${settings.buildCommand}\`` : ''} when the person decides, and sends the ticket back to you with the log if it does not build. Do not commit.
 Your report: cause, changed files and why, risks and what the verification should check.
 Outcome "fixed" when the change is complete; "failed" when you could not fix it (explain why); "blocked" when you need a decision or information from a person.`,
-    verify: `${ticket.history?.findLast(h => h.stage === 'fix')?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one). It was built right before you started, as the first part of this step (see the latest build report): do not build again; if the build is missing, report "blocked".
+    verify: `${ticket.history?.findLast(h => h.stage === 'fix' && !h.rewound)?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one). It was built right before you started, as the first part of this step (see the latest build report): do not build again; if the build is missing, report "blocked".
 ${launch}
 ${WINAPP_GUIDE}
 Your check is the reproduction repeated: the same conditions and steps, but now the behavior must have changed. Start by reading the latest reproduction report (its «Para verificar» section) and reproducir.ps1${ticket.history?.findLast(h => h.stage === 'reproduce')?.by === 'person' ? ' (the reproduction was done by a person: if they left no steps, take them from the ticket)' : ''}. Launch the fixed build, prepare the same preconditions and data, replay reproducir.ps1 or those steps up to the same observation point: where the reproduction saw the wrong result, the expected behavior must now appear. The fix may change the screens a little: if a step no longer matches, adapt it, say so and update reproducir.ps1 so it keeps working on the fixed version. Then check closely related behavior did not break.
@@ -366,7 +368,7 @@ Outcome "verified" when the problem is gone; "not_fixed" when it still happens o
 // The latest report of each step, as a path the agent can read.
 export function latestReports(ticket, folder) {
   const out = {};
-  for (const entry of ticket.history ?? []) if (entry.report) out[entry.stage === 'collect' ? 'resumen' : entry.stage] = join(folder, entry.report);
+  for (const entry of ticket.history ?? []) if (entry.report && !entry.rewound) out[entry.stage === 'collect' ? 'resumen' : entry.stage] = join(folder, entry.report);
   return out;
 }
 
@@ -915,27 +917,22 @@ Read what you need from them and the ticket files before answering.`;
       return publish ? { ...rest, posted: true } : { ...rest, declined: true };
     }) }));
   }
-  async markDone(key, note = '') {
+  // Rewinding undoes the latest step: the ticket goes back to that step's column,
+  // waiting to do it again. The step stays in the history, marked, with its log and
+  // report, but the agents no longer take it into account.
+  async rewind(key) {
     checkKey(key);
     if (this.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
     const ticket = await this.tickets.get(key);
     if (!ticket) throw fail('El ticket ya no está disponible.', 404);
-    // Building is the start of Verificar: done by hand, the verification is.
-    const stage = stageOf(ticket.stage === 'build' ? 'verify' : ticket.stage);
-    if (!stage) throw fail('Este ticket ya está resuelto.', 409);
-    const settings = await this.settings(), outcome = stage.outcomes[0], at = new Date().toISOString();
-    const number = (ticket.history ?? []).filter(h => h.stage === stage.id).length + 1, report = stage.report(number);
-    const text = String(note ?? '').trim().slice(0, 10000);
-    await writeAtomic(join(this.tickets.folder(key), report), `# ${stage.name} · ${key} (hecho por una persona)\n\nEste paso lo hizo una persona a mano, no el agente.${text ? `\n\n${text}` : ''}\n`);
-    const log = logName(stage.id, number), activity = [{ at: Date.now(), kind: 'person', message: `Hecho a mano por ti: ${stage.name} pasa a ${OUTCOME_LABELS[outcome]}.${text ? `\n${text}` : ''}` }];
-    await this.writeLog(key, log, activity);
-    const entry = { stage: stage.id, number, outcome, report, by: 'person', question: null, model: null, usage: null, startedAt: at, finishedAt: at, error: null, log, activity };
+    const index = rewindable(ticket);
+    if (index < 0) throw fail('No hay ningún paso que rebobinar.', 409);
     await this.tickets.update(key, t => {
-      const counted = { ...t, ...(stage.id === 'fix' ? { iterations: (t.iterations ?? 0) + 1 } : {}), ...(stage.id === 'reproduce' ? { reproduceAttempts: (t.reproduceAttempts ?? 0) + 1 } : {}) };
-      return { ...counted, ...nextAfter(counted, stage.id, outcome, settings.maxIterations ?? 3), note: null, question: null, lastOutcome: outcome, history: [...(t.history ?? []), entry] };
+      const entry = t.history[index], history = t.history.map((h, i) => i === index ? { ...h, rewound: new Date().toISOString() } : h);
+      return { ...t, stage: entry.stage, status: 'pending', note: null, question: null, lastOutcome: history.findLast(h => !h.rewound)?.outcome ?? null, history,
+        ...(entry.stage === 'fix' ? { iterations: Math.max(0, (t.iterations ?? 0) - 1) } : {}), ...(entry.stage === 'reproduce' ? { reproduceAttempts: Math.max(0, (t.reproduceAttempts ?? 0) - 1) } : {}) };
     });
     this.queue = this.queue.filter(q => q.key !== key);
-    if (this.auto || this.focus === key) void this.loop();
   }
   async nextKey() {
     while (this.queue.length) {

@@ -38,11 +38,17 @@ const LIGHTS = [['off', 'Nada: el agente no actúa'], ['ask', 'Avisar: espera tu
 const STATUS = { pending: 'Pendiente', running: 'En curso', blocked: 'Necesita ayuda', done: 'Resuelto' };
 const stepOf = id => STEPS.find(c => c.id === id);
 const stageName = id => stepOf(id)?.name ?? id;
-const nextName = id => FLOW[FLOW.findIndex(c => c.id === (SHOWN_IN[id] === 'verify' ? 'verify' : id)) + 1]?.name ?? '';
-// The person did the step by hand: it is recorded as theirs and the ticket goes on.
-// What they wrote in the answer field, if anything, goes with it.
-const doneTitle = ticket => `Ya lo he hecho yo: pasar a ${nextName(ticket.stage)}`;
-const doneButton = ticket => `<button class="icon-button jira-done" data-action="jira-done" data-key="${escape(ticket.key)}" title="${escape(doneTitle(ticket))}" aria-label="${escape(`${doneTitle(ticket)} · ${ticket.key}`)}">✓</button>`;
+// Rewinding undoes the latest step (other than collecting): the ticket goes back to
+// that step's column to do it again.
+const rewindIndex = ticket => { const index = (ticket.history ?? []).findLastIndex(h => !h.rewound); return index >= 0 && ticket.history[index].stage !== 'collect' ? index : -1; };
+const REWIND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 6v12l-8.5-6Z"/><path d="M21 6v12l-8.5-6Z"/></svg>';
+function rewindButton(ticket) {
+  const index = rewindIndex(ticket);
+  if (index < 0) return '';
+  const entry = ticket.history[index], column = stageName(SHOWN_IN[entry.stage] ?? entry.stage);
+  const title = `Rebobinar: deshacer ${stageName(entry.stage)} ${entry.number ?? ''}`.trim() + ` y volver a ${column}`;
+  return `<button class="icon-button jira-rewind" data-action="jira-rewind" data-key="${escape(ticket.key)}" title="${escape(title)}" aria-label="${escape(`${title} · ${ticket.key}`)}">${REWIND}</button>`;
+}
 
 function modelSelect(column, settings, defaults, copilot) {
   const current = settings.models?.[column.id] ?? '';
@@ -150,7 +156,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
   return `<article class="jira-card status-${escape(status)}${awaiting ? ' awaiting' : ''}${ticket.locked ? ' locked' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
     <header>${typeIcon(ticket.type)}${!demo && ticket.url ? `<a class="jira-key" href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">${escape(ticket.key)}<small aria-hidden="true">↗</small></a>` : `<strong>${escape(ticket.key)}</strong>`}${priorityIcon(ticket.priority)}<span class="jira-status" title="${escape(STATUS[status] ?? status)}">${live ? '<span class="spinner" aria-hidden="true"></span>' : ''}</span>${ticket.stage === 'done' ? '' : lockButton(ticket)}</header>
     <span class="jira-card-title">${escape(ticket.summary)}</span>
-    <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${easeView(ticket.ease)}${run}${!live && ticket.stage !== 'done' ? doneButton(ticket) : ''}</span></span>
+    <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${easeView(ticket.ease)}${run}${live ? '' : rewindButton(ticket)}</span></span>
     <span class="jira-card-meta">${pills}<span class="jira-card-tools">${ticket.stage === 'done' ? '' : shareButtons(ticket, live)}${demo ? '' : `<button class="icon-button jira-tool" data-action="jira-open-folder" data-key="${escape(ticket.key)}" title="Abrir su carpeta" aria-label="Abrir la carpeta de ${escape(ticket.key)}">${FOLDER}</button>`}<button class="icon-button jira-tool" data-action="jira-archive" data-key="${escape(ticket.key)}" data-archived="${!ticket.archived}" title="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero (su carpeta se conserva)'}" aria-label="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero'} ${escape(ticket.key)}" ${live ? 'disabled' : ''}>${ticket.archived ? RESTORE : TRASH}</button></span></span>
     ${live?.conversation === 'waiting' ? '<small class="jira-live jira-waiting">Esperando tu respuesta</small>'
       : live ? `<small class="jira-live" title="${escape(last?.message ?? '')}">${escape(last?.message ?? 'Iniciando…')}</small>`
@@ -388,7 +394,7 @@ function stepPanel(entry, detail, demo, options, log = '', key = '', index = 0) 
   const report = (detail.reports ?? []).find(r => r.stage === entry.stage && r.number === entry.number && r.report === entry.report);
   const answer = (detail.answers ?? []).find(a => a.stage === entry.stage && a.at >= entry.finishedAt && (!entry.question || a.question === entry.question));
   const tokens = entry.usage ? (entry.usage.inputTokens ?? 0) + (entry.usage.outputTokens ?? 0) : entry.tokens;
-  const person = entry.by === 'person' ? '<span class="pill" title="Paso hecho a mano, no por el agente">Hecho por ti</span>' : '';
+  const person = (entry.by === 'person' ? '<span class="pill" title="Paso hecho a mano, no por el agente">Hecho por ti</span>' : '') + (entry.rewound ? `<span class="pill" title="${escape(`Deshecho ${when(entry.rewound)}: los agentes ya no lo tienen en cuenta`)}">Rebobinado</span>` : '');
   const posted = entry.posted ? `<span class="pill" title="Publicado como comentario en el ticket de Jira">${demo ? 'Publicado (simulado)' : 'En Jira'}</span>` : entry.posted === false ? `<span class="pill outcome-error" title="${escape(entry.postError ?? '')}">No publicado en Jira</span>` : '';
   const files = stepFiles(entry, detail.files ?? []);
   const decide = entry.pendingComment ? `<span class="jira-comment-decide">${commentButtons(key, index)}</span>` : '';
