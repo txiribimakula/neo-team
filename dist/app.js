@@ -1634,6 +1634,16 @@ async function loadJiraTicket(key) {
   if (!response.ok) throw new Error(data.error);
   jiraUi.detail = data.ticket;
 }
+// Sharing the state of a ticket. When both computers worked on it, nothing is replaced:
+// the card shows the choice instead of an error.
+async function jiraSharing(path, input, title, subtitle) {
+  try { return await runOperation(path, input, title, subtitle); }
+  catch (error) {
+    await loadJira().catch(() => {}); jiraSeen = '';
+    if (error.reason === 'diverged') { modal.close(); render(); toast(error.message, 'warning'); return null; }
+    render(); throw error;
+  }
+}
 // What updating collects is saved as it is chosen, with the key typed so far.
 async function saveJiraCollect() {
   const mode = $('[data-jira-collect]')?.value ?? jiraUi.board?.settings?.collect?.mode ?? 'filter';
@@ -1770,17 +1780,18 @@ const actions = {
   'jira-auto': el => jiraAction('/api/jira-auto', { on: el.dataset.on === 'true' }),
   'jira-stop': el => jiraAction('/api/jira-stop', jiraChatTarget(el)),
   'jira-share': async el => {
-    const key = el.dataset.key;
-    let data;
-    // A newer state from someone else stops the upload: the board then offers to bring it.
-    try { data = await runOperation('/api/jira-share', { key }, `Subir el estado de ${key}`, state.jira.demo ? 'Ejemplo: se guarda en memoria, nada llega a Jira.' : 'Sus informes, registros, evidencias y cambios del código, como adjunto del ticket en Jira.'); }
-    catch (error) { await loadJira().catch(() => {}); render(); throw error; }
+    const key = el.dataset.key, force = el.dataset.force === 'true';
+    // A newer state from someone else stops the upload: the board then offers to bring
+    // it or, when this computer also worked on it, to choose which one goes on.
+    const data = await jiraSharing('/api/jira-share', { key, force }, `Subir el estado de ${key}`, state.jira.demo ? 'Ejemplo: se guarda en memoria, nada llega a Jira.' : 'Sus informes, registros, evidencias y cambios del código, como adjunto del ticket en Jira.');
+    if (!data) return;
     jiraUi.board = data.jira; jiraSeen = ''; render();
     const { files, patch, size, replaced } = data.result;
     toast(`Estado de ${key} subido a Jira${replaced ? ', en lugar del anterior' : ''}: ${files} archivo${files === 1 ? '' : 's'}${patch ? ' y los cambios del código' : ''} · ${size < 1e6 ? `${Math.max(1, Math.round(size / 1e3))} KB` : `${(size / 1e6).toFixed(1)} MB`}.`);
   },
   'jira-resume': async el => {
-    const key = el.dataset.key, data = await runOperation('/api/jira-resume', { key }, `Traer el estado de ${key}`, 'El estado subido a Jira sustituye al de este equipo, que se guarda antes en copias.');
+    const key = el.dataset.key, data = await jiraSharing('/api/jira-resume', { key, force: el.dataset.force === 'true' }, `Traer el estado de ${key}`, 'El estado subido a Jira sustituye al de este equipo, que se guarda antes en copias.');
+    if (!data) return;
     jiraUi.board = data.jira; jiraSeen = ''; render();
     const { warnings, by } = data.result;
     toast(`${key} sigue donde lo dejó ${by || 'el otro equipo'}.${warnings.length ? ` ${warnings.join(' ')}` : ''}`, warnings.length ? 'warning' : 'info');

@@ -154,6 +154,9 @@ test('the board chooses what updating brings and shares the state of a ticket', 
   assert.doesNotMatch(card('NEO-1'), /jira-resume/);
   assert.match(card('NEO-2'), /data-action="jira-resume"[^>]*title="Traer el estado que subió Ana/, 'what another computer shared is offered');
   assert.doesNotMatch(card('NEO-3'), /data-action="jira-(resume|share)"/, 'nothing to share yet, and its own state is not offered back');
+  const both = jiraView(state, { view: 'board', board: { settings: { ...state.jira, collect: { mode: 'filter' } }, pipeline: {}, tickets: [{ ...tickets[1], diverged: { id: '9', mine: '2 pasos', theirs: 'Ana · 10 oct' } }] } }, { isAuthenticated: true, models: [] });
+  assert.match(both, /<div class="jira-diverged"><button class="button small" data-action="jira-resume" data-key="NEO-2" data-force="true" title="Traer el estado de Ana · 10 oct. Lo tuyo \(2 pasos\) se guarda en copias">Traer el suyo<\/button><button class="button small" data-action="jira-share" data-key="NEO-2" data-force="true" title="Subir lo tuyo \(2 pasos\) como el más reciente. El de Ana · 10 oct sigue en Jira">Subir el mío<\/button><\/div>/, 'worked on both sides: the person chooses on the card');
+  assert.doesNotMatch(both, /jira-tool jira-resume|data-action="jira-share" data-key="NEO-2" title/, 'instead of the icons');
 });
 
 test('with one ticket or only yours, updating downloads nothing else from the board', async t => {

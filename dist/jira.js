@@ -119,7 +119,14 @@ const TRASH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" strok
 const UPLOAD = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 8a4 4 0 0 1 0 8"/><path d="M12 12v9"/><path d="m8.5 15.5 3.5-3.5 3.5 3.5"/></svg>';
 const DOWNLOAD = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 8a4 4 0 0 1 0 8"/><path d="M12 12v9"/><path d="m8.5 17.5 3.5 3.5 3.5-3.5"/></svg>';
 // The state of the ticket, shared through Jira to go on with it on another computer.
+const divergedOf = ticket => ticket.diverged && ticket.shared && ticket.diverged.id === ticket.shared.id && ticket.shared.id !== ticket.sharedSeen ? ticket.diverged : null;
+// Both computers worked on it since they last shared it: the person chooses which one goes on.
+function divergedChoice(ticket) {
+  const d = divergedOf(ticket), key = escape(ticket.key);
+  return d ? `<div class="jira-diverged"><button class="button small" data-action="jira-resume" data-key="${key}" data-force="true" title="${escape(`Traer el estado de ${d.theirs}. Lo tuyo (${d.mine}) se guarda en copias`)}">Traer el suyo</button><button class="button small" data-action="jira-share" data-key="${key}" data-force="true" title="${escape(`Subir lo tuyo (${d.mine}) como el más reciente. El de ${d.theirs} sigue en Jira`)}">Subir el mío</button></div>` : '';
+}
 function shareButtons(ticket, live) {
+  if (divergedOf(ticket)) return '';
   const off = live ? 'disabled' : '', key = escape(ticket.key), shared = ticket.shared;
   const resume = shared && shared.id !== ticket.sharedSeen
     ? `<button class="icon-button jira-tool jira-resume" data-action="jira-resume" data-key="${key}" title="${escape(`Traer el estado que subió ${shared.author || 'otra persona'}${shared.created ? ` el ${when(shared.created)}` : ''} (lo de este equipo se guarda en copias)`)}" aria-label="Traer el estado compartido de ${key}" ${off}>${DOWNLOAD}</button>` : '';
@@ -163,6 +170,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
       : status === 'blocked' ? `<p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts)}`
       : queued ? '<small class="jira-await" title="Se ejecuta cuando termine el paso en curso">En cola</small>'
       : awaiting ? '<small class="jira-await">Espera tu OK ▶</small>' : ''}
+    ${live || ticket.stage === 'done' ? '' : divergedChoice(ticket)}
   </article>`;
 }
 

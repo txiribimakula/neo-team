@@ -70,7 +70,23 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, 'utf8')), sharedSeen: 'otro' }));
   const blocked = await post('/api/jira-share', { key: 'NEO-101' });
   assert.deepEqual([blocked.status, /que no has traído/.test(blocked.data.error)], [409, true]);
-  await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, 'utf8')), sharedSeen: replacedTicket.shared.id }));
+  // Worked on here too since it was shared: nothing is replaced, the card offers the choice.
+  const edit = async change => writeFile(stateFile, JSON.stringify(change(JSON.parse(await readFile(stateFile, 'utf8')))));
+  await edit(t => ({ ...t, history: [...t.history, { stage: 'analyze', number: 9, outcome: 'analyzed' }] }));
+  const both = await post('/api/jira-share', { key: 'NEO-101' });
+  const choosing = (await get('/api/jira')).jira.tickets.find(x => x.key === 'NEO-101');
+  assert.deepEqual([both.status, both.data.reason, choosing.diverged.mine, choosing.diverged.id], [409, 'diverged', '1 paso', replacedTicket.shared.id]);
+  assert.equal((await post('/api/jira-resume', { key: 'NEO-101' })).data.reason, 'diverged', 'bringing does not replace it either');
+  // «Subir el mío»: it goes on as the latest one.
+  const mine = await post('/api/jira-share', { key: 'NEO-101', force: true });
+  const kept = mine.data.jira.tickets.find(x => x.key === 'NEO-101');
+  assert.deepEqual([mine.status, mine.data.result.replaced, kept.diverged, kept.sharedSeen === kept.shared.id], [200, false, undefined, true], 'the other one is not deleted');
+  // «Traer el suyo»: what was done here goes to the copies.
+  await edit(t => ({ ...t, sharedSeen: 'otro', history: [...t.history, { stage: 'fix', number: 9, outcome: 'fixed' }] }));
+  assert.equal((await post('/api/jira-resume', { key: 'NEO-101' })).data.reason, 'diverged');
+  const theirs = await post('/api/jira-resume', { key: 'NEO-101', force: true });
+  assert.deepEqual([theirs.status, theirs.data.jira.tickets.find(x => x.key === 'NEO-101').diverged], [200, undefined]);
+  assert.ok(theirs.data.result.backup);
   const nothing = await post('/api/jira-resume', { key: 'NEO-102' });
   assert.deepEqual([nothing.status, /no tiene un estado compartido/.test(nothing.data.error)], [404, true]);
   const again = (await post('/api/jira-refresh')).data.result;

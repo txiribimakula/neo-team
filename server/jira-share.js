@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { writeAtomic } from './jira.js';
 import { ensureWorktree } from './jira-agents.js';
 import { safeEntry, unzip, zip } from './zip.js';
@@ -19,7 +19,7 @@ const FROM_JIRA = new Set(['adjuntos', 'codigo', 'descripcion.md', 'comentarios.
 const skipped = name => FROM_JIRA.has(name.toLowerCase()) || name.startsWith('.') || /\.(tmp|part)$/i.test(name);
 // What belongs to each computer and is kept when the state of another one arrives:
 // what Jira says of the ticket and how this person sees it on the board.
-const LOCAL = ['key', 'summary', 'type', 'jiraStatus', 'priority', 'updated', 'url', 'attachments', 'comments', 'skipped', 'assignee', 'news', 'archived', 'autoLock', 'inFilter', 'collectedAt', 'closedInJira', 'shared', 'sharedSeen', 'sharedOwn'];
+const LOCAL = ['key', 'summary', 'type', 'jiraStatus', 'priority', 'updated', 'url', 'attachments', 'comments', 'skipped', 'assignee', 'news', 'archived', 'autoLock', 'inFilter', 'collectedAt', 'closedInJira', 'shared', 'sharedSeen', 'sharedOwn', 'sharedBase', 'diverged'];
 
 function git(cwd, args, { env = {}, timeout = 5 * 60000 } = {}) {
   return new Promise((done, reject) => execFile('git', ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off', ...args], { cwd, timeout, maxBuffer: 512 * 1024 * 1024, encoding: 'buffer', windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env } },
@@ -40,6 +40,23 @@ export async function codeChanges(path) {
     const patch = await git(path, ['diff', '--cached', '--binary', '--full-index', 'HEAD'], { env });
     return { base, patch };
   } finally { await rm(temp, { force: true }); }
+}
+
+// Where the ticket is: its steps (collecting aside) and its code changes. It is kept
+// when the state is uploaded or brought, to know later whether something was done
+// here since then that bringing another state would replace.
+export async function fingerprint(tickets, key) {
+  const folder = tickets.folder(key), ticket = await tickets.get(key);
+  const steps = (ticket?.history ?? []).filter(h => h.stage !== 'collect');
+  const patch = await hasCode(folder) ? (await codeChanges(join(folder, 'codigo'))).patch : Buffer.alloc(0);
+  return { steps: steps.length, rewound: steps.filter(h => h.rewound).length, code: patch.length ? createHash('sha256').update(patch).digest('hex') : '' };
+}
+// What was done here since then, in words, or null when nothing was.
+export async function localWork(tickets, key) {
+  const ticket = await tickets.get(key), now = await fingerprint(tickets, key), base = ticket?.sharedBase ?? { steps: 0, rewound: 0, code: '' };
+  const steps = Math.max(0, now.steps - base.steps), rewound = Math.max(0, now.rewound - base.rewound), code = now.code !== base.code;
+  const parts = [steps && `${steps} paso${steps === 1 ? '' : 's'}`, rewound && `${rewound} rebobinado${rewound === 1 ? '' : 's'}`, code && 'cambios en el código'].filter(Boolean);
+  return parts.length ? parts.join(', ').replace(/, ([^,]*)$/, ' y $1') : null;
 }
 
 async function folderEntries(folder, prefix = '') {

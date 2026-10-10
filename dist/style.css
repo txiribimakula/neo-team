@@ -687,3 +687,4 @@ body.jira-fit .jira-side.is-closed{display:block}
 .jira-collect{display:flex;align-items:center;gap:6px}.jira-collect select{height:36px;width:auto;font-size:14px}.jira-collect input{height:36px;width:130px;padding:0 10px;font-size:14px;text-transform:uppercase}
 .jira-tool.jira-resume{color:var(--green);border-color:#bfe0c7;background:#eef8f0}
 .jira-board-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}.jira-board-foot .jira-archived{align-self:center}
+.jira-diverged{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}

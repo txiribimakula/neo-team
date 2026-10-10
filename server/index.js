@@ -15,7 +15,7 @@ import { Planner, createLocalItem, duplicateItem, addComment, discardComment, di
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
-import { packState, unpackState } from './jira-share.js';
+import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
 import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
@@ -513,12 +513,24 @@ const server = http.createServer(async (req, res) => {
           if (!ticket) throw fail('El ticket ya no está disponible.', 404);
           if (pipeline.running?.key === key) throw fail(`${key} tiene un paso en curso: detenlo o espera a que termine.`, 409);
           const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
+          const force = input.force === true;
+          // When both computers worked on the ticket since they last shared it, nothing is
+          // replaced without the person choosing which one goes on: it is shown on the card.
+          const diverged = async shared => {
+            progress({ message: `Comprobando lo hecho en ${key} en este equipo…` });
+            const mine = await localWork(pipeline.tickets, key);
+            if (!mine) return;
+            const theirs = `${shared.author || 'Otra persona'}${shared.created ? ` · ${new Date(shared.created).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}`;
+            await pipeline.tickets.update(key, t => ({ ...t, shared, diverged: { id: shared.id, mine, theirs } }));
+            throw Object.assign(fail(`${key}: tienes ${mine} sin subir y ${theirs} subió otro estado. Elige en la tarjeta cuál sigue.`, 409), { reason: 'diverged' });
+          };
           if (path === '/api/jira-share') {
             // A state someone else uploaded and this computer has not brought is never
-            // left behind: it has to be brought first.
+            // left behind without choosing it: bring it first, or upload this one over it.
             progress({ message: `Comprobando en Jira si hay un estado más reciente de ${key}…` });
             const latest = sharedOf((await client.issue(key)).fields?.attachment ?? []);
-            if (latest && latest.id !== ticket.sharedSeen) {
+            if (latest && latest.id !== ticket.sharedSeen && !force) {
+              await diverged(latest);
               await pipeline.tickets.update(key, t => ({ ...t, shared: latest }));
               throw fail(`${latest.author || 'Otra persona'} subió un estado de ${key}${latest.created ? ` el ${new Date(latest.created).toLocaleString('es')}` : ''} que no has traído. Tráelo antes de subir el tuyo.`, 409);
             }
@@ -527,22 +539,25 @@ const server = http.createServer(async (req, res) => {
             progress({ message: `Subiendo ${sharedName(key)} (${Math.max(1, Math.round(pack.data.length / 1e6))} MB) a ${key}…` });
             const attachment = await client.attach(key, sharedName(key), pack.data);
             const shared = { id: String(attachment?.id ?? ''), created: attachment?.created ?? new Date().toISOString(), author: jiraMe()?.name ?? '', size: pack.data.length, content: attachment?.content ?? null };
-            await pipeline.tickets.update(key, t => ({ ...t, shared, sharedSeen: shared.id, sharedOwn: shared.id }));
+            const base = await fingerprint(pipeline.tickets, key);
+            await pipeline.tickets.update(key, t => { const { diverged: _, ...rest } = t; return { ...rest, shared, sharedSeen: shared.id, sharedOwn: shared.id, sharedBase: base }; });
             // The new one replaces the previous one only if this computer uploaded it.
             let replaced = false;
-            if (latest && latest.id === ticket.sharedOwn && shared.id) {
+            if (latest && latest.id === ticket.sharedOwn && latest.id === ticket.sharedSeen && shared.id) {
               progress({ message: `Borrando el estado anterior de ${key}…` });
               replaced = await client.deleteAttachment(latest.id).then(() => true, () => false);
             }
             return json(res, { result: { key, files: pack.files, patch: pack.patch, size: pack.data.length, replaced }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
           }
           if (!ticket.shared?.content) throw fail(`${key} no tiene un estado compartido en Jira. Actualiza el tablero para buscarlo.`, 404);
+          if (!force) await diverged(ticket.shared);
           progress({ message: `Descargando el estado de ${key} que subió ${ticket.shared.author || 'otra persona'}…` });
           const data = Buffer.from(await (await client.download(ticket.shared.content)).arrayBuffer());
           progress({ message: `Aplicando el estado de ${key}…` });
           pipeline.queue = pipeline.queue.filter(q => q.key !== key);
           const resumed = await unpackState({ tickets: pipeline.tickets, key, data, settings, me: jiraMe() });
-          await pipeline.tickets.update(key, t => ({ ...t, sharedSeen: ticket.shared.id }));
+          const base = await fingerprint(pipeline.tickets, key);
+          await pipeline.tickets.update(key, t => { const { diverged: _, ...rest } = t; return { ...rest, sharedSeen: ticket.shared.id, sharedBase: base }; });
           return json(res, { result: { key, warnings: resumed.warnings, backup: resumed.backup, by: resumed.manifest.by ?? '' }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-collect') {

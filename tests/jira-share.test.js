@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zip, unzip, safeEntry } from '../server/zip.js';
-import { packState, unpackState } from '../server/jira-share.js';
+import { fingerprint, localWork, packState, unpackState } from '../server/jira-share.js';
 import { TicketStore, ensureWorktree, newTicket } from '../server/jira-agents.js';
 import { collectTicket, SHARED, sharedName } from '../server/jira.js';
 
@@ -112,4 +112,22 @@ test('the shared state is not downloaded with the attachments of the ticket', as
   assert.deepEqual([meta.attachments, downloaded, meta.shared.id, meta.shared.author], [1, ['https://e/1'], '3', 'Ana'], 'only the latest state counts');
   assert.doesNotMatch(await readFile(join(folder, 'descripcion.md'), 'utf8'), /neo-team-estado/);
   assert.ok(SHARED.test('neo-team-estado-NEO-1.zip'));
+});
+
+test('what was done here since the state was last shared is told apart', async t => {
+  const dir = await temp(t), tickets = new TicketStore(join(dir, 'tickets'));
+  await repository(join(dir, 'repo'));
+  await tickets.update('NEO-4', () => ({ ...newTicket({ key: 'NEO-4' }), history: [{ stage: 'collect', number: 1 }] }));
+  assert.equal(await localWork(tickets, 'NEO-4'), null, 'only collected: nothing to lose');
+  await tickets.update('NEO-4', t => ({ ...t, history: [...t.history, { stage: 'analyze', number: 1 }, { stage: 'fix', number: 1 }] }));
+  const { path } = await ensureWorktree({ repository: join(dir, 'repo') }, { key: 'NEO-4' }, tickets.folder('NEO-4'));
+  await writeFile(join(path, 'a.txt'), 'cambiado\n');
+  assert.equal(await localWork(tickets, 'NEO-4'), '2 pasos y cambios en el código');
+  const base = await fingerprint(tickets, 'NEO-4');
+  await tickets.update('NEO-4', t => ({ ...t, sharedBase: base }));
+  assert.equal(await localWork(tickets, 'NEO-4'), null, 'nothing since it was shared');
+  await tickets.update('NEO-4', t => ({ ...t, history: t.history.map((h, i) => i === 2 ? { ...h, rewound: 'x' } : h) }));
+  assert.equal(await localWork(tickets, 'NEO-4'), '1 rebobinado');
+  await writeFile(join(path, 'a.txt'), 'otra vez\n');
+  assert.equal(await localWork(tickets, 'NEO-4'), '1 rebobinado y cambios en el código');
 });
