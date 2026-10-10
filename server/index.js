@@ -494,7 +494,7 @@ const server = http.createServer(async (req, res) => {
           const pipeline = jiraPipeline();
           if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(() => null));
           const ffmpeg = store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg;
-          const sync = await syncTickets({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, onProgress: progress });
+          const sync = await syncTickets({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, scope: settings.collect, onProgress: progress });
           // A ticket finished in Jira is no longer waiting for an agent.
           pipeline.queue = pipeline.queue.filter(q => !sync.closed.includes(q.key));
           if (sync.closed.includes(pipeline.focus)) pipeline.focus = null;

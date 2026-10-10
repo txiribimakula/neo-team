@@ -254,8 +254,10 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 // Brings the local tickets up to date with Jira: those finished there (status of
 // category Done) leave the board, keeping their files, and those changed there are
 // downloaded again, which brings their new comments and attachments.
-export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, onProgress = () => {} }) {
-  const local = (await tickets.list()).filter(t => !t.archived);
+// With a single ticket only that one is looked at; with yours, the rest are checked
+// (to take the finished ones off the board) but their changes are not downloaded.
+export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, scope = { mode: 'filter' }, onProgress = () => {} }) {
+  const local = (await tickets.list()).filter(t => !t.archived && (scope.mode !== 'single' || t.key === scope.key));
   const result = { checked: local.length, closed: [], updated: [], missing: [], skipped: [] };
   const remote = new Map();
   for (let i = 0; i < local.length; i += 100) {
@@ -274,7 +276,7 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
       result.closed.push(ticket.key);
       continue;
     }
-    if (issue.fields?.updated === ticket.updated) {
+    if (issue.fields?.updated === ticket.updated || (scope.mode === 'mine' && !assignee?.me)) {
       if (JSON.stringify(ticket.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(ticket.key, t => ({ ...t, assignee }));
       continue;
     }

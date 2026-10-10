@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter } from '../server/jira-agents.js';
+import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter, syncTickets } from '../server/jira-agents.js';
 import { jiraView, ticketDetail, ticketHead, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView, pendingComments, commentPrompt } from '../dist/jira.js';
 import { loginSteps } from '../dist/reviews.js';
 
@@ -154,6 +154,22 @@ test('the board chooses what updating brings and shares the state of a ticket', 
   assert.doesNotMatch(card('NEO-1'), /jira-resume/);
   assert.match(card('NEO-2'), /data-action="jira-resume"[^>]*title="Traer el estado que subió Ana/, 'what another computer shared is offered');
   assert.doesNotMatch(card('NEO-3'), /data-action="jira-(resume|share)"/, 'nothing to share yet, and its own state is not offered back');
+});
+
+test('with one ticket or only yours, updating downloads nothing else from the board', async t => {
+  const tickets = new TicketStore(await temp(t)), searches = [], downloads = [];
+  for (const key of ['NEO-1', 'NEO-2', 'NEO-3']) await tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));
+  const assignees = { 'NEO-1': { accountId: 'yo' }, 'NEO-2': { accountId: 'otra' }, 'NEO-3': null };
+  const client = {
+    search: async jql => { searches.push(jql); return { issues: ['NEO-1', 'NEO-2', 'NEO-3'].filter(k => jql.includes(k)).map(key => ({ key, fields: { updated: '2026-10-02T00:00:00Z', assignee: assignees[key], status: { statusCategory: { key: 'indeterminate' } } } })) }; },
+    issue: async key => { downloads.push(key); return { key, fields: { summary: key, updated: '2026-10-02T00:00:00Z' } }; }, comments: async () => [], download: async () => new Response(''),
+  };
+  const sync = scope => syncTickets({ client, settings: { url: 'https://e' }, tickets, me: { id: 'yo' }, scope });
+  assert.deepEqual((await sync({ mode: 'single', key: 'NEO-3' })).updated.map(u => u.key), ['NEO-3']);
+  assert.deepEqual([searches.at(-1), downloads], ['key in (NEO-3)', ['NEO-3']], 'only that ticket is asked for and downloaded');
+  assert.deepEqual((await sync({ mode: 'mine' })).updated.map(u => u.key), ['NEO-1'], 'only yours are downloaded');
+  assert.equal((await tickets.get('NEO-2')).updated, '2026-10-01T00:00:00Z', 'the rest stay as they were, to be downloaded with the whole filter');
+  assert.deepEqual((await sync({ mode: 'filter' })).updated.map(u => u.key), ['NEO-2']);
 });
 
 test('tickets move between columns and back to fix while verification fails', () => {
