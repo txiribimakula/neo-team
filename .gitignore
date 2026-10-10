@@ -1,6 +1,9 @@
 node_modules/
 .neo-team/
 .env
+.env.*
+!.env.example
+!.env.*.example
 .DS_Store
 .sites-runtime/
 coverage/

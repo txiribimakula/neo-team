@@ -5,8 +5,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey } from '../server/jira-agents.js';
-import { jiraView, ticketDetail, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView } from '../dist/jira.js';
+import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter } from '../server/jira-agents.js';
+import { jiraView, ticketDetail, ticketHead, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView, pendingComments, commentPrompt } from '../dist/jira.js';
+import { loginSteps } from '../dist/reviews.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
 
@@ -112,6 +113,49 @@ test('a collected ticket has its description, comments and attachments on disk',
   assert.equal(downloads, 0, 'an attachment already downloaded is kept');
 });
 
+test('updating collects the whole filter, only your tickets or a single one', async t => {
+  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'filter' }), 'project = NEO ORDER BY updated DESC');
+  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'mine' }), '(project = NEO) AND assignee = currentUser() ORDER BY updated DESC');
+  assert.equal(collectJql('10020', { mode: 'mine' }), '(filter = 10020) AND assignee = currentUser()');
+  assert.equal(collectJql('ORDER BY created', { mode: 'mine' }), 'assignee = currentUser() ORDER BY created');
+  assert.equal(collectJql('', { mode: 'single', key: 'NEO-7' }), 'issuekey = NEO-7', 'one ticket, in the filter or not');
+  assert.throws(() => collectJql('1', { mode: 'single', key: '' }), /clave del ticket/);
+  assert.deepEqual(collectScopeFrom({ mode: 'single', key: ' https://e.atlassian.net/browse/neo-12 ' }), { mode: 'single', key: 'NEO-12' }, 'the key or its address');
+  assert.deepEqual(collectScopeFrom(undefined), { mode: 'filter', key: '' });
+  assert.throws(() => collectScopeFrom({ mode: 'single', key: 'hola' }), /no es válido/);
+
+  const tickets = new TicketStore(await temp(t)), queries = [];
+  const issue = (key, assignee) => ({ key, fields: { summary: key, updated: '2026-10-01', assignee } });
+  const client = {
+    search: async jql => { queries.push(jql); return { issues: [issue('NEO-1', { accountId: 'yo', displayName: 'Yo' }), issue('NEO-2', { accountId: 'otra', displayName: 'Otra' })], limited: false }; },
+    issue: async key => ({ key, fields: { summary: key, status: { name: 'Open' }, updated: '2026-10-01' } }), comments: async () => [], download: async () => new Response(''),
+  };
+  const run = scope => collectFilter({ client, settings: { url: 'https://e.atlassian.net', filter: 'project = NEO' }, tickets, me: { id: 'yo' }, scope });
+  assert.deepEqual([(await run({ mode: 'mine' })).downloaded, (await tickets.list()).map(x => x.key)], [1, ['NEO-1']], 'only yours');
+  await tickets.update('NEO-9', () => newTicket({ key: 'NEO-9' }));
+  assert.equal((await run({ mode: 'single', key: 'NEO-2' })).left, 0, 'one ticket does not tell which ones left the filter');
+  assert.deepEqual((await tickets.list()).map(x => [x.key, x.inFilter]), [['NEO-1', true], ['NEO-2', true], ['NEO-9', true]]);
+  await assert.rejects(run({ mode: 'single', key: 'NEO-5' }), /NEO-5 no existe/);
+  assert.equal((await run({ mode: 'filter' })).left, 1, 'the whole filter does');
+  assert.deepEqual(queries.slice(0, 2), ['(project = NEO) AND assignee = currentUser()', 'issuekey = NEO-2']);
+});
+
+test('the board chooses what updating brings and shares the state of a ticket', () => {
+  const state = { mode: 'azure', jira: { url: 'https://e', filter: '1', hasToken: true } };
+  const tickets = [{ key: 'NEO-1', summary: 'Uno', stage: 'analyze', status: 'pending', history: [{ stage: 'collect' }] },
+    { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'pending', history: [{ stage: 'collect' }], shared: { id: '9', author: 'Ana', created: '2026-10-10T10:00:00Z' } },
+    { key: 'NEO-3', summary: 'Tres', stage: 'analyze', status: 'pending', history: [], shared: { id: '5', created: '2026-10-10T10:00:00Z' }, sharedSeen: '5' }];
+  const view = collect => jiraView(state, { view: 'board', board: { settings: { ...state.jira, collect }, pipeline: {}, tickets } }, { isAuthenticated: true, models: [] });
+  assert.match(view({ mode: 'mine', key: '' }), /<select data-jira-collect[^>]*>[\s\S]*?<option value="mine" selected>Asignados a mí/);
+  assert.doesNotMatch(view({ mode: 'mine', key: '' }), /data-jira-collect-key/);
+  assert.match(view({ mode: 'single', key: 'NEO-7' }), /<input data-jira-collect-key[^>]*value="NEO-7"/);
+  const html = view({ mode: 'filter', key: '' }), card = key => html.match(new RegExp(`aria-label="${key} · [^"]+">([\\s\\S]*?)</article>`))[1];
+  assert.match(card('NEO-1'), /data-action="jira-share"/);
+  assert.doesNotMatch(card('NEO-1'), /jira-resume/);
+  assert.match(card('NEO-2'), /data-action="jira-resume"[^>]*title="Traer el estado que subió Ana/, 'what another computer shared is offered');
+  assert.doesNotMatch(card('NEO-3'), /data-action="jira-(resume|share)"/, 'nothing to share yet, and its own state is not offered back');
+});
+
 test('tickets move between columns and back to fix while verification fails', () => {
   const t = { iterations: 1, reproduceAttempts: 1 };
   assert.deepEqual(nextAfter(t, 'collect', 'ok'), { stage: 'analyze', status: 'pending' });
@@ -120,7 +164,7 @@ test('tickets move between columns and back to fix while verification fails', ()
   assert.deepEqual(nextAfter(t, 'reproduce', 'reproduced'), { stage: 'fix', status: 'pending' });
   assert.deepEqual(nextAfter(t, 'reproduce', 'not_reproduced'), { stage: 'reproduce', status: 'pending' });
   assert.equal(nextAfter({ reproduceAttempts: 2 }, 'reproduce', 'not_reproduced').status, 'blocked');
-  assert.deepEqual(nextAfter(t, 'fix', 'fixed'), { stage: 'build', status: 'pending' });
+  assert.deepEqual(nextAfter(t, 'fix', 'fixed'), { stage: 'verify', status: 'pending' }, 'a fix waits in Verificar, which builds it first');
   assert.deepEqual(nextAfter(t, 'build', 'built'), { stage: 'verify', status: 'pending' });
   assert.deepEqual(nextAfter(t, 'build', 'build_failed', 3), { stage: 'fix', status: 'pending' });
   assert.deepEqual(nextAfter({ iterations: 3 }, 'build', 'build_failed', 3), { stage: 'build', status: 'blocked', note: 'No compila tras 3 correcciones.' });
@@ -164,19 +208,28 @@ test('prompts carry the lessons, the reports so far and how to drive the app', (
   assert.match(reproduce, /<lessons_general>\n- Abrir con X\n<\/lessons_general>/);
   assert.match(reproduce, /<lessons_reproduce>\n- Esperar al splash/);
   assert.match(reproduce, /winapp ui inspect/);
-  assert.match(reproduce, /reproducir\.ps1/);
+  assert.match(reproduce, /reproducir\.ps1 in the ticket folder: a PowerShell script that starts with the application already open[\s\S]*do not launch it in the script/, 'the reproduction is left ready to replay on the fixed build');
+  assert.match(reproduce, /section «Para verificar»: preconditions and data, the exact steps, the observation point/);
+  assert.match(reproduce, /Lessons of the Verificar agent[\s\S]*<lessons_verify>\n\(none yet\)/, 'and it reads what the verification learned');
+  const verify = stagePrompt({ stage: 'verify', ticket, folder: '/t/NEO-1', files: [], settings, lessons: { reproduce: '- El botón Exportar tarda' }, previous: { reproduce: '/t/NEO-1/reproduccion-1.md' } });
+  assert.match(verify, /Lessons of the Reproducir agent[\s\S]*<lessons_reproduce>\n- El botón Exportar tarda/, 'the verification reads what the reproduction learned');
+  assert.match(verify, /Latest reproduction report: \/t\/NEO-1\/reproduccion-1\.md/);
+  assert.match(verify, /Start by reading the latest reproduction report \(its «Para verificar» section\) and reproducir\.ps1/);
+  assert.match(verify, /where the reproduction saw the wrong result, the expected behavior must now appear/, 'same steps, changed behavior');
+  assert.match(verify, /before \(from the reproduction\) and now, side by side/);
   assert.match(reproduce, /not configured: find it/, 'without a launch command the agent finds it and learns it');
   const fix = stagePrompt({ stage: 'fix', ticket, folder: '/t/NEO-1', files: [], settings, worktree: { path: '/t/NEO-1/codigo', branch: 'neo/NEO-1' }, previous: { verify: '/t/NEO-1/verificacion-1.md' } });
   assert.match(fix, /\/t\/NEO-1\/codigo — a separate git worktree of \/r on branch neo\/NEO-1/);
   assert.match(fix, /previous fix did not pass verification/);
   assert.match(fix, /Do not build the application: the next step, «Compilar», builds it with `dotnet build`/);
   assert.match(stagePrompt({ stage: 'fix', ticket: { ...ticket, lastOutcome: 'build_failed' }, folder: '/t/NEO-1', files: [], settings, previous: { build: '/t/NEO-1/compilacion-1.md' } }), /did not build: read the latest build report[\s\S]*Latest build report: \/t\/NEO-1\/compilacion-1\.md|Latest build report: \/t\/NEO-1\/compilacion-1\.md[\s\S]*did not build: read the latest build report/);
-  assert.match(stagePrompt({ stage: 'verify', ticket, folder: '/t/NEO-1', files: [], settings }), /«Compilar» step already built it[\s\S]*do not build again/);
+  assert.match(stagePrompt({ stage: 'verify', ticket, folder: '/t/NEO-1', files: [], settings }), /built right before you started, as the first part of this step[\s\S]*do not build again/);
   assert.doesNotMatch(fix, /winapp ui/);
+  assert.doesNotMatch(fix, /lessons_reproduce|lessons_verify/, 'the other agents keep only their own');
   assert.match(systemMessage('verify'), /neo_learn/);
 });
 
-test('the build is its own step: it runs the command and a failure goes back to fix', async t => {
+test('verifying starts by building: a failure goes back to fix before any agent checks it', async t => {
   const root = await temp(t), tickets = new TicketStore(root);
   await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'fix' }));
   const runs = [];
@@ -184,14 +237,14 @@ test('the build is its own step: it runs the command and a failure goes back to 
     runs.push(options);
     await options.onLearn('general', 'Compilar con dotnet build');
     await options.onLearn('general', 'Compilar con dotnet build');
-    return { outcome: 'fixed', report: 'Cambio en A.cs', model: options.model, usage: { inputTokens: 10, outputTokens: 5 } };
+    return { outcome: options.stage === 'verify' ? 'verified' : 'fixed', report: 'Cambio en A.cs', model: options.model, usage: { inputTokens: 10, outputTokens: 5 } };
   }, abort: async () => {} };
   const builds = [{ ok: false, code: 1, log: 'error CS1002' }, { ok: true, code: 0, log: 'ok' }], built = [];
   const pipeline = new JiraPipeline({ tickets, agent, settings: async () => ({ repository: '/r', buildCommand: 'dotnet build', maxIterations: 3, models: {} }),
-    worktree: async () => ({ path: join(root, 'NEO-1', 'codigo'), branch: 'neo/NEO-1' }), build: async (command, cwd) => { built.push([command, cwd]); return builds.shift(); }, models: async () => [{ id: 'claude-opus-4.5' }] });
+    worktree: async () => ({ path: join(root, 'NEO-1', 'codigo'), branch: 'neo/NEO-1' }), build: async (command, cwd) => { built.push([command, cwd]); return builds.shift() ?? { ok: true, code: 0, log: 'ok' }; }, models: async () => [{ id: 'claude-opus-4.5' }] });
   await pipeline.runStage('NEO-1');
   let ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.status, ticket.iterations], ['build', 'pending', 1], 'the fix waits for the build step');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.iterations], ['verify', 'pending', 1], 'the fix waits in Verificar');
   assert.equal(built.length, 0, 'fixing does not build');
   assert.equal(runs[0].model, 'claude-opus-4.5');
   assert.equal(runs[0].workingDirectory, join(root, 'NEO-1', 'codigo'));
@@ -199,8 +252,8 @@ test('the build is its own step: it runs the command and a failure goes back to 
   assert.equal(runs[0].customInstructions, true, 'the fix agent follows the repository instructions');
   await pipeline.runStage('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual(built, [['dotnet build', join(root, 'NEO-1', 'codigo')]], 'the build runs in the worktree, without an agent');
-  assert.deepEqual([ticket.stage, ticket.status, ticket.lastOutcome, runs.length], ['fix', 'pending', 'build_failed', 1], 'a build that fails goes back to fix');
+  assert.deepEqual(built, [['dotnet build', join(root, 'NEO-1', 'codigo')]], 'verifying builds first, in the worktree, without an agent');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.lastOutcome, runs.length], ['fix', 'pending', 'build_failed', 1], 'a build that fails goes back to fix, without verifying');
   assert.match(await readFile(join(root, 'NEO-1', 'compilacion-1.md'), 'utf8'), /No compila \(código 1\)[\s\S]*error CS1002/);
   assert.equal(await readFile(join(root, 'NEO-1', 'compilacion-1.log'), 'utf8'), 'error CS1002');
   await pipeline.runStage('NEO-1');
@@ -208,22 +261,26 @@ test('the build is its own step: it runs the command and a failure goes back to 
   assert.match(runs[1].prompt, /Latest build report: .*compilacion-1\.md/);
   await pipeline.runStage('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => `${h.stage}:${h.outcome}`)], ['verify', 2, ['fix:fixed', 'build:build_failed', 'fix:fixed', 'build:built']]);
+  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => `${h.stage}:${h.outcome}`)], ['done', 2, ['fix:fixed', 'build:build_failed', 'fix:fixed', 'build:built', 'verify:verified']], 'built, it is verified right away');
+  assert.match(runs[2].prompt, /built right before you started, as the first part of this step/);
   const lessons = await tickets.learnings('general');
   assert.equal(lessons.match(/Compilar con dotnet build/g).length, 1);
+  await tickets.update('NEO-1', t => ({ ...t, stage: 'verify', status: 'pending' }));
+  await pipeline.runStage('NEO-1');
+  assert.equal(built.length, 3, 'every verification builds again, right before');
 
   // Stopping leaves the step pending, without counting it as a failure.
+  await tickets.update('NEO-1', t => ({ ...t, stage: 'verify', status: 'pending' }));
   let release;
   pipeline.agent = { run: () => new Promise((_, reject) => { release = () => reject(Object.assign(new Error('Detenido.'), { stopped: true })); }), abort: async () => release() };
   const running = pipeline.runStage('NEO-1');
-  await new Promise(done => setTimeout(done, 20));
+  for (let i = 0; i < 50 && !release; i++) await new Promise(done => setTimeout(done, 10));
   assert.equal(pipeline.snapshot().running.key, 'NEO-1');
   await pipeline.stop(); await running;
   ticket = await tickets.get('NEO-1');
   assert.deepEqual([ticket.stage, ticket.status, ticket.history.at(-1).outcome], ['verify', 'pending', 'stopped']);
 
   // A build is stopped too, and without a command it asks for one.
-  await tickets.update('NEO-1', t => ({ ...t, stage: 'build' }));
   pipeline.build = (command, cwd, { signal }) => new Promise(done => signal.addEventListener('abort', () => done({ ok: false, code: null, log: '', stopped: true })));
   const building = pipeline.runStage('NEO-1');
   await new Promise(done => setTimeout(done, 20));
@@ -235,6 +292,9 @@ test('the build is its own step: it runs the command and a failure goes back to 
   ticket = await tickets.get('NEO-1');
   assert.deepEqual([ticket.stage, ticket.status], ['build', 'blocked']);
   assert.match(ticket.question, /comando de compilación/);
+  await pipeline.markDone('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.history.at(-1).stage, ticket.history.at(-1).by], ['done', 'verify', 'person'], 'done by hand while building, it is verified');
 });
 
 test('the build command runs in its folder and stops when asked', async t => {
@@ -262,7 +322,7 @@ test('a step the person already did is recorded as theirs and the ticket goes on
   assert.match(await readFile(join(root, 'NEO-1', 'reproduccion-1.md'), 'utf8'), /hecho por una persona[\s\S]*Lo reproduje con la HP del almacén\.\n$/);
   await pipeline.markDone('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.iterations], ['build', 1]);
+  assert.deepEqual([ticket.stage, ticket.iterations], ['verify', 1]);
   assert.equal(runs.length, 0, 'nothing runs while paused');
   // The verification knows the fix was made by hand.
   await pipeline.enqueue('NEO-1');
@@ -296,14 +356,21 @@ test('the board shows a column per agent with its model and the live step', () =
     pipeline: { auto: true, running: { key: 'NEO-1', stage: 'reproduce', model: 'claude-sonnet-4.5', startedAt: Date.now(), activity: [{ at: Date.now(), kind: 'tool', message: 'winapp ui inspect -a App' }] } },
     tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }, { key: 'NEO-3', summary: 'Tres', stage: 'done', status: 'done', archived: true }] };
   const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3 }] });
-  for (const name of ['Recolectar', 'Reproducir', 'Solucionar', 'Verificar', 'Resueltos']) assert.match(html, new RegExp(`<h2>${name} `));
-  assert.match(html, /<section class="jira-column mode-auto" aria-label="Recolectar">[\s\S]*?Sin IA[\s\S]*?<\/header>/, 'collecting has no model: it is done by code');
+  assert.deepEqual([...html.matchAll(/<section class="jira-column[^"]*" aria-label="([^"]+)">/g)].map(m => m[1]), ['Analizar', 'Reproducir', 'Solucionar', 'Verificar'], 'a column per agent: collecting, building and the solved ones have none');
+  const flow = jiraView(state, { view: 'board', board: { ...board, pipeline: {}, tickets: [{ key: 'NEO-7', summary: 'Hecho', stage: 'done', status: 'done' }, { key: 'NEO-8', summary: 'Por compilar', stage: 'build', status: 'pending' }, { key: 'NEO-9', summary: 'Nuevo', stage: 'collect', status: 'pending' }] } }, { isAuthenticated: true, models: [] });
+  const column = name => flow.match(new RegExp(`aria-label="${name}">([\\s\\S]*?)</section>`))[1];
+  assert.match(column('Verificar'), /NEO-8[\s\S]*<article class="jira-card status-done[^"]*"[^>]*aria-label="NEO-7 · Hecho"/, 'the solved ones stay in Verificar, at the end and highlighted, as one waiting for its build');
+  assert.doesNotMatch(column('Verificar').match(/aria-label="NEO-7 · Hecho">([\s\S]*?)<\/article>/)[1], /data-action="jira-(run|done|autolock)"/, 'with nothing left to do');
+  assert.match(column('Analizar'), /NEO-9/, 'a ticket being indexed shows in Analizar');
+  assert.match(html, /aria-label="Reproducir">[\s\S]*?data-action="jira-warn" data-stage="reproduce"/, 'an agent that lacks something it needs warns');
+  assert.doesNotMatch(html, /data-stage="analyze" aria-expanded/, 'and one that has everything does not');
+  const tip = jiraView(state, { view: 'board', board, warn: 'reproduce' }, { isAuthenticated: true, models: [] });
+  assert.match(tip, /<span class="jira-warn-tip" role="tooltip"><strong>Falta<\/strong><ul><li>winapp: instálalo<\/li><\/ul>/, 'clicking it lists what to install');
   assert.doesNotMatch(html, /data-jira-model="collect"/);
   assert.match(html, /<option value="claude-opus-4\.5" selected>Claude Opus 4\.5 · ×3/);
-  assert.match(html, /data-action="jira-auto" data-on="false"[^>]*>.*Pausar/, 'started: the button pauses');
+  assert.match(html, /data-action="jira-auto" data-on="false"[^>]*aria-label="Pausar">❚❚<\/button>/, 'started: the button pauses');
   assert.match(html, /data-action="jira-learnings" data-stage="fix"/, 'each column opens its own lessons');
   assert.match(html, /data-stage="fix" data-mode="auto" class="light-auto" aria-pressed="true"/, 'every column starts on autopilot');
-  assert.match(html, /winapp ✗/);
   assert.match(html, /winapp ui inspect -a App/, 'the card in progress shows what its agent is doing');
   assert.match(html, /<section class="jira-column is-active mode-auto" aria-label="Reproducir">/, 'and its column is highlighted');
   assert.match(html, /status-running[\s\S]*data-action="jira-stop"/, 'it is stopped from the card');
@@ -313,8 +380,10 @@ test('the board shows a column per agent with its model and the live step', () =
   assert.match(html, /Mostrar 1 quitados/);
   assert.match(jiraView({ mode: 'azure', jira: null }, {}), /id="jira-settings-form"/, 'without settings the section is the form');
   const signedOut = jiraView(state, { view: 'board', board: { ...board, pipeline: { auto: false, running: null, needsCopilot: true, error: 'Sin sesión' } } }, { isAuthenticated: true });
-  assert.match(signedOut, /Iniciar sesión en GitHub Copilot[\s\S]*copilot<\/code> → <code>\/login/, 'without a Copilot session it shows how to sign in, as in pull request reviews');
-  assert.doesNotMatch(html, /Iniciar sesión en GitHub Copilot/);
+  assert.doesNotMatch(signedOut, /Iniciar sesión en GitHub Copilot/, 'signing in is not in the middle of the board');
+  const signedOutTip = jiraView(state, { view: 'board', warn: 'analyze', board: { ...board, pipeline: { auto: false, running: null, needsCopilot: true, error: 'Sin sesión' } } }, { isAuthenticated: true });
+  assert.match(signedOutTip, /data-stage="analyze"[\s\S]*<li><button class="link-button" data-action="jira-copilot-login">Copilot: inicia sesión<\/button><\/li>/, 'without a Copilot session the warning of each agent links to signing in');
+  assert.match(loginSteps(), /copilot<\/code> → <code>\/login/, 'which shows how, as in pull request reviews');
 });
 
 test('the ticket popup has a tab per completed step and the answer field while stuck', () => {
@@ -329,15 +398,23 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(html, /No falla con mis impresoras/);
   assert.match(html, /evidencias\/1\.png/, 'with the files of that step');
   assert.match(html, /<textarea data-jira-answer="NEO-3"[^>]*>Borrador<\/textarea>/, 'the answer field keeps the draft');
-  assert.match(html, /Abrir en Jira ↗/);
+  const head = ticketHead(board, 'NEO-3', false);
+  assert.match(head, /^<div class="jira-head"><h2 id="modal-title"><a class="jira-title-link" href="https:\/\/e\/browse\/NEO-3" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">NEO-3 · Tres<\/a><\/h2>/, 'the key and title open it in Jira');
+  assert.match(head, /<p class="jira-meta">[\s\S]*<span>Reproducir<\/span><span>Necesita ayuda<\/span><\/p><\/div>$/, 'what describes it goes next to the title');
+  assert.doesNotMatch(html, /Abrir en Jira/, 'with no separate link');
+  assert.doesNotMatch(ticketHead({ ...board, tickets: [{ ...ticket, status: 'pending' }] }, 'NEO-3', false), /Pendiente/, 'pending is the usual state: it is not said');
+  assert.doesNotMatch(ticketHead(board, 'NEO-3', true), /<a /, 'the example links nowhere');
   const first = ticketDetail(board, detail, false, {}, 'step-0');
   assert.match(first, /Resumen del ticket/);
   assert.match(first, /En Jira/, 'and whether it was published in Jira');
-  assert.match(html, /data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, 'the step can be marked as done by hand');
+  assert.doesNotMatch(html, /data-action="jira-(done|run|autolock|archive|open-folder)"|data-jira-move/, 'the popup leaves every action to the card, and has no column picker');
   const byHand = ticketDetail(board, { ...detail, history: [{ ...detail.history[0], by: 'person', model: null }] }, false, {}, 'step-0');
   assert.match(byHand, /Hecho por ti/);
   const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
-  assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3"/, 'and from its card');
+  assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, 'the step can be marked as done by hand from its card');
+  assert.match(cardHtml, /<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-open-folder" data-key="NEO-3"[^>]*><svg[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
+  const archivedCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', showArchived: true, board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, archived: true }] } }, null);
+  assert.match(archivedCard, /data-action="jira-archive" data-key="NEO-3" data-archived="false" title="Volver al tablero"/, 'and comes back the same way');
   assert.match(ticketDetail(board, detail, false, {}, 'ticket'), /data-part="description" open/);
 });
 
@@ -356,7 +433,7 @@ test('the analysis estimates how easy a ticket is to reproduce and fix, shown as
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
   const board = { settings: state.jira, pipeline: {}, tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'pending', ease: { reproduce: 'easy', fix: 'easy', reason: 'Claro' } }] };
   const html = jiraView(state, { view: 'board', board }, null);
-  assert.match(html, /<h2>Analizar /, 'the analysis has its column');
+  assert.match(html, /<h2><span class="jira-column-name">Analizar</, 'the analysis has its column');
   assert.match(html, /data-key="NEO-1"[\s\S]*class="jira-ease ease-3"/, 'and its card shows how easy it looks');
 });
 
@@ -437,7 +514,7 @@ test('the person talks to the agent from its live log, and the log stays after t
   await pipeline.pause(false);
   await running;
   const ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.history.at(-1).outcome], ['build', 'fixed'], 'and then it finished its task');
+  assert.deepEqual([ticket.stage, ticket.history.at(-1).outcome], ['verify', 'fixed'], 'and then it finished its task');
   assert.ok(ticket.history.at(-1).activity.some(a => a.kind === 'agent'), 'the conversation stays in the log of the step');
   const last = pipeline.snapshot().last;
   assert.deepEqual([last.key, last.outcome], ['NEO-1', 'fixed'], 'the log stays on view after the step');
@@ -532,12 +609,13 @@ test('the board is filtered by key or title while typing', () => {
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
   const board = { settings: state.jira, pipeline: {}, tickets: [{ ...ticket, stage: 'reproduce', status: 'pending' }, { key: 'NEO-103', summary: 'Error al imprimir', stage: 'fix', status: 'pending' }] };
   const html = jiraView(state, { view: 'board', board, search: 'impri' }, null);
-  assert.match(html, /<input type="search" class="jira-search" data-jira-search data-focus="jira-search" value="impri"/);
+  assert.match(html, /<label class="jira-search"><svg[\s\S]*?<\/svg><input type="search" data-jira-search data-focus="jira-search" value="impri"[^>]*><\/label>/, 'with a funnel');
+  assert.match(html, /<div class="jira-board-controls">\s*<button[^>]*data-action="jira-refresh"[\s\S]*?data-action="jira-auto"[\s\S]*?<label class="jira-search">[\s\S]*?<span class="jira-links"><button class="icon-button jira-gear" data-action="jira-settings"[\s\S]*?<\/span><\/div><div class="jira-board">/, 'after updating and starting, and the settings at the end');
   assert.match(html, /Error al imprimir/);
   assert.doesNotMatch(html, /El filtro de clientes/, 'in every column');
 });
 
-test('with logs on, each step is published as a Jira comment', async () => {
+test('each agent step proposes a Jira comment, sent only once confirmed', async () => {
   const text = logComment({ stage: 'reproduce', outcome: 'blocked', report: '# Informe\n{noformat}x', question: '¿Qué impresora?' });
   assert.match(text, /^\*Neo Team · agente Reproducir:\* Bloqueado/);
   assert.match(text, /\*Pregunta:\* ¿Qué impresora\?/);
@@ -546,6 +624,18 @@ test('with logs on, each step is published as a Jira comment', async () => {
   const client = new JiraClient({ url: 'https://e.atlassian.net', deployment: 'cloud', email: 'a@b.c' }, 't', { fetch: async (url, options) => { sent = [url.pathname, options.method, JSON.parse(options.body)]; return jsonResponse({ id: '9' }, 201); } });
   await client.addComment('NEO-1', 'hola');
   assert.deepEqual(sent, ['/rest/api/2/issue/NEO-1/comment', 'POST', { body: 'hola' }]);
+});
+
+test('a comment ready for Jira is asked about, and can be decided from its step', () => {
+  const ticket = { key: 'NEO-4', summary: 'Cuatro', stage: 'fix', status: 'pending', history: [{ stage: 'collect', number: 1, outcome: 'ok' }, { stage: 'analyze', number: 1, outcome: 'analyzed', finishedAt: '2026-10-06T10:00:00Z', pendingComment: '*Neo Team · agente Analizar:* <b>Analizado</b>' }] };
+  const board = { settings: { modes: {} }, pipeline: {}, tickets: [ticket] };
+  assert.deepEqual(pendingComments(board), [{ key: 'NEO-4', index: 1, stage: 'analyze', text: '*Neo Team · agente Analizar:* <b>Analizado</b>' }]);
+  const prompt = commentPrompt(pendingComments(board)[0]);
+  assert.match(prompt.body, /&lt;b&gt;Analizado/, 'the text to publish is shown, escaped');
+  assert.match(prompt.actions, /data-action="jira-comment" data-key="NEO-4" data-index="1" data-publish="false">No publicar[\s\S]*data-publish="true">Publicar en Jira/);
+  const step = ticketDetail(board, { key: 'NEO-4', folder: '/t', files: [], history: ticket.history, reports: [] }, false, {}, 'step-1');
+  assert.match(step, /data-action="jira-comment" data-key="NEO-4" data-index="1" data-publish="true"/);
+  assert.doesNotMatch(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /jira-logs/, 'there is no switch to publish everything');
 });
 
 test('tickets show their type and priority with icons like Jira', () => {
@@ -628,6 +718,45 @@ test('collecting is done by code, without AI: an index of the ticket', async t =
   const ticket = await tickets.get('NEO-5');
   assert.deepEqual([ticket.stage, ticket.history[0].outcome, ticket.history[0].model], ['analyze', 'ok', null]);
   assert.match(await readFile(join(folder, 'resumen.md'), 'utf8'), /Resumen de NEO-5 \(automático\)/);
+});
+
+test('an agent that lacks what it needs does not run, by hand or in the automatic mode', async t => {
+  const root = await temp(t), tickets = new TicketStore(root), ran = [];
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Uno' }), stage: 'analyze' }));
+  await tickets.update('NEO-9', () => ({ ...newTicket({ summary: 'Nueve' }), stage: 'analyze', autoLock: true }));
+  let missing = { copilot: true };
+  const pipeline = new JiraPipeline({ tickets, settings: async () => ({ models: {} }), missing: async () => missing, agent: { run: async ({ ticket }) => { ran.push(ticket.key); return { outcome: 'blocked', report: 'r' }; }, abort: async () => {} } });
+  await assert.rejects(pipeline.enqueue('NEO-1'), /Analizar no puede trabajar: falta sesión de Copilot/);
+  pipeline.setAuto(true);
+  for (let i = 0; i < 10; i++) await new Promise(done => setTimeout(done, 10));
+  assert.deepEqual(ran, [], 'the automatic mode leaves it waiting');
+  await pipeline.markDone('NEO-9');
+  assert.equal((await tickets.get('NEO-9')).stage, 'reproduce', 'it can still be done by hand');
+  missing = {};
+  await pipeline.enqueue('NEO-1');
+  for (let i = 0; i < 50 && !ran.length; i++) await new Promise(done => setTimeout(done, 10));
+  assert.deepEqual(ran, ['NEO-1'], 'once it has everything, it runs');
+  for (let i = 0; i < 100 && (pipeline.looping || pipeline.running); i++) await new Promise(done => setTimeout(done, 10));
+
+  const board = { settings: { modes: { collect: 'off' } }, tools: { winapp: false, ffmpeg: true }, pipeline: {}, tickets: [{ key: 'NEO-2', summary: 'Dos', stage: 'reproduce', status: 'pending' }, { key: 'NEO-3', summary: 'Tres', stage: 'analyze', status: 'pending' }] };
+  const html = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }, { isAuthenticated: true });
+  assert.match(html, /<button class="icon-button jira-run" disabled title="No se puede ejecutar: falta winapp" aria-label="Ejecutar NEO-2">/, 'its ▶ is disabled');
+  assert.match(html, /data-action="jira-run" data-key="NEO-3"/, 'while an agent with everything can run');
+  assert.match(html, /data-action="jira-done" data-key="NEO-2"/, 'and it can be marked as done by hand');
+  assert.doesNotMatch(html, /data-stage="collect" data-mode/, 'collecting has no traffic light');
+  const noFfmpeg = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board: { ...board, tools: { winapp: true, ffmpeg: false } }, warn: 'analyze' }, { isAuthenticated: true });
+  assert.match(noFfmpeg, /aria-label="Analizar">[\s\S]*?<li>ffmpeg: instálalo<\/li>/, 'without ffmpeg, Analizar warns');
+  assert.match(noFfmpeg, /data-action="jira-run" data-key="NEO-3"/, 'but it still runs: ffmpeg is only for the frames');
+  assert.doesNotMatch(noFfmpeg.match(/class="jira-board-controls">([\s\S]*?)<\/div>/)[1], /jira-warn/, 'downloading warns of nothing');
+  assert.match(html.match(/class="jira-board-controls">([\s\S]*?)<\/div>/)[1], /data-action="jira-refresh"[^>]*aria-label="Actualizar"><svg/, 'one button updates from Jira, in the row above the board');
+  assert.doesNotMatch(html, /data-action="jira-(collect|sync)"/, 'instead of two');
+  const news = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board: { ...board, tickets: [{ key: 'NEO-4', summary: 'Cuatro', stage: 'fix', status: 'pending', news: { comments: 2, attachments: 1 } }] } }, { isAuthenticated: true });
+  assert.match(news, /<span class="pill jira-news" title="Desde Jira: 2 comentarios y 1 adjunto nuevos\. Ábrelo para verlo">Novedades<\/span>/, 'a ticket with news from Jira shows it');
+  assert.match(html, /<textarea data-jira-tell data-general="true"[^>]*placeholder="Pide algo al asistente[^>]*><\/textarea><button[^>]*>Enviar/, 'with a Copilot session the assistant can be asked');
+  assert.doesNotMatch(html, /data-stage="general"/);
+  const signedOut = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }, { isAuthenticated: false });
+  assert.match(signedOut, /<strong>Asistente<\/strong><span class="jira-warn"><button class="jira-warn-icon" data-action="jira-warn" data-stage="general"/, 'without it, the assistant warns');
+  assert.match(signedOut, /placeholder="Inicia sesión en Copilot para usar el asistente" aria-label="Mensaje para el asistente general" disabled><\/textarea><button class="button small primary" data-action="jira-tell" data-general="true"[^>]*disabled>Enviar/, 'and cannot be asked');
 });
 
 test('who a ticket is assigned to is visible, and tickets of others stay out of the automatic mode', async t => {

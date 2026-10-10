@@ -287,22 +287,33 @@ export const DEMO_JIRA_SETTINGS = { url: 'https://ejemplo.atlassian.net', deploy
 export class DemoJiraClient {
   static published = [];
   constructor() { this.settings = DEMO_JIRA_SETTINGS; }
-  // Synchronizing the example finds NEO-101 closed and a new comment with a capture in NEO-102.
-  static synced = false;
+  // Updating the example a second time over the board finds NEO-101 closed and a new
+  // comment with a capture in NEO-102 (the first one downloads, the next finds nothing new).
+  static checks = 0;
+  static get synced() { return DemoJiraClient.checks >= 2; }
   async search(jql = '') {
-    if (String(jql).startsWith('key in')) DemoJiraClient.synced = true;
+    if (String(jql).startsWith('key in')) DemoJiraClient.checks++;
     const changed = t => DemoJiraClient.synced && t.afterSync;
     return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: changed(t) ? t.afterSync.updated : t.updated, status: changed(t)?.status ?? { name: 'Abierto', statusCategory: { key: 'indeterminate' } }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null } })), limited: false };
   }
   async issue(key) {
     const t = demoTicket(key);
     return { key, fields: { summary: t.summary, description: t.description, status: { name: 'Abierto' }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null, reporter: demoUser('Soporte'), created: t.updated, updated: t.updated, labels: ['cliente'],
-      attachment: t.attachments.map(a => ({ id: a.id, filename: a.filename, created: a.created, size: a.content.length, author: demoUser('Soporte'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/${a.id}` })) } };
+      attachment: [...t.attachments.map(a => ({ id: a.id, filename: a.filename, created: a.created, size: a.content.length, author: demoUser('Soporte'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/${a.id}` })), ...DemoJiraClient.attached.filter(a => a.key === key).map(({ data, key: _, ...a }) => a)] } };
+  }
+  // States shared in the example stay in memory too.
+  static attached = [];
+  async attach(key, filename, data) {
+    const attachment = { key, id: `shared-${DemoJiraClient.attached.length + 1}`, filename, created: new Date().toISOString(), size: data.length, author: demoUser('Tú'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/shared-${DemoJiraClient.attached.length + 1}`, data: Buffer.from(data) };
+    DemoJiraClient.attached.push(attachment);
+    return attachment;
   }
   // Comments published in the example stay in memory: nothing reaches Jira.
   async addComment(key, body) { DemoJiraClient.published.push({ key, body }); return { id: String(DemoJiraClient.published.length) }; }
   async comments(key) { return demoTicket(key).comments.map(c => ({ author: demoUser(c.author), created: c.created, body: c.body })); }
   async download(url) {
+    const shared = DemoJiraClient.attached.find(a => a.content === url);
+    if (shared) return new Response(shared.data);
     const attachment = DEMO_TICKETS.map(t => demoTicket(t.key)).flatMap(t => t.attachments).find(a => url.endsWith(`/${a.id}`));
     return new Response(attachment.content);
   }

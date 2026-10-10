@@ -49,7 +49,7 @@ test('only reproduce and verify own the guard; every outcome releases it and ret
       const tickets = new TicketStore(root);
       await tickets.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1' }), stage }));
       const calls = [];
-      const pipeline = new JiraPipeline({ tickets, settings: async () => ({}), worktree: async () => null,
+      const pipeline = new JiraPipeline({ tickets, settings: async () => ({ buildCommand: 'b' }), worktree: async () => ({ path: root }), build: async () => ({ ok: true, code: 0, log: '' }),
         desktop: () => ({ start: async run => calls.push(['start', run.desktopTitle]), stop: async () => calls.push(['stop']) }),
         agent: { run: async ({ desktop, onActivity }) => {
           assert.equal(!!desktop, desktopStage(stage));

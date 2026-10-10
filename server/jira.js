@@ -162,7 +162,8 @@ export class JiraClient {
     const target = new URL(url ?? `${this.settings.url}${path}`);
     for (const [name, value] of Object.entries(query)) if (value !== undefined && value !== null) target.searchParams.set(name, String(value));
     if (new URL(this.settings.url).origin !== target.origin) throw fail('El adjunto apunta fuera del servidor de Jira configurado.');
-    const response = await this.request(target, { method, headers: { Authorization: this.authorization, Accept: raw ? '*/*' : 'application/json', 'X-Atlassian-Token': 'no-check', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'follow', signal: AbortSignal.timeout(raw ? 30 * 60000 : this.timeoutMs) });
+    const form = body instanceof FormData;
+    const response = await this.request(target, { method, headers: { Authorization: this.authorization, Accept: raw ? '*/*' : 'application/json', 'X-Atlassian-Token': 'no-check', ...(body && !form ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: form ? body : JSON.stringify(body) } : {}), redirect: 'follow', signal: AbortSignal.timeout(raw || form ? 30 * 60000 : this.timeoutMs) });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
       let message = detail;
@@ -205,8 +206,15 @@ export class JiraClient {
     }
   }
   download(url) { return this.call('', { url, raw: true }); }
-  // The only write: a new comment with the progress of the agents, when logs are on.
+  // The only writes, each one decided by the person: a comment with the progress of
+  // the agents and the state of a ticket, as an attachment, for another computer.
   addComment(key, body) { return this.call(`/rest/api/2/issue/${encodeURIComponent(key)}/comment`, { method: 'POST', body: { body } }); }
+  async attach(key, name, data) {
+    const form = new FormData();
+    form.append('file', new Blob([data], { type: 'application/zip' }), name);
+    const [attachment] = await this.call(`/rest/api/2/issue/${encodeURIComponent(key)}/attachments`, { method: 'POST', body: form });
+    return attachment;
+  }
 }
 
 // --- Files on disk -----------------------------------------------------------
@@ -257,11 +265,21 @@ async function saveAttachment(client, attachment, file) {
   return 'downloaded';
 }
 
+// The state of a ticket shared from Neo Team on another computer travels as this
+// attachment. It is not downloaded with the others: it is brought when the person asks.
+export const SHARED = /^neo-team-estado-.*\.zip$/i;
+export const sharedName = key => `neo-team-estado-${key}.zip`;
+const sharedOf = attachments => {
+  const latest = attachments.filter(a => SHARED.test(a.filename ?? '')).sort((a, b) => String(b.created ?? '').localeCompare(String(a.created ?? '')))[0];
+  return latest ? { id: String(latest.id), created: latest.created ?? null, author: latest.author ? person(latest.author) : '', size: latest.size ?? null, content: latest.content } : null;
+};
+
 // Downloads one ticket: descripcion.md, comentarios.md and adjuntos/ with every
 // attachment (plus frames of each video when ffmpeg is installed).
 export async function collectTicket({ client, settings, key, folder, ffmpeg = false, onProgress = () => {} }) {
   const issue = await client.issue(key);
-  const attachments = issue.fields?.attachment ?? [];
+  const all = issue.fields?.attachment ?? [], attachments = all.filter(a => !SHARED.test(a.filename ?? ''));
+  issue.fields = { ...issue.fields, attachment: attachments };
   const names = attachmentNames(attachments);
   const files = join(folder, 'adjuntos');
   await mkdir(files, { recursive: true, mode: 0o700 });
@@ -287,7 +305,7 @@ export async function collectTicket({ client, settings, key, folder, ffmpeg = fa
   // The same comments one by one, for the interface.
   await writeAtomic(join(folder, 'comentarios.json'), JSON.stringify(comments.map(c => ({ author: person(c.author), created: c.created ?? null, updated: c.updated && c.updated !== c.created ? c.updated : null, body: wikiToMarkdown(c.body, names) })), null, 2));
   const f = issue.fields ?? {};
-  return { key: issue.key, summary: f.summary ?? '', type: f.issuetype?.name ?? '', jiraStatus: f.status?.name ?? '', priority: f.priority?.name ?? '', updated: f.updated ?? null, url: ticketUrl(settings, issue.key), attachments: attachments.length, comments: comments.length, skipped };
+  return { key: issue.key, summary: f.summary ?? '', type: f.issuetype?.name ?? '', jiraStatus: f.status?.name ?? '', priority: f.priority?.name ?? '', updated: f.updated ?? null, url: ticketUrl(settings, issue.key), attachments: attachments.length, comments: comments.length, skipped, shared: sharedOf(all) };
 }
 
 // Files of a ticket, for the agents and the interface.

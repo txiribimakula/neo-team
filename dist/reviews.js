@@ -29,9 +29,10 @@ export const LOGIN_OPTIONS = [
   { command: 'copilot', then: '/login', title: 'Copilot CLI guarda la sesión solo para Copilot y no cambia la cuenta de gh.' },
   { command: 'gh auth login --web', title: 'Alternativa: GitHub CLI. Cambia la cuenta activa de gh a la de la empresa. Copilot no acepta tokens clásicos (ghp_…).' },
 ];
+export const loginSteps = () => `<ul class="pr-login-options">${LOGIN_OPTIONS.map(o => `<li title="${escape(o.title)}"><code>${escape(o.command)}</code>${o.then ? ` → <code>${escape(o.then)}</code>` : ''}<button class="button small" data-action="pr-copy" data-copy="${escape(o.command)}">Copiar</button></li>`).join('')}</ul><p class="local-note">Abre en una ventana privada el enlace que muestra, entra con tu cuenta de la empresa (github.com/enterprises/…) y escribe el código.</p>`;
 export function loginView(ui) {
   if (ui.copilot?.isAuthenticated !== false) return '';
-  return `<section class="pr-card pr-login"><h2>Iniciar sesión en GitHub Copilot</h2><ul class="pr-login-options">${LOGIN_OPTIONS.map(o => `<li title="${escape(o.title)}"><code>${escape(o.command)}</code>${o.then ? ` → <code>${escape(o.then)}</code>` : ''}<button class="button small" data-action="pr-copy" data-copy="${escape(o.command)}">Copiar</button></li>`).join('')}</ul><p class="local-note">Abre en una ventana privada el enlace que muestra, entra con tu cuenta de la empresa (github.com/enterprises/…) y escribe el código.</p><button class="button primary" data-action="pr-copilot-status">Comprobar</button></section>`;
+  return `<section class="pr-card pr-login"><h2>Iniciar sesión en GitHub Copilot</h2>${loginSteps()}<button class="button primary" data-action="pr-copilot-status">Comprobar</button></section>`;
 }
 
 // The local clone of a repository: with it, pull requests are compared with git.

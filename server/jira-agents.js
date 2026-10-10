@@ -22,6 +22,9 @@ export const STAGES = [
   { id: 'build', name: 'Compilar', tier: null, programmatic: true, file: 'compilar', report: n => `compilacion-${n}.md`, outcomes: ['built', 'build_failed', 'blocked'] },
   { id: 'verify', name: 'Verificar', tier: 'medium', file: 'verificar', report: n => `verificacion-${n}.md`, outcomes: ['verified', 'not_fixed', 'blocked'], timeoutMs: 45 * 60000 },
 ];
+// What each agent cannot work without; while something is missing its step does not run.
+export const NEEDS = { analyze: ['copilot'], reproduce: ['copilot', 'winapp'], fix: ['copilot'], build: ['copilot', 'winapp'], verify: ['copilot', 'winapp'] };
+export const NEED_NAMES = { copilot: 'sesión de Copilot', winapp: 'winapp' };
 export const STAGE_IDS = [...STAGES.map(s => s.id), 'done'];
 export const stageOf = id => STAGES.find(s => s.id === id);
 // The full log of each step, kept in the ticket folder.
@@ -77,7 +80,8 @@ export function nextAfter(ticket, stage, outcome, maxIterations = 3) {
     case 'analyze:analyzed': return { stage: 'reproduce', status: 'pending' };
     case 'reproduce:reproduced': return { stage: 'fix', status: 'pending' };
     case 'reproduce:not_reproduced': return (ticket.reproduceAttempts ?? 0) < REPRODUCE_ATTEMPTS ? { stage: 'reproduce', status: 'pending' } : { stage: 'reproduce', status: 'blocked', note: `No se reprodujo en ${REPRODUCE_ATTEMPTS} intentos.` };
-    case 'fix:fixed': return { stage: 'build', status: 'pending' };
+    // Verifying starts by building: the fix waits in Verificar and is built right before it is checked.
+    case 'fix:fixed': return { stage: 'verify', status: 'pending' };
     case 'fix:failed': return fixes < maxIterations ? { stage: 'fix', status: 'pending' } : { stage: 'fix', status: 'blocked', note: `Sin una corrección tras ${fixes} intentos.` };
     case 'build:built': return { stage: 'verify', status: 'pending' };
     case 'build:build_failed': return fixes < maxIterations ? { stage: 'fix', status: 'pending' } : { stage: 'build', status: 'blocked', note: `No compila tras ${fixes} correcciones.` };
@@ -144,9 +148,46 @@ export const newTicket = meta => ({ ...meta, stage: 'collect', status: 'pending'
 // still runs with ▶ on that ticket.
 export const autoLocked = ticket => ticket.autoLock ?? !!(ticket.assignee && !ticket.assignee.me);
 const assigneeOf = (issue, me) => { const account = accountOf(issue.fields?.assignee); return account ? { ...account, me: !!me && account.id === String(me.id) } : null; };
-export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, onProgress = () => {} }) {
-  onProgress({ message: 'Consultando el filtro en Jira…' });
-  const { issues, limited } = await client.search(jqlFrom(settings.filter), ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee'], count => onProgress({ message: `Consultando el filtro en Jira… ${count} tickets` }));
+// A ticket downloaded again: its index is redone and what it brings new (comments,
+// attachments) is marked on its card until the person opens it.
+async function redownloaded(tickets, key, known, meta) {
+  const comments = Math.max(0, (meta.comments ?? 0) - (known.comments ?? 0)), attachments = Math.max(0, (meta.attachments ?? 0) - (known.attachments ?? 0));
+  if (known.stage !== 'collect') {
+    const folder = tickets.folder(key), summary = await collectSummary(folder, { ...known, ...meta });
+    await writeAtomic(join(folder, 'resumen.md'), summary.report);
+  }
+  const news = comments || attachments ? { comments: (known.news?.comments ?? 0) + comments, attachments: (known.news?.attachments ?? 0) + attachments, at: new Date().toISOString() } : known.news;
+  return { comments, attachments, news };
+}
+// What updating collects: the whole filter, only its tickets assigned to you, or a
+// single ticket by its key (in the filter or not).
+export const COLLECT_MODES = ['filter', 'mine', 'single'];
+export function collectScopeFrom(input) {
+  const mode = COLLECT_MODES.includes(input?.mode) ? input.mode : 'filter';
+  // The key, or a Jira address that names it (…/browse/NEO-12, ?selectedIssue=NEO-12).
+  const key = String(input?.key ?? '').trim().match(/[A-Z][A-Z0-9_]{0,30}-\d{1,9}/i)?.[0]?.toUpperCase() ?? '';
+  if (String(input?.key ?? '').trim() && !key) throw fail('El ticket no es válido: escribe su clave (NEO-123) o su dirección en Jira.');
+  return { mode, key };
+}
+export function collectJql(filter, scope = {}) {
+  if (scope.mode === 'single') {
+    if (!scope.key) throw fail('Escribe la clave del ticket que quieres recolectar.');
+    return `issuekey = ${checkKey(scope.key)}`;
+  }
+  const jql = jqlFrom(filter);
+  if (scope.mode !== 'mine') return jql;
+  const [where, order] = jql.split(/\s+ORDER\s+BY\s+/i);
+  const mine = where.trim() && !/^ORDER\s+BY\s/i.test(where.trim()) ? `(${where.trim()}) AND assignee = currentUser()` : 'assignee = currentUser()';
+  const sort = order ?? where.trim().match(/^ORDER\s+BY\s+(.*)$/i)?.[1];
+  return sort ? `${mine} ORDER BY ${sort}` : mine;
+}
+export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, scope = { mode: 'filter' }, onProgress = () => {} }) {
+  const what = { filter: 'el filtro', mine: 'tus tickets del filtro', single: scope.key }[scope.mode] ?? 'el filtro';
+  onProgress({ message: `Consultando ${what} en Jira…` });
+  const result = await client.search(collectJql(settings.filter, scope), ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee'], count => onProgress({ message: `Consultando ${what} en Jira… ${count} tickets` }));
+  // Narrowed here too, in case the server did not apply the whole query.
+  const issues = result.issues.filter(issue => scope.mode === 'single' ? issue.key === scope.key : scope.mode === 'mine' ? !!assigneeOf(issue, me)?.me : true), { limited } = result;
+  if (scope.mode === 'single' && !issues.length) throw fail(`${scope.key} no existe en Jira o no tienes acceso.`, 404);
   const found = new Set(issues.map(i => i.key));
   const counts = { found: issues.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
   for (const [index, issue] of issues.entries()) {
@@ -164,13 +205,15 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
     if (issue.key === busyKey) { counts.skipped.push(issue.key); continue; }
     onProgress({ message: `Descargando ${issue.key} (${index + 1} de ${issues.length})…`, counts: { ...counts } });
     const meta = await collectTicket({ client, settings, key: issue.key, folder, ffmpeg, onProgress: message => onProgress({ message }) });
-    await tickets.update(issue.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee, inFilter: true, collectedAt: new Date().toISOString() }));
+    const again = known ? await redownloaded(tickets, issue.key, known, meta) : null;
+    await tickets.update(issue.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee, inFilter: true, collectedAt: new Date().toISOString(), ...(again?.news ? { news: again.news } : {}) }));
     counts.downloaded++;
   }
-  for (const ticket of await tickets.list()) {
+  // Only the whole filter tells which tickets left it.
+  if (scope.mode === 'filter') for (const ticket of await tickets.list()) {
     if (!found.has(ticket.key) && ticket.inFilter !== false) { await tickets.update(ticket.key, t => ({ ...t, inFilter: false })); counts.left++; }
   }
-  return { ...counts, limited };
+  return { ...counts, limited, mode: scope.mode };
 }
 
 // Recolectar without AI: an index of the ticket made from what was downloaded — the
@@ -227,7 +270,7 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
     if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
     const assignee = assigneeOf(issue, me), status = issue.fields?.status;
     if (status?.statusCategory?.key === 'done') {
-      await tickets.update(ticket.key, t => ({ ...t, archived: true, closedInJira: { status: status.name ?? '', at: new Date().toISOString() }, jiraStatus: status.name ?? t.jiraStatus, assignee }));
+      await tickets.update(ticket.key, t => ({ ...t, archived: true, closedInJira: { status: status.name ?? '', at: new Date().toISOString() }, jiraStatus: status.name ?? t.jiraStatus, assignee, updated: issue.fields?.updated ?? t.updated }));
       result.closed.push(ticket.key);
       continue;
     }
@@ -237,8 +280,9 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
     }
     onProgress({ message: `Descargando las novedades de ${ticket.key} (${index + 1} de ${local.length})…` });
     const meta = await collectTicket({ client, settings, key: ticket.key, folder: tickets.folder(ticket.key), ffmpeg, onProgress: message => onProgress({ message }) });
-    await tickets.update(ticket.key, t => ({ ...t, ...meta, assignee }));
-    result.updated.push({ key: ticket.key, comments: Math.max(0, meta.comments - (ticket.comments ?? 0)), attachments: Math.max(0, meta.attachments - (ticket.attachments ?? 0)) });
+    const again = await redownloaded(tickets, ticket.key, ticket, meta);
+    await tickets.update(ticket.key, t => ({ ...t, ...meta, assignee, ...(again.news ? { news: again.news } : {}) }));
+    result.updated.push({ key: ticket.key, comments: again.comments, attachments: again.attachments });
   }
   return result;
 }
@@ -273,6 +317,9 @@ export function answersBlock(answers = []) {
   if (!answers.length) return '';
   return `\n<person_answers>\nThe person answered these questions of the agents on this ticket. Follow the answers; the latest one is why you are being run again.\n${answers.map(a => `- ${a.stage} asked: ${a.question ?? '(no explicit question: read that report)'}\n  Answer: ${a.answer.replace(/\n/g, '\n  ')}`).join('\n')}\n</person_answers>\n`;
 }
+// Reproducing and verifying drive the application the same way, before and after the
+// fix: each reads what the other learned, and the reproduction is left ready to replay.
+export const PAIRED = { reproduce: 'verify', verify: 'reproduce' };
 export function stagePrompt({ stage, ticket, folder, files, settings, worktree = null, lessons = {}, previous = {} }) {
   const fileList = files.map(f => `- ${f}`).join('\n') || '(none)';
   const common = `Ticket ${ticket.key}: ${ticket.summary}
@@ -286,7 +333,7 @@ ${previous.resumen ? '\nresumen.md is an automatic index of the ticket (steps fo
 ${lessonsBlock('lessons_general', lessons.general)}
 
 ${lessonsBlock(`lessons_${stage}`, lessons[stage])}
-${answersBlock(ticket.answers)}`;
+${PAIRED[stage] ? `\nLessons of the ${stageOf(PAIRED[stage]).name} agent, which drives the application the same way ${stage === 'reproduce' ? 'after the fix' : 'before the fix'}:\n${lessonsBlock(`lessons_${PAIRED[stage]}`, lessons[PAIRED[stage]])}\n` : ''}${answersBlock(ticket.answers)}`;
   const launch = settings.launchCommand ? `How to launch the application: ${settings.launchCommand}` : 'How to launch the application is not configured: find it in the lessons or the repository, and save it as a "general" lesson.';
   const tasks = {
     analyze: `Analyze the ticket before anyone tries it, to estimate how easy it is to resolve. Read the description, the comments, the images and the video frames${settings.repository ? `, and look at the code in ${settings.repository} (read only) to find where the problem probably is` : ''}. Do not launch the application, do not build and do not change code.
@@ -298,19 +345,20 @@ Outcome "analyzed" when you could estimate it; "blocked" when the ticket is too 
     reproduce: `Understand the ticket (description, comments, images and video frames) and reproduce the problem in the current version of the application, before any change. If something needed to try is missing, report "blocked" with a precise question.
 ${launch}
 ${WINAPP_GUIDE}
-Also write reproducir.ps1 in the ticket folder: a PowerShell script with the winapp commands that reproduce the problem, so the verification agent can replay them.
-Your report: the problem in two lines, steps actually run (with the winapp commands that worked), what you observed against what was expected, and the evidence files.
+When the problem is reproduced, the verification agent repeats your reproduction on the fixed build to confirm it is gone: leave it everything it needs.
+- reproducir.ps1 in the ticket folder: a PowerShell script that starts with the application already open in its initial state (do not launch it in the script: the verification launches the fixed build), then the winapp commands that worked, with their waits, up to the problem, and ends with the command that shows it (winapp ui get-value, a screenshot…).
+Your report: the problem in two lines, steps actually run (with the winapp commands that worked), what you observed against what was expected, and the evidence files. End it with a section «Para verificar»: preconditions and data, the exact steps, the observation point (what to read and where) with the wrong result you saw, and the correct behavior expected there.
 Outcome "reproduced" when you saw the problem; "not_reproduced" when the steps work fine (say what you tried); "blocked" when something outside the application prevents trying (environment, data, permissions).`,
     fix: `Fix the cause of the problem in the code.
 Code folder: ${worktree?.path ?? settings.repository} — ${worktree ? `a separate git worktree of ${settings.repository} on branch ${worktree.branch}; write only there and in the ticket folder` : 'the repository'}.
 ${previous.build && ticket.lastOutcome === 'build_failed' ? 'The previous fix did not build: read the latest build report and its log first and correct those errors.\n' : previous.verify && ticket.lastOutcome === 'not_fixed' ? 'The previous fix did not pass verification: read that report first and correct what still fails.\n' : ''}Find the root cause and make the smallest correct change following the conventions of the code. Do not build the application: the next step, «Compilar», builds it${settings.buildCommand ? ` with \`${settings.buildCommand}\`` : ''} when the person decides, and sends the ticket back to you with the log if it does not build. Do not commit.
 Your report: cause, changed files and why, risks and what the verification should check.
 Outcome "fixed" when the change is complete; "failed" when you could not fix it (explain why); "blocked" when you need a decision or information from a person.`,
-    verify: `${ticket.history?.findLast(h => h.stage === 'fix')?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one). The «Compilar» step already built it (see the latest build report): do not build again; if the build is missing, report "blocked".
+    verify: `${ticket.history?.findLast(h => h.stage === 'fix')?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one). It was built right before you started, as the first part of this step (see the latest build report): do not build again; if the build is missing, report "blocked".
 ${launch}
 ${WINAPP_GUIDE}
-Replay reproducir.ps1 or the reproduction steps, and check closely related behavior did not break.
-Your report: what you ran, what you observed, evidence files and, if it still fails, exactly what and where, for the fix agent.
+Your check is the reproduction repeated: the same conditions and steps, but now the behavior must have changed. Start by reading the latest reproduction report (its «Para verificar» section) and reproducir.ps1${ticket.history?.findLast(h => h.stage === 'reproduce')?.by === 'person' ? ' (the reproduction was done by a person: if they left no steps, take them from the ticket)' : ''}. Launch the fixed build, prepare the same preconditions and data, replay reproducir.ps1 or those steps up to the same observation point: where the reproduction saw the wrong result, the expected behavior must now appear. The fix may change the screens a little: if a step no longer matches, adapt it, say so and update reproducir.ps1 so it keeps working on the fixed version. Then check closely related behavior did not break.
+Your report: before (from the reproduction) and now, side by side at the observation point; what you ran; evidence files; and, if it still fails, exactly what and where, for the fix agent.
 Outcome "verified" when the problem is gone; "not_fixed" when it still happens or something related broke; "blocked" when you cannot run the check.`,
   };
   return `${common}\n${tasks[stage]}`;
@@ -323,7 +371,7 @@ export function latestReports(ticket, folder) {
   return out;
 }
 
-// Comment published in Jira when logs are on (Jira wiki markup).
+// Comment proposed for Jira after each agent step (Jira wiki markup).
 export function logComment({ stage, outcome, report = null, question = null, error = null }) {
   const excerpt = String(report ?? '').replace(/\{noformat\}/g, '').trim();
   return [
@@ -401,8 +449,8 @@ export function inside(roots, path, cwd) {
 }
 // Nothing reaches Jira without the person: the agents run without its token, cannot
 // read Neo Team's own data (where the token is), apart from the tickets, and every
-// command that would reach Jira or the web is rejected. Only «Logs en Jira», when
-// the person turns it on, writes there.
+// command that would reach Jira or the web is rejected. Only the comments the person
+// confirms one by one are written there.
 const OUTSIDE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|Start-BitsTransfer|Send-MailMessage)\b|Net\.WebClient|HttpClient|\bfetch\s*\(|requests\.(get|post|put|patch|delete)|jira-token|NEO_TEAM_JIRA_TOKEN|atlassian\.(net|com)|\/rest\/(api|agile)\//i;
 const NO_OUTSIDE = 'Los agentes no pueden conectarse a Jira ni a la web: lo que se publica en Jira lo decide la persona.';
 export function permissionFor(request, { writable, cwd, hidden = [], visible = [], blocked = [] }) {
@@ -663,8 +711,8 @@ export class CopilotAgent {
 // Runs one step at a time (the desktop is driven by one agent at a time). With
 // «automático» it keeps taking pending tickets, finishing the current one first.
 export class JiraPipeline {
-  constructor({ tickets, agent, settings, build = runBuild, worktree = ensureWorktree, models = async () => [], demo = false, comment = null, desktop = () => new JiraDesktop(), chatAgent = () => new CopilotAgent() }) {
-    Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment, desktop, chatAgent });
+  constructor({ tickets, agent, settings, build = runBuild, worktree = ensureWorktree, models = async () => [], demo = false, comment = null, desktop = () => new JiraDesktop(), chatAgent = () => new CopilotAgent(), missing = async () => ({}) }) {
+    Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment, desktop, chatAgent, missing });
     this.queue = []; this.auto = false; this.running = null; this.lastKey = null; this.error = null; this.log = []; this.chats = new Map();
   }
   writeLog(key, file, items) {
@@ -769,6 +817,13 @@ Read what you need from them and the ticket files before answering.`;
   }
   // Recolectar is done by code at once, without waiting for the agent at work: ▶ on
   // a ticket in Recolectar collects it now and leaves it queued for Analizar.
+  // Collecting is part of downloading: every ticket just downloaded gets its index
+  // at once and reaches Analizar (or stops with a question when it has nothing to go on).
+  async collectAll() {
+    let collected = 0;
+    for (const ticket of await this.tickets.list()) if (ticket.stage === 'collect' && !ticket.archived && this.running?.key !== ticket.key) { await this.collectNow(ticket.key); collected++; }
+    if (collected && this.auto) void this.loop();
+  }
   async collectNow(key) {
     const ticket = await this.tickets.get(key), folder = this.tickets.folder(key);
     const number = (ticket.history ?? []).filter(h => h.stage === 'collect').length + 1, log = logName('collect', number), startedAt = new Date().toISOString(), activity = [];
@@ -786,7 +841,12 @@ Read what you need from them and the ticket files before answering.`;
   }
   // Each column has a traffic light: «auto» runs on its own, «ask» waits for the
   // person to approve each step (▶) and «off» does nothing.
-  async modeOf(stage) { return COLUMN_MODES.includes((await this.settings()).modes?.[stage]) ? (await this.settings()).modes[stage] : 'auto'; }
+  // What the agent of a column lacks to work (empty when it has everything).
+  async lacking(stage) {
+    const missing = this.demo ? {} : { ...(await this.missing()), ...(this.needsCopilot ? { copilot: true } : {}) };
+    return (NEEDS[stage] ?? []).filter(need => missing[need]);
+  }
+  async modeOf(stage) { if (stage === 'collect') return 'auto'; if (stage === 'build') stage = 'verify'; return COLUMN_MODES.includes((await this.settings()).modes?.[stage]) ? (await this.settings()).modes[stage] : 'auto'; }
   // ▶ on a ticket works on that ticket alone: the others wait (Empezar is paused)
   // and it goes on through the next columns while their light is on autopilot.
   async enqueue(key) {
@@ -794,6 +854,8 @@ Read what you need from them and the ticket files before answering.`;
     if (this.running?.key === key) throw fail('Un agente ya está trabajando en este ticket.', 409);
     let ticket = await this.tickets.get(key);
     if (ticket && await this.modeOf(ticket.stage) === 'off') throw fail(`El agente de ${stageOf(ticket.stage)?.name ?? ''} está apagado.`, 409);
+    const lacking = ticket ? await this.lacking(ticket.stage) : [];
+    if (lacking.length) throw fail(`El agente de ${stageOf(ticket.stage)?.name ?? ''} no puede trabajar: falta ${lacking.map(n => NEED_NAMES[n]).join(' y ')}.`, 409);
     if (ticket?.stage === 'collect' && this.running) {
       ticket = await this.collectNow(key);
       if (ticket.status !== 'pending' || await this.modeOf(ticket.stage) === 'off') return;
@@ -818,6 +880,8 @@ Read what you need from them and the ticket files before answering.`;
       await this.tickets.update(ticket.key, t => t.status !== 'running' || this.running?.key === t.key ? t
         : { ...t, status: 'pending', note: `${stageOf(t.stage)?.name ?? 'El paso'} se interrumpió al cerrarse Neo Team: vuelve a ejecutarlo.` });
     }
+    // Tickets downloaded before collecting became part of the download.
+    await this.collectAll();
   }
   // A message from the person to the agent at work, kept in the log of the step.
   // Talking to the agent at work, as in a chat: a message interrupts what it is
@@ -840,12 +904,25 @@ Read what you need from them and the ticket files before answering.`;
     if (on) { this.activity({ kind: 'person', message: 'Tú: pausa.' }); await this.agent.pause(); }
     else { this.activity({ kind: 'person', message: 'Tú: continúa.' }); this.agent.resume(); }
   }
+  // The person decides on the comment a step left ready: it is published in Jira or dropped.
+  async decideComment(key, index, publish) {
+    checkKey(key);
+    const entry = (await this.tickets.get(key))?.history?.[index];
+    if (!entry?.pendingComment) throw fail('Ese comentario ya no está pendiente.', 409);
+    if (publish) await this.comment(key, entry.pendingComment);
+    await this.tickets.update(key, t => ({ ...t, history: t.history.map((h, i) => {
+      if (i !== index) return h;
+      const { pendingComment, ...rest } = h;
+      return publish ? { ...rest, posted: true } : { ...rest, declined: true };
+    }) }));
+  }
   async markDone(key, note = '') {
     checkKey(key);
     if (this.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
     const ticket = await this.tickets.get(key);
     if (!ticket) throw fail('El ticket ya no está disponible.', 404);
-    const stage = stageOf(ticket.stage);
+    // Building is the start of Verificar: done by hand, the verification is.
+    const stage = stageOf(ticket.stage === 'build' ? 'verify' : ticket.stage);
     if (!stage) throw fail('Este ticket ya está resuelto.', 409);
     const settings = await this.settings(), outcome = stage.outcomes[0], at = new Date().toISOString();
     const number = (ticket.history ?? []).filter(h => h.stage === stage.id).length + 1, report = stage.report(number);
@@ -865,17 +942,18 @@ Read what you need from them and the ticket files before answering.`;
     while (this.queue.length) {
       const { key } = this.queue.shift();
       const ticket = await this.tickets.get(key);
-      if (ticket && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) !== 'off') return key;
+      if (ticket && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) !== 'off' && !(await this.lacking(ticket.stage)).length) return key;
     }
     if (this.focus) {
       const ticket = await this.tickets.get(this.focus);
-      if (ticket?.status === 'pending' && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) === 'auto') return ticket.key;
+      if (ticket?.status === 'pending' && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) === 'auto' && !(await this.lacking(ticket.stage)).length) return ticket.key;
       this.focus = null;
       return null;
     }
     if (!this.auto) return null;
     const modes = (await this.settings()).modes ?? {};
-    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (modes[t.stage] ?? 'auto') === 'auto' && !autoLocked(t) && !t.archived && t.inFilter !== false);
+    const blocked = new Set((await Promise.all(Object.keys(NEEDS).map(async stage => (await this.lacking(stage)).length ? stage : null))).filter(Boolean));
+    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (t.stage === 'collect' || (modes[t.stage === 'build' ? 'verify' : t.stage] ?? 'auto') === 'auto') && !blocked.has(t.stage) && !autoLocked(t) && !t.archived && t.inFilter !== false);
     // Collecting costs nothing and takes no time: every pending ticket gets it first.
     return (pending.find(t => t.stage === 'collect') ?? pending.find(t => t.key === this.lastKey) ?? pending[0])?.key ?? null;
   }
@@ -890,9 +968,22 @@ Read what you need from them and the ticket files before answering.`;
         if (outcome?.reason === 'copilot-auth') { this.auto = false; this.queue = []; }
       }
     } finally { this.looping = false; }
+    // A ▶ that arrived while the loop was ending is not lost.
+    if (this.queue.length || this.focus) void this.loop();
   }
   // One step of one ticket: prepare, run the agent of its column and move it on.
-  async runStage(key) {
+  // Verificar starts with Compilar: the build checked is always the one made right
+  // before, not one that something else may have overwritten since.
+  async runStage(key, built = false) {
+    let ticket = await this.tickets.get(key);
+    if (ticket?.stage === 'verify' && !built) { await this.tickets.update(key, t => ({ ...t, stage: 'build' })); ticket = await this.tickets.get(key); }
+    if (ticket?.stage === 'build') {
+      const step = await this.step(key);
+      return (await this.tickets.get(key))?.stage === 'verify' && step?.outcome === 'built' ? this.runStage(key, true) : step;
+    }
+    return this.step(key);
+  }
+  async step(key) {
     const settings = await this.settings();
     let ticket = await this.tickets.get(key);
     const stage = stageOf(ticket?.stage);
@@ -917,7 +1008,8 @@ Read what you need from them and the ticket files before answering.`;
       // Fixing and building need the code; the example has none.
       const worktree = !this.demo && (['fix', 'build'].includes(stage.id) || (stage.id === 'verify' && settings.repository)) ? await this.worktree(settings, ticket, folder) : null;
       await mkdir(join(folder, 'evidencias'), { recursive: true });
-      const [files, general, own] = await Promise.all([listFiles(folder), this.tickets.learnings('general'), this.tickets.learnings(stage.id)]);
+      const pair = PAIRED[stage.id];
+      const [files, general, own, paired] = await Promise.all([listFiles(folder), this.tickets.learnings('general'), this.tickets.learnings(stage.id), pair ? this.tickets.learnings(pair) : null]);
       const previous = latestReports(ticket, folder);
       const images = stage.id === 'fix' ? [] : files.filter(f => f.startsWith('adjuntos/') && IMAGE.test(f) && !f.includes('.fotogramas/')).slice(0, 8);
       this.activity({ message: `${stage.name} · ${files.length} archivos del ticket${worktree ? ` · código en ${worktree.path}` : ''}` });
@@ -928,7 +1020,7 @@ Read what you need from them and the ticket files before answering.`;
         : await this.agent.run({
         stage: stage.id, ticket, folder, model, settings, desktop,
         system: systemMessage(stage.id),
-        prompt: stagePrompt({ stage: stage.id, ticket, folder, files, settings, worktree, lessons: { general, [stage.id]: own }, previous }),
+        prompt: stagePrompt({ stage: stage.id, ticket, folder, files, settings, worktree, lessons: { general, [stage.id]: own, ...(pair ? { [pair]: paired } : {}) }, previous }),
         workingDirectory: worktree?.path ?? folder,
         writable: [folder, ...(stage.id === 'fix' && worktree ? [worktree.path] : [])],
         attachments: images.map(f => ({ type: 'file', path: join(folder, f), displayName: f })),
@@ -955,14 +1047,8 @@ Read what you need from them and the ticket files before answering.`;
     this.activity({ message: `${stage.name} finalizado: ${OUTCOME_LABELS[outcome] ?? outcome}${report ? ` · informe ${report}` : ''}.` });
     const finishedAt = Date.now();
     const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null, ...(result.ease ? { ease: result.ease } : {}), log, ...(sessionId ? { sessionId } : {}), activity: this.running.activity };
-    // With logs on, what the agent achieved is published as a comment on the ticket.
-    if (settings.logs && this.comment && outcome !== 'stopped' && !stage.programmatic) {
-      try {
-        await this.comment(key, logComment({ stage: stage.id, outcome, report: reportText, question: result.question, error: failure?.message }));
-        entry.posted = true;
-        this.activity({ message: 'Publicado en el ticket de Jira.' });
-      } catch (error) { entry.posted = false; entry.postError = error.message; this.activity({ kind: 'warning', message: `No se pudo publicar en Jira: ${error.message}` }); }
-    }
+    // What the agent achieved is left ready as a Jira comment: it is published only when the person confirms it.
+    if (this.comment && outcome !== 'stopped' && !stage.programmatic) entry.pendingComment = logComment({ stage: stage.id, outcome, report: reportText, question: result.question, error: failure?.message });
     entry.activity = this.running.activity;
     await this.tickets.update(key, t => {
       const next = failure
