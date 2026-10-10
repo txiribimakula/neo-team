@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -62,6 +62,15 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.ok(shared.data.result.files >= 2);
   const sharedTicket = shared.data.jira.tickets.find(x => x.key === 'NEO-101');
   assert.ok(sharedTicket.shared.id && sharedTicket.shared.id === sharedTicket.sharedSeen, 'what this computer shared is not offered back to it');
+  const again2 = await post('/api/jira-share', { key: 'NEO-101' });
+  const replacedTicket = again2.data.jira.tickets.find(x => x.key === 'NEO-101');
+  assert.deepEqual([again2.status, again2.data.result.replaced, replacedTicket.shared.id !== sharedTicket.shared.id, replacedTicket.sharedOwn], [200, true, true, replacedTicket.shared.id], 'uploading again replaces the previous one this computer uploaded');
+  // Someone else's newer state, not brought here: the upload stops so it is brought first.
+  const stateFile = join(directory, 'jira-ejemplo', 'NEO-101', 'estado.json');
+  await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, 'utf8')), sharedSeen: 'otro' }));
+  const blocked = await post('/api/jira-share', { key: 'NEO-101' });
+  assert.deepEqual([blocked.status, /que no has traído/.test(blocked.data.error)], [409, true]);
+  await writeFile(stateFile, JSON.stringify({ ...JSON.parse(await readFile(stateFile, 'utf8')), sharedSeen: replacedTicket.shared.id }));
   const nothing = await post('/api/jira-resume', { key: 'NEO-102' });
   assert.deepEqual([nothing.status, /no tiene un estado compartido/.test(nothing.data.error)], [404, true]);
   const again = (await post('/api/jira-refresh')).data.result;

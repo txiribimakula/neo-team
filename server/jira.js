@@ -171,7 +171,7 @@ export class JiraClient {
       if (response.status === 401) throw Object.assign(fail(`Jira rechazó el acceso (401). Comprueba el correo y el token. ${TOKEN_HELP}`, 401), { reason: 'jira-token' });
       throw fail(`Jira respondió ${response.status} en ${target.pathname}: ${String(message).replace(/\s+/g, ' ').slice(0, 300)}`, response.status === 404 ? 404 : 502);
     }
-    return raw ? response : response.json();
+    return raw ? response : response.status === 204 ? null : response.json();
   }
   // Cloud pages with nextPageToken (/search/jql); Data Center with startAt (/search).
   async search(jql, fields, onProgress = () => {}) {
@@ -207,7 +207,8 @@ export class JiraClient {
   }
   download(url) { return this.call('', { url, raw: true }); }
   // The only writes, each one decided by the person: a comment with the progress of
-  // the agents and the state of a ticket, as an attachment, for another computer.
+  // the agents and the state of a ticket, as an attachment, for another computer
+  // (replacing the previous one this computer uploaded).
   addComment(key, body) { return this.call(`/rest/api/2/issue/${encodeURIComponent(key)}/comment`, { method: 'POST', body: { body } }); }
   async attach(key, name, data) {
     const form = new FormData();
@@ -215,6 +216,7 @@ export class JiraClient {
     const [attachment] = await this.call(`/rest/api/2/issue/${encodeURIComponent(key)}/attachments`, { method: 'POST', body: form });
     return attachment;
   }
+  deleteAttachment(id) { return this.call(`/rest/api/2/attachment/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
 }
 
 // --- Files on disk -----------------------------------------------------------
@@ -269,7 +271,7 @@ async function saveAttachment(client, attachment, file) {
 // attachment. It is not downloaded with the others: it is brought when the person asks.
 export const SHARED = /^neo-team-estado-.*\.zip$/i;
 export const sharedName = key => `neo-team-estado-${key}.zip`;
-const sharedOf = attachments => {
+export const sharedOf = attachments => {
   const latest = attachments.filter(a => SHARED.test(a.filename ?? '')).sort((a, b) => String(b.created ?? '').localeCompare(String(a.created ?? '')))[0];
   return latest ? { id: String(latest.id), created: latest.created ?? null, author: latest.author ? person(latest.author) : '', size: latest.size ?? null, content: latest.content } : null;
 };

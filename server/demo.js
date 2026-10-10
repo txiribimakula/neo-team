@@ -303,11 +303,14 @@ export class DemoJiraClient {
   }
   // States shared in the example stay in memory too.
   static attached = [];
+  static uploads = 0;
   async attach(key, filename, data) {
-    const attachment = { key, id: `shared-${DemoJiraClient.attached.length + 1}`, filename, created: new Date().toISOString(), size: data.length, author: demoUser('Tú'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/shared-${DemoJiraClient.attached.length + 1}`, data: Buffer.from(data) };
+    const id = `shared-${++DemoJiraClient.uploads}`;
+    const attachment = { key, id, filename, created: new Date().toISOString(), size: data.length, author: demoUser('Tú'), content: `${DEMO_JIRA_SETTINGS.url}/attachment/${id}`, data: Buffer.from(data) };
     DemoJiraClient.attached.push(attachment);
     return attachment;
   }
+  async deleteAttachment(id) { DemoJiraClient.attached = DemoJiraClient.attached.filter(a => a.id !== id); return null; }
   // Comments published in the example stay in memory: nothing reaches Jira.
   async addComment(key, body) { DemoJiraClient.published.push({ key, body }); return { id: String(DemoJiraClient.published.length) }; }
   async comments(key) { return demoTicket(key).comments.map(c => ({ author: demoUser(c.author), created: c.created, body: c.body })); }

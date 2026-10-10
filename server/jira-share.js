@@ -19,7 +19,7 @@ const FROM_JIRA = new Set(['adjuntos', 'codigo', 'descripcion.md', 'comentarios.
 const skipped = name => FROM_JIRA.has(name.toLowerCase()) || name.startsWith('.') || /\.(tmp|part)$/i.test(name);
 // What belongs to each computer and is kept when the state of another one arrives:
 // what Jira says of the ticket and how this person sees it on the board.
-const LOCAL = ['key', 'summary', 'type', 'jiraStatus', 'priority', 'updated', 'url', 'attachments', 'comments', 'skipped', 'assignee', 'news', 'archived', 'autoLock', 'inFilter', 'collectedAt', 'closedInJira', 'shared', 'sharedSeen'];
+const LOCAL = ['key', 'summary', 'type', 'jiraStatus', 'priority', 'updated', 'url', 'attachments', 'comments', 'skipped', 'assignee', 'news', 'archived', 'autoLock', 'inFilter', 'collectedAt', 'closedInJira', 'shared', 'sharedSeen', 'sharedOwn'];
 
 function git(cwd, args, { env = {}, timeout = 5 * 60000 } = {}) {
   return new Promise((done, reject) => execFile('git', ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off', ...args], { cwd, timeout, maxBuffer: 512 * 1024 * 1024, encoding: 'buffer', windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env } },

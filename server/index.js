@@ -14,7 +14,7 @@ import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
-import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, TOKEN_HELP } from './jira.js';
+import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
 import { packState, unpackState } from './jira-share.js';
 import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
@@ -514,13 +514,27 @@ const server = http.createServer(async (req, res) => {
           if (pipeline.running?.key === key) throw fail(`${key} tiene un paso en curso: detenlo o espera a que termine.`, 409);
           const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
           if (path === '/api/jira-share') {
+            // A state someone else uploaded and this computer has not brought is never
+            // left behind: it has to be brought first.
+            progress({ message: `Comprobando en Jira si hay un estado más reciente de ${key}…` });
+            const latest = sharedOf((await client.issue(key)).fields?.attachment ?? []);
+            if (latest && latest.id !== ticket.sharedSeen) {
+              await pipeline.tickets.update(key, t => ({ ...t, shared: latest }));
+              throw fail(`${latest.author || 'Otra persona'} subió un estado de ${key}${latest.created ? ` el ${new Date(latest.created).toLocaleString('es')}` : ''} que no has traído. Tráelo antes de subir el tuyo.`, 409);
+            }
             progress({ message: `Preparando el estado de ${key}…` });
             const pack = await packState(pipeline.tickets, key, { by: jiraMe()?.name ?? '' });
             progress({ message: `Subiendo ${sharedName(key)} (${Math.max(1, Math.round(pack.data.length / 1e6))} MB) a ${key}…` });
             const attachment = await client.attach(key, sharedName(key), pack.data);
             const shared = { id: String(attachment?.id ?? ''), created: attachment?.created ?? new Date().toISOString(), author: jiraMe()?.name ?? '', size: pack.data.length, content: attachment?.content ?? null };
-            await pipeline.tickets.update(key, t => ({ ...t, shared, sharedSeen: shared.id }));
-            return json(res, { result: { key, files: pack.files, patch: pack.patch, size: pack.data.length }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
+            await pipeline.tickets.update(key, t => ({ ...t, shared, sharedSeen: shared.id, sharedOwn: shared.id }));
+            // The new one replaces the previous one only if this computer uploaded it.
+            let replaced = false;
+            if (latest && latest.id === ticket.sharedOwn && shared.id) {
+              progress({ message: `Borrando el estado anterior de ${key}…` });
+              replaced = await client.deleteAttachment(latest.id).then(() => true, () => false);
+            }
+            return json(res, { result: { key, files: pack.files, patch: pack.patch, size: pack.data.length, replaced }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
           }
           if (!ticket.shared?.content) throw fail(`${key} no tiene un estado compartido en Jira. Actualiza el tablero para buscarlo.`, 404);
           progress({ message: `Descargando el estado de ${key} que subió ${ticket.shared.author || 'otra persona'}…` });
