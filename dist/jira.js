@@ -168,15 +168,14 @@ export function matchesTicket(ticket, search = '') {
   return plain(search).split(/\s+/).filter(Boolean).every(word => text.includes(word));
 }
 // The search, right above the board: every word has to be in the key or the title.
-// Right above the board: updating from Jira, starting, the search and, at the end, the settings.
+// Right above the board: updating from Jira and what it brings, the search and, at the end, starting and the settings.
 const boardControls = (board, search, collectKey) => `<div class="jira-board-controls">
     <button class="button jira-square" data-action="jira-refresh" title="${escape(board.settings.collect?.mode === 'single' ? `Actualizar: descarga solo ${board.settings.collect.key || 'el ticket indicado'}; el resto no se toca` : board.settings.collect?.mode === 'mine' ? `Actualizar: descarga solo los tickets del filtro asignados a ti (nuevos o con cambios); quita del tablero los terminados en Jira · ${board.settings.filter ?? ''}` : `Actualizar: pone al día los tickets del tablero (quita los terminados en Jira y descarga los cambios) y trae los nuevos del filtro · ${board.settings.filter ?? ''}`)}" aria-label="Actualizar">${SYNC}</button>
     ${collectView(board.settings, collectKey)}
-    ${board.pipeline?.auto
-      ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para" aria-label="Pausar">❚❚</button>`
-      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}
     ${searchView(search)}
-    <span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
+    <span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.pipeline?.auto
+      ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para" aria-label="Pausar">❚❚</button>`
+      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
 // What updating brings: the whole filter, only your tickets or one ticket by its key.
 const COLLECT = [['filter', 'Todo el filtro'], ['mine', 'Asignados a mí'], ['single', 'Un ticket']];
 function collectView(settings, draft) {

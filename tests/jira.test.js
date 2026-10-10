@@ -626,7 +626,7 @@ test('the board is filtered by key or title while typing', () => {
   const board = { settings: state.jira, pipeline: {}, tickets: [{ ...ticket, stage: 'reproduce', status: 'pending' }, { key: 'NEO-103', summary: 'Error al imprimir', stage: 'fix', status: 'pending' }] };
   const html = jiraView(state, { view: 'board', board, search: 'impri' }, null);
   assert.match(html, /<label class="jira-search"><svg[\s\S]*?<\/svg><input type="search" data-jira-search data-focus="jira-search" value="impri"[^>]*><\/label>/, 'with a funnel');
-  assert.match(html, /<div class="jira-board-controls">\s*<button[^>]*data-action="jira-refresh"[\s\S]*?data-action="jira-auto"[\s\S]*?<label class="jira-search">[\s\S]*?<span class="jira-links"><button class="icon-button jira-gear" data-action="jira-settings"[\s\S]*?<\/span><\/div><div class="jira-board">/, 'after updating and starting, and the settings at the end');
+  assert.match(html, /<div class="jira-board-controls">\s*<button[^>]*data-action="jira-refresh"[\s\S]*?<label class="jira-search">[\s\S]*?<span class="jira-links"><button class="button jira-square" data-action="jira-auto"[^>]*>[^<]*<\/button><button class="icon-button jira-gear" data-action="jira-settings"[\s\S]*?<\/span><\/div><div class="jira-board">/, 'updating and the search first; starting and the settings on the right');
   assert.match(html, /Error al imprimir/);
   assert.doesNotMatch(html, /El filtro de clientes/, 'in every column');
 });
