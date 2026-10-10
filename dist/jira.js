@@ -168,11 +168,10 @@ export function matchesTicket(ticket, search = '') {
   return plain(search).split(/\s+/).filter(Boolean).every(word => text.includes(word));
 }
 // The search, right above the board: every word has to be in the key or the title.
-// Right above the board: updating from Jira and what it brings, the search and, at the end, starting and the settings.
+// Right above the board: updating from Jira and what it brings and, at the end, starting and the settings.
 const boardControls = (board, search, collectKey) => `<div class="jira-board-controls">
     <button class="button jira-square" data-action="jira-refresh" title="${escape(board.settings.collect?.mode === 'single' ? `Actualizar: descarga solo ${board.settings.collect.key || 'el ticket indicado'}; el resto no se toca` : board.settings.collect?.mode === 'mine' ? `Actualizar: descarga solo los tickets del filtro asignados a ti (nuevos o con cambios); quita del tablero los terminados en Jira · ${board.settings.filter ?? ''}` : `Actualizar: pone al día los tickets del tablero (quita los terminados en Jira y descarga los cambios) y trae los nuevos del filtro · ${board.settings.filter ?? ''}`)}" aria-label="Actualizar">${SYNC}</button>
     ${collectView(board.settings, collectKey)}
-    ${searchView(search)}
     <span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.pipeline?.auto
       ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para" aria-label="Pausar">❚❚</button>`
       : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
@@ -245,11 +244,13 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   const error = board.pipeline?.error ? `<p class="inline-error">${escape(board.pipeline.error)}</p>` : '';
   // Without a Copilot session the agents cannot work: how to sign in, as in pull request reviews.
   const archivedButton = archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : '';
+  // Below the board: the search and the tickets taken off it.
+  const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
   const run = desktopRun(board), ticket = run && board.tickets.find(t => t.key === run.key);
-  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run, true, tell)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${archivedButton}</details></div>`;
+  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run, true, tell)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
   const last = board.pipeline?.last, log = board.pipeline?.running ? activityView(board.pipeline.running, true, tell)
     : last && String(last.startedAt) !== String(closedLog) ? activityView(last, false, '', true) : '';
-  return `${log}${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${archivedButton}</div>${generalView(board.pipeline?.general, tells.general, missing.copilot, warn, assistantClosed)}</div>`;
+  return `${log}${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${generalView(board.pipeline?.general, tells.general, missing.copilot, warn, assistantClosed)}</div>`;
 }
 
 export const SETTINGS_SUBMIT = '<button class="button primary" type="submit" form="jira-settings-form" title="Guarda y comprueba la conexión con Jira">Conectar</button>';

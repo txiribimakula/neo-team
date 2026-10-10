@@ -675,7 +675,7 @@ body.jira-fit .jira-page>*{flex:none}
 body.jira-fit .jira-page>.jira-activity ol{max-height:26vh}
 body.jira-fit .jira-main{flex:1;min-height:0;align-items:stretch}
 body.jira-fit .jira-main-board{display:flex;flex-direction:column;min-height:0}
-body.jira-fit .jira-board-controls,body.jira-fit .jira-archived{flex:none}
+body.jira-fit .jira-board-controls,body.jira-fit .jira-board-foot,body.jira-fit .jira-archived{flex:none}
 body.jira-fit .jira-board{flex:1;min-height:0;align-items:stretch;overflow:auto hidden;padding-bottom:0}
 body.jira-fit .jira-column{display:flex;flex-direction:column;min-height:0}
 body.jira-fit .jira-column>header{flex:none}
@@ -686,3 +686,4 @@ body.jira-fit .jira-side.is-closed{display:block}
 @media (max-width:1100px){body.jira-fit .jira-main{grid-template-rows:auto minmax(0,1fr)}body.jira-fit .jira-side .jira-general{max-height:34vh}}
 .jira-collect{display:flex;align-items:center;gap:6px}.jira-collect select{height:36px;width:auto;font-size:14px}.jira-collect input{height:36px;width:130px;padding:0 10px;font-size:14px;text-transform:uppercase}
 .jira-tool.jira-resume{color:var(--green);border-color:#bfe0c7;background:#eef8f0}
+.jira-board-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}.jira-board-foot .jira-archived{align-self:center}
