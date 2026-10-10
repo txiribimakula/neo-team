@@ -160,7 +160,7 @@ async function redownloaded(tickets, key, known, meta) {
   return { comments, attachments, news };
 }
 // What updating collects: the whole filter, only its tickets assigned to you, or a
-// single ticket by its key (in the filter or not).
+// single ticket of the filter by its key.
 export const COLLECT_MODES = ['filter', 'mine', 'single'];
 export function collectScopeFrom(input) {
   const mode = COLLECT_MODES.includes(input?.mode) ? input.mode : 'filter';
@@ -169,25 +169,22 @@ export function collectScopeFrom(input) {
   if (String(input?.key ?? '').trim() && !key) throw fail('El ticket no es válido: escribe su clave (NEO-123) o su dirección en Jira.');
   return { mode, key };
 }
+// The filter's query narrowed with one more condition, keeping its order.
 export function collectJql(filter, scope = {}) {
-  if (scope.mode === 'single') {
-    if (!scope.key) throw fail('Escribe la clave del ticket que quieres recolectar.');
-    return `issuekey = ${checkKey(scope.key)}`;
-  }
   const jql = jqlFrom(filter);
-  if (scope.mode !== 'mine') return jql;
-  const [where, order] = jql.split(/\s+ORDER\s+BY\s+/i);
-  const mine = where.trim() && !/^ORDER\s+BY\s/i.test(where.trim()) ? `(${where.trim()}) AND assignee = currentUser()` : 'assignee = currentUser()';
-  const sort = order ?? where.trim().match(/^ORDER\s+BY\s+(.*)$/i)?.[1];
-  return sort ? `${mine} ORDER BY ${sort}` : mine;
+  if (scope.mode === 'single' && !scope.key) throw fail('Escribe la clave del ticket que quieres recolectar.');
+  const condition = scope.mode === 'single' ? `issuekey = ${checkKey(scope.key)}` : scope.mode === 'mine' ? 'assignee = currentUser()' : null;
+  if (!condition) return jql;
+  const order = jql.match(/(?:^|\s)ORDER\s+BY\s+([\s\S]*)$/i), where = (order ? jql.slice(0, order.index) : jql).trim();
+  return `${where ? `(${where}) AND ${condition}` : condition}${order ? ` ORDER BY ${order[1]}` : ''}`;
 }
 export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, scope = { mode: 'filter' }, onProgress = () => {} }) {
-  const what = { filter: 'el filtro', mine: 'tus tickets del filtro', single: scope.key }[scope.mode] ?? 'el filtro';
+  const what = { filter: 'el filtro', mine: 'tus tickets del filtro', single: `${scope.key} en el filtro` }[scope.mode] ?? 'el filtro';
   onProgress({ message: `Consultando ${what} en Jira…` });
   const result = await client.search(collectJql(settings.filter, scope), ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee'], count => onProgress({ message: `Consultando ${what} en Jira… ${count} tickets` }));
   // Narrowed here too, in case the server did not apply the whole query.
   const issues = result.issues.filter(issue => scope.mode === 'single' ? issue.key === scope.key : scope.mode === 'mine' ? !!assigneeOf(issue, me)?.me : true), { limited } = result;
-  if (scope.mode === 'single' && !issues.length) throw fail(`${scope.key} no existe en Jira o no tienes acceso.`, 404);
+  if (scope.mode === 'single' && !issues.length) throw fail(`${scope.key} no está en el filtro (o no existe o no tienes acceso).`, 404);
   const found = new Set(issues.map(i => i.key));
   const counts = { found: issues.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
   for (const [index, issue] of issues.entries()) {

@@ -494,11 +494,14 @@ const server = http.createServer(async (req, res) => {
           const pipeline = jiraPipeline();
           if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(() => null));
           const ffmpeg = store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg;
-          const sync = await syncTickets({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, scope: settings.collect, onProgress: progress });
+          const options = { client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, scope: settings.collect, onProgress: progress };
+          // A single ticket has to be in the filter: that is checked before touching anything.
+          const single = settings.collect.mode === 'single' ? await collectFilter(options) : null;
+          const sync = await syncTickets(options);
           // A ticket finished in Jira is no longer waiting for an agent.
           pipeline.queue = pipeline.queue.filter(q => !sync.closed.includes(q.key));
           if (sync.closed.includes(pipeline.focus)) pipeline.focus = null;
-          const collect = await collectFilter({ client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, scope: settings.collect, onProgress: progress });
+          const collect = single ?? await collectFilter(options);
           await pipeline.collectAll();
           return json(res, { result: { sync, collect }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }

@@ -187,4 +187,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   const single = (await post('/api/jira-refresh')).data.result.collect;
   assert.deepEqual([single.mode, single.found, single.left], ['single', 1, 0]);
   assert.equal((await post('/api/jira-collect', { mode: 'single', key: 'hola' })).status, 400);
+  await post('/api/jira-collect', { mode: 'single', key: 'NEO-999' });
+  const outside = await post('/api/jira-refresh');
+  assert.deepEqual([outside.status, /NEO-999 no está en el filtro/.test(outside.data.error)], [404, true], 'a ticket outside the filter is not brought');
 });

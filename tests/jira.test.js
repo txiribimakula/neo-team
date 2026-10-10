@@ -118,7 +118,7 @@ test('updating collects the whole filter, only your tickets or a single one', as
   assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'mine' }), '(project = NEO) AND assignee = currentUser() ORDER BY updated DESC');
   assert.equal(collectJql('10020', { mode: 'mine' }), '(filter = 10020) AND assignee = currentUser()');
   assert.equal(collectJql('ORDER BY created', { mode: 'mine' }), 'assignee = currentUser() ORDER BY created');
-  assert.equal(collectJql('', { mode: 'single', key: 'NEO-7' }), 'issuekey = NEO-7', 'one ticket, in the filter or not');
+  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'single', key: 'NEO-7' }), '(project = NEO) AND issuekey = NEO-7 ORDER BY updated DESC', 'one ticket, of the filter');
   assert.throws(() => collectJql('1', { mode: 'single', key: '' }), /clave del ticket/);
   assert.deepEqual(collectScopeFrom({ mode: 'single', key: ' https://e.atlassian.net/browse/neo-12 ' }), { mode: 'single', key: 'NEO-12' }, 'the key or its address');
   assert.deepEqual(collectScopeFrom(undefined), { mode: 'filter', key: '' });
@@ -135,9 +135,9 @@ test('updating collects the whole filter, only your tickets or a single one', as
   await tickets.update('NEO-9', () => newTicket({ key: 'NEO-9' }));
   assert.equal((await run({ mode: 'single', key: 'NEO-2' })).left, 0, 'one ticket does not tell which ones left the filter');
   assert.deepEqual((await tickets.list()).map(x => [x.key, x.inFilter]), [['NEO-1', true], ['NEO-2', true], ['NEO-9', true]]);
-  await assert.rejects(run({ mode: 'single', key: 'NEO-5' }), /NEO-5 no existe/);
+  await assert.rejects(run({ mode: 'single', key: 'NEO-5' }), /NEO-5 no está en el filtro/);
   assert.equal((await run({ mode: 'filter' })).left, 1, 'the whole filter does');
-  assert.deepEqual(queries.slice(0, 2), ['(project = NEO) AND assignee = currentUser()', 'issuekey = NEO-2']);
+  assert.deepEqual(queries.slice(0, 2), ['(project = NEO) AND assignee = currentUser()', '(project = NEO) AND issuekey = NEO-2']);
 });
 
 test('the board chooses what updating brings and shares the state of a ticket', () => {

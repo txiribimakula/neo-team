@@ -182,7 +182,7 @@ const COLLECT = [['filter', 'Todo el filtro'], ['mine', 'Asignados a mí'], ['si
 function collectView(settings, draft) {
   const scope = settings.collect ?? { mode: 'filter', key: '' };
   return `<span class="jira-collect"><select data-jira-collect aria-label="Qué trae Actualizar" title="Qué trae Actualizar" >${COLLECT.map(([id, label]) => `<option value="${id}" ${id === scope.mode ? 'selected' : ''}>${label}</option>`).join('')}</select>${scope.mode === 'single'
-    ? `<input data-jira-collect-key data-focus="jira-collect-key" value="${escape(draft ?? scope.key)}" placeholder="NEO-123" aria-label="Clave del ticket" title="Clave o dirección del ticket en Jira (Intro para traerlo)" autocomplete="off" spellcheck="false" maxlength="2000">` : ''}</span>`;
+    ? `<input data-jira-collect-key data-focus="jira-collect-key" value="${escape(draft ?? scope.key)}" placeholder="NEO-123" aria-label="Clave del ticket" title="Clave o dirección de un ticket del filtro (Intro para traerlo)" autocomplete="off" spellcheck="false" maxlength="2000">` : ''}</span>`;
 }
 const searchView = search => `<label class="jira-search">${FUNNEL}<input type="search" data-jira-search data-focus="jira-search" value="${escape(search)}" placeholder="Buscar ticket" aria-label="Buscar ticket por clave o título" autocomplete="off" spellcheck="false"></label>`;
 
