@@ -111,8 +111,7 @@ async function jiraBoard() {
   await pipeline.recovered;
   await pipeline.generalState();
   const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
-  const lessons = Object.fromEntries(await Promise.all(STAGES.map(async s => [s.id, ((await pipeline.tickets.learnings(s.id)).match(/^- /gm) ?? []).length])));
-  return { settings, tickets, lessons, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization } };
+  return { settings, tickets, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization } };
 }
 const currentReviews = () => (store.data.prReviews ?? []).filter(review => review.mode === store.data.mode);
 function findReview(data, id) {

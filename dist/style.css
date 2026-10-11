@@ -499,8 +499,8 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-files{margin:8px 0 0;padding-left:18px;font-size:13px}
 .pill.outcome-blocked,.pill.outcome-not_reproduced,.pill.outcome-failed,.pill.outcome-build_failed,.pill.outcome-not_fixed,.pill.outcome-error{background:#fbe4e1;color:#9a3128}
 .pill.outcome-stopped{background:#eef1ec;color:var(--muted)}
-.jira-column-tools{display:flex;gap:6px;align-items:center}.jira-column-tools select.jira-model{flex:1}
-.jira-learn{width:auto;padding:0 7px;gap:4px;display:inline-flex;align-items:center;height:30px}.jira-learn small{font-size:12px;font-variant-numeric:tabular-nums}
+.jira-column-tools{display:flex;gap:6px;align-items:center}.jira-column-tools .jira-light{flex:none}.jira-column-tools select.jira-model{flex:1}
+.jira-learn{width:28px;height:28px;padding:0;display:inline-grid;place-items:center;flex:none}
 .jira-learnings textarea{font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
 .jira-detail .pr-detail-heading code{font-size:12px;overflow-wrap:anywhere}
 .jira-card header strong{white-space:nowrap}
@@ -510,7 +510,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-card.status-running .jira-status,.jira-card.status-running .jira-live{color:#3a5a9c}
 @keyframes jira-working{50%{box-shadow:0 0 0 3px rgba(58,90,156,.05)}}
 @media (prefers-reduced-motion:reduce){.jira-card.status-running{animation:none}}
-.jira-column-count{display:inline-flex;align-items:center;gap:6px}
+
 .jira-light{display:inline-flex;gap:3px;padding:3px 5px;background:#2f3833;border-radius:10px}
 .jira-light button{width:11px;height:11px;border-radius:50%;border:0;padding:0;cursor:pointer;opacity:.28}
 .jira-light .light-off{background:#e5534b}.jira-light .light-ask{background:#f0b429}.jira-light .light-auto{background:#5fc25f}
@@ -653,7 +653,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
   body.jira-desktop .jira-live{white-space:normal;overflow-wrap:anywhere}
 }
 
-.jira-column-name{display:inline-flex;align-items:center;gap:5px;min-width:0}
+.jira-column-name{display:inline-flex;align-items:center;gap:6px;min-width:0}
 .jira-warn{position:relative;display:inline-flex}
 .jira-warn-icon{border:0;background:none;padding:0 2px;font-size:14px;line-height:1;color:#b7791f;cursor:pointer}.jira-warn-icon:hover{color:#8a5a12}
 .jira-warn-tip{position:absolute;top:calc(100% + 6px);left:-6px;z-index:20;min-width:190px;background:#fff;border:1px solid #ecd49c;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.12);padding:8px 10px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap}

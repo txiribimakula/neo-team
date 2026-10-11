@@ -400,6 +400,11 @@ test('the board shows a column per agent with its model and the live step', () =
   assert.match(html, /<option value="claude-opus-4\.5" selected>Claude Opus 4\.5 · ×3/);
   assert.match(html, /data-action="jira-auto" data-on="false"[^>]*aria-label="Pausar">❚❚<\/button>/, 'started: the button pauses');
   assert.match(html, /data-action="jira-learnings" data-stage="fix"/, 'each column opens its own lessons');
+  // The header: the stage with its count (and ⚠) and its lessons, then the traffic light and the model.
+  const header = html.match(/aria-label="Reproducir"><header>([\s\S]*?)<\/header>/)[1];
+  assert.match(header, /^<h2><span class="jira-column-name">Reproducir<span class="count"[^>]*>1<\/span><span class="jira-warn">[\s\S]*<\/span><button class="icon-button jira-learn"[^>]*><svg[\s\S]*?<\/svg><\/button><\/h2><div class="jira-column-tools"><span class="jira-light[\s\S]*<select class="jira-model"/);
+  assert.match(html, /data-jira-model="analyze"[^>]*title="Modelo del agente · Auto: nivel Medio"[^>]*><option value="" title="Nivel Medio">Auto<\/option>/, 'the automatic model is just «Auto», with the model in its tooltip');
+  assert.match(html, /data-jira-model="fix"[^>]*title="Modelo del agente · claude-opus-4\.5"/);
   assert.match(html, /data-stage="fix" data-mode="auto" class="light-auto" aria-pressed="true"/, 'every column starts on autopilot');
   assert.match(html, /winapp ui inspect -a App/, 'the card in progress shows what its agent is doing');
   assert.match(html, /<section class="jira-column is-active mode-auto" aria-label="Reproducir">/, 'and its column is highlighted');
