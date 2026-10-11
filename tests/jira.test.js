@@ -546,20 +546,24 @@ test('the person talks to the agent from its live log, and the log stays after t
   await assert.rejects(pipeline.tell('Más rápido'), /Compilar no usa un agente/);
   pipeline.running = null;
 
-  // On the board: the prompt with Enviar, Pausar or Continuar and Detener; then the last log, closable.
+  // On the board, a single prompt beside the activity: while an agent works it speaks to
+  // it («Para»), with Pausar or Continuar; the step at work can be stopped from its header.
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
   const board = pipelineState => ({ settings: state.jira, pipeline: pipelineState, tickets: [{ key: 'NEO-1', summary: 'Uno', stage: pipelineState.running?.stage ?? 'build', status: pipelineState.running ? 'running' : 'pending' }] });
-  const live = run => jiraView(state, { view: 'board', board: board({ running: { key: 'NEO-1', startedAt: Date.now(), activity: [], ...run } }), tell: 'Borrador' }, null);
+  const live = (run, ui = {}) => jiraView(state, { view: 'board', board: board({ running: { key: 'NEO-1', startedAt: Date.now(), activity: [], ...run } }), tell: 'Borrador', tells: { general: 'Al asistente' }, ...ui }, null);
   const working = live({ stage: 'fix', conversation: 'working' });
-  assert.match(working, /<section class="jira-activity"[\s\S]*<textarea data-jira-tell[^>]*>Borrador<\/textarea><button[^>]*data-action="jira-tell"[\s\S]*data-action="jira-pause" data-on="true"[\s\S]*data-action="jira-stop"/);
+  assert.doesNotMatch(working, /Logs en vivo|Registro de la fase/, 'no log panel over the board: everything is in the activity');
+  assert.match(working, /<aside class="jira-side">[\s\S]*<span class="jira-working">[\s\S]*NEO-1 · Solucionar ·[\s\S]*data-action="jira-stop"[\s\S]*<label class="jira-to">Para<select data-jira-to[^>]*><option value="live" selected>Agente · NEO-1 · Solucionar<\/option><option value="general">Asistente del tablero<\/option><\/select><\/label><div class="jira-tell"><textarea data-jira-tell data-focus="jira-tell"[^>]*>Borrador<\/textarea><button[^>]*data-action="jira-tell"[\s\S]*data-action="jira-pause" data-on="true"/);
+  const toAssistant = live({ stage: 'fix', conversation: 'working' }, { to: 'general' });
+  assert.match(toAssistant, /<option value="general" selected>[\s\S]*<textarea data-jira-tell data-general="true"[^>]*>Al asistente<\/textarea>/, 'the assistant, chosen in «Para»');
+  assert.doesNotMatch(toAssistant, /jira-pause/);
   const waiting = live({ stage: 'fix', conversation: 'waiting' });
   assert.match(waiting, /Esperando tu respuesta/);
   assert.match(waiting, /data-action="jira-pause" data-on="false"[^>]*>Continuar/);
-  const building = live({ stage: 'build' }).match(/aria-label="Logs en vivo"[\s\S]*?<\/section>/)[0];
-  assert.doesNotMatch(building, /data-jira-tell|jira-pause/, 'a step without an agent can only be stopped');
-  const after = jiraView(state, { view: 'board', board: board({ last }) }, null);
-  assert.match(after, /Registro de la fase<\/strong><span>NEO-1 · Solucionar · Corregido<\/span><button[^>]*data-action="jira-close-log"/);
-  assert.doesNotMatch(jiraView(state, { view: 'board', board: board({ last }), closedLog: String(last.startedAt) }, null), /jira-close-log/, 'until it is closed');
+  const building = live({ stage: 'build' });
+  assert.doesNotMatch(building, /data-jira-to|jira-pause/, 'a step without an agent: the prompt is the assistant\'s, and the step can be stopped');
+  assert.match(building, /<span class="jira-working">[\s\S]*NEO-1 · Compilar[\s\S]*data-action="jira-stop"/);
+  assert.doesNotMatch(jiraView(state, { view: 'board', board: board({ last }) }, null), /jira-working|data-jira-to|Registro de la fase/, 'nothing at work: only the assistant');
 });
 
 test('every step keeps its log in the ticket and its agent can be talked to afterwards', async t => {

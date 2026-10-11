@@ -220,14 +220,12 @@ function tellView(run, draft = '', chat = null) {
   return `<div class="jira-tell">${input}<button class="button small" data-action="jira-stop" title="Detener el paso al momento: queda pendiente" ${run.stopping ? 'disabled' : ''}>${run.stopping ? 'Deteniendo…' : 'Detener'}</button></div>`;
 }
 const logList = entries => `<ol>${entries.map(entry => `<li class="log-${escape(entry.kind)}"><time>${clock(entry.at)}</time><pre>${escape(entry.message)}</pre></li>`).join('')}</ol>`;
-// `closable`: the log of the step that just ended, kept on the board until closed.
-// `chat`: the conversation with the agent of a step that ended.
-export function activityView(run, live = true, tell = '', closable = false, chat = null) {
+// `chat`: the conversation with the agent of a step that ended (in the ticket's popup).
+export function activityView(run, live = true, tell = '', chat = null) {
   if (!run) return '';
   const entries = [...(run.activity ?? [])].reverse();
   const talking = chat?.state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ['starting', 'working'].includes(chat?.state) ? ' · <span class="spinner" aria-hidden="true"></span>' : '';
   const about = live ? `<span>${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}${run.conversation === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ''}</span>`
-    : closable ? `<span>${escape(run.key)} · ${escape(stageName(run.stage))} · ${escape(OUTCOMES[run.outcome] ?? run.outcome ?? '')}</span><button class="icon-button jira-close-log" data-action="jira-close-log" data-started="${escape(run.startedAt)}" title="Cerrar el registro" aria-label="Cerrar el registro">✕</button>`
     : `<span>${run.log ? `<code title="Registro completo en la carpeta del ticket">${escape(run.log)}</code>` : ''}${talking}</span>`;
   return `<section class="jira-activity" aria-label="${live ? 'Logs en vivo' : 'Registro de la fase'}"><header><strong>${live ? 'Logs en vivo' : 'Registro de la fase'}</strong>${about}</header>${live ? tellView(run, tell) : chat ? tellView(run, tell, chat) : ''}${entries.length ? logList(entries) : live ? '<ol><li>Preparando el agente…</li></ol>' : ''}</section>`;
 }
@@ -240,7 +238,7 @@ export function activityView(run, live = true, tell = '', closable = false, chat
 const FEED_FAMILY = { person: 'Tú', ai: 'Lo que dice la IA', tool: 'Lo que hace la IA', step: 'Paso del flujo', jira: 'Jira', warning: 'Aviso', error: 'Error' };
 const FEED_STATUS = { running: '<span class="spinner" aria-hidden="true"></span>', failed: '<span class="feed-mark feed-failed" title="Falló">✕</span>', stopped: '<span class="feed-mark" title="No terminó">■</span>' };
 function feedItem(item, open) {
-  const family = FEED_FAMILY[item.family] ? item.family : 'ai', stage = item.stage && item.family !== 'step' ? stageName(item.stage) : '';
+  const family = FEED_FAMILY[item.family] ? item.family : 'ai', stage = item.stage && !String(item.title ?? '').startsWith(stageName(item.stage)) ? stageName(item.stage) : '';
   const row = `<time>${clock(item.at).slice(0, 5)}</time>${item.key ? `<span class="feed-key">${escape(item.key)}</span>` : ''}<span class="feed-title" title="${escape(item.title ?? '')}">${escape(item.title ?? '')}</span>${item.meta || stage ? `<small>${escape([stage, item.meta].filter(Boolean).join(' · '))}</small>` : ''}${FEED_STATUS[item.status] ?? ''}`;
   const head = `<li class="feed feed-${family}" title="${escape(FEED_FAMILY[family])}">`;
   // Reports and what the AI says are Markdown; commands, outputs and Jira comments, plain text.
@@ -249,14 +247,29 @@ function feedItem(item, open) {
 }
 export const feedView = (feed = [], open = new Set()) => feed.length ? `<ol class="jira-feed" aria-label="Actividad">${[...feed].reverse().map(item => feedItem(item, open.has(item.id))).join('')}</ol>` : '';
 
-export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set()) {
-  const entries = [...(general?.activity ?? [])].reverse(), state = general?.conversation;
-  if (closed) return `<aside class="jira-side is-closed"><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="false" title="Mostrar el asistente${state === 'waiting' ? ': espera tu respuesta' : ''}" aria-label="Mostrar el asistente">${CHAT}${['starting', 'working'].includes(state) ? '<span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? '<span class="jira-side-dot" aria-hidden="true"></span>' : ''}</button></aside>`;
-  const busy = ['starting', 'working'].includes(state) ? ' <span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : '';
-  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${entries.length ? '<button class="link-button jira-general-reset" data-action="jira-general-reset" title="Empieza una conversación nueva, sin el contexto de la anterior">Nueva conversación</button>' : ''}</header>${tellView(null, draft, { id: 'general', general: true, state, ...(signedOut ? { offline: 'Inicia sesión en Copilot para usar el asistente' } : {}) })}${feedView(feed, feedOpen)}</section></aside>`;
+// One prompt for both: the assistant of the board, or the agent at work on a ticket,
+// chosen in «Para». While an agent works it is the default; what either answers goes
+// to the activity below.
+function liveField(run, draft = '') {
+  const waiting = run.conversation === 'waiting', off = run.stopping ? 'disabled' : '';
+  return `<div class="jira-tell"><textarea data-jira-tell data-focus="jira-tell" rows="1" maxlength="4000" placeholder="${waiting ? 'Responde o pregunta al agente' : 'Interrumpe al agente para preguntarle o decirle algo'}" aria-label="Mensaje para el agente de ${escape(stageName(run.stage))}" ${off}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" title="Enviar (Enter; Mayús+Enter para otra línea)" ${off}>Enviar</button>${waiting
+    ? `<button class="button small" data-action="jira-pause" data-on="false" title="El agente sigue con su tarea" ${off}>Continuar</button>`
+    : `<button class="button small" data-action="jira-pause" data-on="true" title="Interrumpe al agente donde está, sin perder lo que lleva, y espera" ${off}>Pausar</button>`}</div>`;
+}
+export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set(), live = {}) {
+  const state = general?.conversation, run = live.run ?? null, agent = !!run && !stepOf(run.stage)?.byCode;
+  const target = agent && live.to !== 'general' ? 'live' : 'general';
+  if (closed) return `<aside class="jira-side is-closed"><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="false" title="Mostrar el asistente${state === 'waiting' || run?.conversation === 'waiting' ? ': espera tu respuesta' : ''}" aria-label="Mostrar el asistente">${CHAT}${['starting', 'working'].includes(state) || run ? '<span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? '<span class="jira-side-dot" aria-hidden="true"></span>' : ''}</button></aside>`;
+  const busy = target === 'general' && ['starting', 'working'].includes(state) ? ' <span class="spinner" aria-hidden="true"></span>' : target === 'general' && state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : '';
+  // The step at work: which, for how long, and stopping it.
+  const working = run ? `<span class="jira-working"><span class="spinner" aria-hidden="true"></span>${escape(run.key)} · ${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}${run.conversation === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ''}<button class="icon-button jira-stop-run" data-action="jira-stop" title="Detener el paso al momento: queda pendiente" aria-label="Detener ${escape(run.key)}" ${run.stopping ? 'disabled' : ''}>■</button></span>` : '';
+  const picker = agent ? `<label class="jira-to">Para<select data-jira-to aria-label="A quién va el mensaje"><option value="live"${target === 'live' ? ' selected' : ''}>Agente · ${escape(run.key)} · ${escape(stageName(run.stage))}</option><option value="general"${target === 'general' ? ' selected' : ''}>Asistente del tablero</option></select></label>` : '';
+  const field = target === 'live' ? liveField(run, live.draft) : tellView(null, draft, { id: 'general', general: true, state, ...(signedOut ? { offline: 'Inicia sesión en Copilot para usar el asistente' } : {}) });
+  const reset = target === 'general' && general?.activity?.length ? '<button class="link-button jira-general-reset" data-action="jira-general-reset" title="Empieza una conversación nueva con el asistente, sin el contexto de la anterior">Nueva conversación</button>' : '';
+  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '', tell = '', closedLog = null, tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set()) {
+function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null) {
   const missing = missingOf(board, copilot);
   const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
   const columns = COLUMNS.map(column => {
@@ -275,10 +288,10 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   // Below the board: the search and the tickets taken off it.
   const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
   const run = desktopRun(board), ticket = run && board.tickets.find(t => t.key === run.key);
-  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run, true, tell)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
-  const last = board.pipeline?.last, log = board.pipeline?.running ? activityView(board.pipeline.running, true, tell)
-    : last && String(last.startedAt) !== String(closedLog) ? activityView(last, false, '', true) : '';
-  return `${log}${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${generalView(board.pipeline?.general, tells.general, missing.copilot, warn, assistantClosed, board.pipeline?.feed ?? [], feedOpen)}</div>`;
+  // The assistant and the activity, beside the board (and under the ticket while the app is driven).
+  const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to });
+  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${assistant(false)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
+  return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
 }
 
 export const SETTINGS_SUBMIT = '<button class="button primary" type="submit" form="jira-settings-form" title="Guarda y comprueba la conexión con Jira">Conectar</button>';
@@ -461,7 +474,7 @@ export function ticketDetail(board, detail, demo, drafts, selected = null, fileU
     : `<div class="jira-md">${markdown(withoutTitle(detail.comments), options)}</div>`;
   const chatId = `${ticket.key}#${current.index}`;
   const panel = current.live ? activityView(board.pipeline.running, true, tell)
-    : current.entry ? stepPanel(current.entry, detail, demo, options, activityView(current.entry, false, tells[chatId] ?? '', false, { id: chatId, key: ticket.key, index: current.index, state: board.pipeline?.chats?.[chatId] }), ticket.key, current.index)
+    : current.entry ? stepPanel(current.entry, detail, demo, options, activityView(current.entry, false, tells[chatId] ?? '', { id: chatId, key: ticket.key, index: current.index, state: board.pipeline?.chats?.[chatId] }), ticket.key, current.index)
     : `<details class="jira-report" data-part="description" open><summary><strong>Descripción</strong></summary><div class="jira-md">${markdown(withoutTitle(detail.description), options)}</div></details>
        <details class="jira-report" data-part="comments"><summary><strong>Comentarios${detail.commentList ? ` · ${detail.commentList.length}` : ''}</strong></summary><div class="jira-comments">${comments}</div></details>
        <details class="jira-report" data-part="files"><summary><strong>Archivos · ${detail.files.length}</strong></summary>${fileList(detail.files)}<p class="jira-folder"><code>${escape(detail.folder)}</code></p></details>`;
@@ -478,7 +491,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(settingsView(state.jira));
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.closedLog, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen));
+  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to));
 }
 
 export function settingsFrom(form) {

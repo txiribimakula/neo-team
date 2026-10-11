@@ -1534,7 +1534,9 @@ function renderJira() {
   const log = $('#app .jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
   const controlsOpen = $('#app .jira-other-tickets')?.open;
   const focus = document.activeElement?.dataset?.focus;
-  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed }, prUi.copilot);
+  // Who the prompt speaks to: chosen for the step at work; a new step starts with its agent.
+  const to = jiraUi.to?.run === String(jiraUi.board?.pipeline?.running?.startedAt) ? jiraUi.to.value : null;
+  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to }, prUi.copilot);
   const nextLog = $('#app .jira-activity ol');
   if (nextLog && logScroll > 0 && !newRun) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
   if (controlsOpen && $('#app .jira-other-tickets')) $('#app .jira-other-tickets').open = true;
@@ -1770,7 +1772,6 @@ const actions = {
   },
   'jira-general-reset': () => jiraAction('/api/jira-general-reset', {}),
   'jira-pause': el => jiraAction('/api/jira-pause', { on: el.dataset.on === 'true' }),
-  'jira-close-log': el => { jiraUi.closedLog = el.dataset.started; render(); },
   'jira-rewind': async el => { await jiraAction('/api/jira-rewind', { key: el.dataset.key }); jiraSeen = ''; render(); },
   'jira-comment': async el => {
     const publish = el.dataset.publish === 'true';
@@ -2056,6 +2057,7 @@ document.addEventListener('change',async event=>{
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
     // The key is saved when updating (button or Enter), so leaving the field for the button does not race it.
     if('jiraCollect' in el.dataset){await saveJiraCollect();if(el.value==='single')$('[data-jira-collect-key]')?.focus();return;}
+    if('jiraTo' in el.dataset){jiraUi.to={value:el.value,run:String(jiraUi.board?.pipeline?.running?.startedAt)};render();$(`#app [data-focus="${el.value==='general'?'jira-tell:general':'jira-tell'}"]`)?.focus();return;}
     if(el.dataset.jiraModel){await request('/api/jira-model',{stage:el.dataset.jiraModel,model:el.value});await loadJira().catch(()=>{});render();return;}
     if('copilotModel' in el.dataset){await request('/api/copilot-model',{model:el.value});render();toast(el.value ? `Las revisiones se harán con ${el.selectedOptions[0]?.textContent ?? el.value}.` : 'Las revisiones usarán el modelo predeterminado.');return;}
     if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}

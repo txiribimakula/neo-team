@@ -710,3 +710,7 @@ body.jira-fit .jira-side.is-closed{display:block}
 .feed-jira{--fb:#e9f5f6;--fc:#3a9aa6}
 .feed-warning{--fb:#fff4e9;--fc:#d9822b}
 .feed-error{--fb:#fdeeee;--fc:#c94545}
+/* The step at work, over the prompt, and who the prompt speaks to. */
+.jira-working{display:flex;align-items:center;gap:6px;padding:7px 10px;font-size:12.5px;border-bottom:1px solid var(--line);background:#f4f0fb;color:#4b3a78}.jira-working .spinner{width:11px;height:11px}
+.jira-stop-run{margin-left:auto;width:24px;height:24px;font-size:11px}
+.jira-to{display:flex;align-items:center;gap:8px;padding:8px 10px 0;font-size:12px;color:var(--muted)}.jira-to select{flex:1;min-width:0;height:32px;padding:4px 8px;font-size:12.5px;line-height:1.3}
