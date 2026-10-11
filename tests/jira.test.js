@@ -390,7 +390,14 @@ test('the board shows a column per agent with its model and the live step', () =
   const flow = jiraView(state, { view: 'board', board: { ...board, pipeline: {}, tickets: [{ key: 'NEO-7', summary: 'Hecho', stage: 'done', status: 'done' }, { key: 'NEO-8', summary: 'Por compilar', stage: 'build', status: 'pending' }, { key: 'NEO-9', summary: 'Nuevo', stage: 'collect', status: 'pending' }] } }, { isAuthenticated: true, models: [] });
   const column = name => flow.match(new RegExp(`aria-label="${name}">([\\s\\S]*?)</section>`))[1];
   assert.match(column('Verificar'), /NEO-8/, 'one waiting for its build is in Verificar');
-  assert.match(column('Revisar'), /<article class="jira-card status-done[^"]*"[^>]*aria-label="NEO-7 · Hecho"/, 'the solved ones stay in Revisar, highlighted');
+  assert.match(column('Revisar'), /<article class="jira-card type-other status-done[^"]*"[^>]*aria-label="NEO-7 · Hecho"/, 'the solved ones stay in Revisar, highlighted');
+  // The bar on the left says the kind of ticket; the background, where it is.
+  const kinds = jiraView(state, { view: 'board', board: { ...board, pipeline: { queue: ['NEO-2'] }, settings: { ...board.settings, modes: { fix: 'ask' } }, tickets: [
+    { key: 'NEO-1', summary: 'a', stage: 'fix', status: 'pending', type: 'Error' }, { key: 'NEO-2', summary: 'b', stage: 'analyze', status: 'pending', type: 'Estimación' },
+    { key: 'NEO-3', summary: 'c', stage: 'reproduce', status: 'blocked', type: 'Desarrollo', autoLock: true }, { key: 'NEO-4', summary: 'd', stage: 'done', status: 'done', type: 'Tarea' }] } }, { isAuthenticated: true, models: [] });
+  assert.deepEqual([...kinds.matchAll(/<article class="jira-card ([^"]+)"[^>]*aria-label="(NEO-\d)/g)].map(m => [m[2], m[1]]),
+    [['NEO-2', 'type-estimate status-pending queued'], ['NEO-3', 'type-development status-blocked'], ['NEO-1', 'type-error status-pending awaiting'], ['NEO-4', 'type-task status-done']]);
+  assert.match(kinds, /aria-label="NEO-2 · b">\s*<span class="jira-card-type" title="Estimación" aria-hidden="true"><\/span>/, 'the bar names the kind on hover');
   assert.doesNotMatch(column('Revisar').match(/aria-label="NEO-7 · Hecho">([\s\S]*?)<\/article>/)[1], /data-action="jira-(run|done|autolock)"/, 'with nothing left to do');
   assert.match(column('Analizar'), /NEO-9/, 'a ticket being indexed shows in Analizar');
   assert.match(html, /aria-label="Reproducir">[\s\S]*?data-action="jira-warn" data-stage="reproduce"/, 'an agent that lacks something it needs warns');

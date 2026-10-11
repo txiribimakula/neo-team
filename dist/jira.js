@@ -69,6 +69,10 @@ const TYPES = [
   [/feature|funcionalidad|característica/i, '#63ba3c', '<path d="M7 4h2v3h3v2H9v3H7V9H4V7h3z" fill="#fff"/>'],
   [/task|tarea/i, '#4bade8', '<path d="m4.6 8.3 2.3 2.3 4.6-5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'],
 ];
+// The kind of ticket, for the bar on the left of its card: errors, estimates,
+// development, tasks and anything else. Names in English or Spanish.
+const KINDS = [['error', /bug|error|defect|fallo|incidencia/i], ['estimate', /estimaci|estimate|spike|valoraci/i], ['development', /desarroll|develop|story|historia|feature|funcionalidad|mejora|improvement|epic|épica|epica/i], ['task', /task|tarea/i]];
+export const kindOf = type => KINDS.find(([, pattern]) => pattern.test(type ?? ''))?.[0] ?? 'other';
 export function typeIcon(name) {
   if (!name) return '';
   const [, color, body] = TYPES.find(([pattern]) => pattern.test(name)) ?? [null, '#8993a4', '<circle cx="8" cy="8" r="2.4" fill="#fff"/>'];
@@ -174,7 +178,8 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
   const awaiting = !live && !lacking.length && mode === 'ask' && ticket.status === 'pending' && !ticket.locked;
   // The lock, ▶ (or ■) and sharing its state on the left, and ⏩ on the right.
   const actions = ticket.stage === 'done' ? '' : `${lockButton(ticket)}${run}${shareButtons(ticket, live)}${live ? '' : doneButton(ticket)}`;
-  return `<article class="jira-card status-${escape(status)}${awaiting ? ' awaiting' : ''}${ticket.locked ? ' locked' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
+  return `<article class="jira-card type-${kindOf(ticket.type)} status-${escape(status)}${awaiting ? ' awaiting' : ''}${queued && !live ? ' queued' : ''}${ticket.locked ? ' locked' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
+    <span class="jira-card-type" title="${escape(ticket.type || 'Sin tipo')}" aria-hidden="true"></span>
     <header>${!demo && ticket.url ? `<a class="jira-key" href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">${escape(ticket.key)}<small aria-hidden="true">↗</small></a>` : `<strong>${escape(ticket.key)}</strong>`}${folder}<span class="jira-status" title="${escape(STATUS[status] ?? status)}">${live ? '<span class="spinner" aria-hidden="true"></span>' : ''}</span>${priorityIcon(ticket.priority)}</header>
     <span class="jira-card-title">${escape(ticket.summary)}</span>
     <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${ticket.jiraStatus ? `<span class="tag jira-card-status" title="Estado en Jira: ${escape(ticket.jiraStatus)}">${escape(ticket.jiraStatus)}</span>` : ''}${easeView(ticket.ease)}</span></span>

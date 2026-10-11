@@ -477,9 +477,9 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-column h2{font-size:15px;margin:0;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .jira-column select.jira-model{width:100%;min-width:0;max-width:none;font-size:12px;padding:6px 8px}
 .jira-cards{display:flex;flex-direction:column;gap:8px;min-height:40px}
-.jira-card{display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid var(--line);border-left:4px solid #b8c3ba;border-radius:8px;padding:9px 10px;cursor:pointer;min-width:0}
+.jira-card{display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:9px 10px 9px 14px;cursor:pointer;min-width:0;position:relative}.jira-card-type{position:absolute;left:-1px;top:-1px;bottom:-1px;width:5px;border-radius:8px 0 0 8px;background:var(--kind)}.jira-card.locked .jira-card-type{background:repeating-linear-gradient(180deg,var(--kind) 0 6px,transparent 6px 10px)}.jira-card.type-error{--kind:#e5493a}.jira-card.type-estimate{--kind:#904ee2}.jira-card.type-development{--kind:#36b37e}.jira-card.type-task{--kind:#4bade8}.jira-card.type-other{--kind:#a5afa8}.jira-card.queued{background:#f4f6fb}.jira-card.status-blocked{background:#fdf0ee;border-color:#efc9c3}
 .jira-card:hover,.jira-card:focus-visible{border-color:#9fb3a3}
-.jira-card.status-running{border-left-color:#3a5a9c}.jira-card.status-blocked{border-left-color:#c2564b}.jira-card.status-done{border-left-color:#5d9440}
+
 .jira-card header{display:flex;align-items:center;gap:8px;font-size:13px}
 .jira-status{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;margin-left:auto}
 .jira-status .spinner{width:11px;height:11px;margin:0}
@@ -506,7 +506,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-card header strong{white-space:nowrap}
 .jira-status{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .jira-column.is-active{background:#e4ebf8;box-shadow:inset 0 0 0 1px #c3d0ec}
-.jira-card.status-running{background:#f5f8ff;border-color:#9fb2dc;border-left-color:#3a5a9c;box-shadow:0 0 0 3px rgba(58,90,156,.18);animation:jira-working 1.6s ease-in-out infinite}
+.jira-card.status-running{background:#eaf0fd;border-color:#9fb2dc;box-shadow:0 0 0 3px rgba(58,90,156,.18);animation:jira-working 1.6s ease-in-out infinite}
 .jira-card.status-running .jira-status,.jira-card.status-running .jira-live{color:#3a5a9c}
 @keyframes jira-working{50%{box-shadow:0 0 0 3px rgba(58,90,156,.05)}}
 @media (prefers-reduced-motion:reduce){.jira-card.status-running{animation:none}}
@@ -519,7 +519,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-light button:focus-visible{outline:2px solid white;outline-offset:1px}
 .jira-column.mode-off{background:repeating-linear-gradient(135deg,#eceeec 0 10px,#e6e9e6 10px 20px)}
 .jira-column.mode-off h2{color:var(--muted)}
-.jira-card.awaiting{border-left-color:#f0b429;background:#fffaf0}
+.jira-card.awaiting{background:#fff6dd;border-color:#ecd9a2}
 .jira-await{font-size:12px;color:#8a6a1f;font-weight:600}
 .jira-question{margin:0;font-size:13px;line-height:1.4;color:#7b2e26;overflow-wrap:anywhere;white-space:pre-wrap}
 .jira-answer{display:flex;flex-direction:column;gap:6px}
@@ -581,7 +581,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-lock{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#a3ada6}
 .jira-lock:hover{border-color:#d5dfce;background:#fff}
 .jira-lock.locked{color:#8a5a12;background:#fff4dc;border-color:#ecd49c}
-.jira-card.locked{border-left-style:dashed}
+
 /* Tareas: the backlog can take most of the width; people stay in a narrow column. */
 .backlog-head{display:flex;gap:6px;align-items:flex-start}.backlog-head .panel-switch{flex:1;min-width:0}
 .backlog-width{width:34px;height:34px;margin-top:2px;color:#5d7056}.backlog-width[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:white}
@@ -661,8 +661,8 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-comment-preview{white-space:pre-wrap;max-height:50vh;overflow:auto;background:#f5f7f5;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12.5px;margin:0}
 .jira-comment-decide{display:inline-flex;gap:6px;margin-left:auto}
 .jira-gear{width:36px;height:36px;border-color:transparent;background:transparent}.jira-gear:hover{border-color:#d5dfce}
-/* Solved: it stays in Verificar, at the end and in green. */
-.jira-card.status-done{background:#eff7e8;border-color:#c5dcb3;border-left-color:#5d9440}.jira-card.status-done .jira-card-title{color:#3e6a2a}
+/* Solved: it stays in Revisar, at the end and in green. */
+.jira-card.status-done{background:#eaf5e1;border-color:#c5dcb3}.jira-card.status-done .jira-card-title{color:#3e6a2a}
 .jira-news{background:#e4ebf8;color:#2b4a8a;font-weight:600}a.jira-pr{text-decoration:none}a.jira-pr:hover{text-decoration:underline}
 .jira-title-link{color:inherit;text-decoration:none}.jira-title-link:hover{text-decoration:underline}
 .jira-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 18px}.jira-head h2{margin:0}
