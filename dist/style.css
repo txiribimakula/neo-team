@@ -485,7 +485,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-status .spinner{width:11px;height:11px;margin:0}
 .status-blocked .jira-status{color:#9a3128}
 .jira-card-title{font-size:14px;line-height:1.35;overflow-wrap:anywhere}
-.jira-card-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.jira-card-actions{display:flex;align-items:center;justify-content:space-between;min-height:22px}.jira-card-actions .jira-done{margin-left:auto}.jira-card-tools{display:inline-flex;gap:2px;margin-left:auto}.jira-tool{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#8a968d}.jira-tool:hover{border-color:#d5dfce;background:#fff}
+.jira-card-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.jira-card-actions{display:flex;align-items:center;gap:4px;min-height:22px}.jira-card-actions .jira-done{margin-left:auto}.jira-card-tools{display:inline-flex;gap:2px;margin-left:auto}.jira-tool{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#8a968d}.jira-tool:hover{border-color:#d5dfce;background:#fff}
 .jira-live,.jira-note{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .jira-note{color:#9a3128}
 .jira-archived{align-self:flex-start;font-size:13px}
@@ -543,9 +543,9 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-settings [aria-invalid="true"]{border-color:#c2564b;box-shadow:0 0 0 3px rgba(194,86,75,.15)}
 .jira-type,.jira-priority{flex-shrink:0;vertical-align:-3px}
 .jira-card header{gap:3px}
-.jira-card header .jira-priority{margin-left:-2px}
+.jira-card header .jira-priority{margin-left:auto}.jira-card header .jira-status:not(:empty)+.jira-priority{margin-left:4px}
 .jira-card header .jira-key{min-width:0;overflow:hidden;text-overflow:ellipsis}.jira-key small{font-size:9px;margin-left:1px}
-.jira-card header .jira-status:empty{display:none}.jira-card header .jira-lock{margin-left:auto}.jira-card header .jira-status:not(:empty)+.jira-lock{margin-left:0}
+.jira-card header .jira-status:empty{display:none}
 .jira-meta{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;margin:0}
 
 /* Formatted Markdown of tickets, comments and reports */

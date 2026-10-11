@@ -449,7 +449,7 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(ticketDetail(board, { ...detail, history: [{ ...detail.history[0], rewound: '2026-10-10T10:00:00Z' }] }, false, {}, 'step-0'), /<span class="pill" title="Deshecho [^"]+">Rebobinado<\/span>/);
   const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
   assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, '⏩ moves the ticket on, as done by hand');
-  assert.match(cardHtml, /<span class="jira-card-actions"><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button><button class="icon-button jira-done"[^>]*>[\s\S]*?<\/button><\/span>\s*<span class="jira-card-meta">[\s\S]*?<span class="jira-card-tools">[\s\S]*?data-action="jira-archive"[^>]*>[\s\S]*?<\/button><\/span><\/span>/, '▶ on the left and ⏩ on the right, above the row of the other icons, at the bottom');
+  assert.match(cardHtml, /<span class="jira-card-actions"><button class="icon-button jira-lock[^"]*"[^>]*>[\s\S]*?<\/button><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button><button class="icon-button jira-done"[^>]*>[\s\S]*?<\/button><\/span>\s*<span class="jira-card-meta">[\s\S]*?<span class="jira-card-tools">[\s\S]*?data-action="jira-archive"[^>]*>[\s\S]*?<\/button><\/span><\/span>/, '▶ on the left and ⏩ on the right, above the row of the other icons, at the bottom');
   const at = stage => jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, stage, status: stage === 'done' ? 'done' : 'pending' }] } }, null);
   assert.match(at('build'), /title="Ya lo he hecho yo: pasar a Revisar"/, 'waiting for its build, the verification is the step done');
   assert.match(at('review'), /title="Ya lo he hecho yo: pasar a Resueltos"/);
@@ -710,7 +710,7 @@ test('tickets show their type and priority with icons like Jira', () => {
   assert.match(priorityIcon('Medium'), /<title>Prioridad: Medium<\/title>/);
   assert.equal(typeIcon(''), '');
   const board = { settings: {}, pipeline: {}, tickets: [{ key: 'NEO-9', summary: 'x', stage: 'collect', status: 'pending', type: 'Bug', priority: 'High' }] };
-  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><svg class="jira-type"[^>]*aria-label="Bug"[\s\S]*<svg class="jira-priority"[^>]*aria-label="Prioridad: High"/);
+  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><svg class="jira-type"[^>]*aria-label="Bug"[\s\S]*?<span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
 });
 
 test('ticket texts, comments and reports are shown formatted and safe', () => {
