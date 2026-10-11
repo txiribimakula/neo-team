@@ -250,6 +250,7 @@ test('prompts carry the lessons, the reports so far and how to drive the app', (
   assert.match(fix, /\/t\/NEO-1\/codigo — a separate git worktree of \/r on branch neo\/NEO-1/);
   assert.match(fix, /previous fix did not pass verification/);
   assert.match(fix, /Do not build the application: the next step, «Compilar», builds it with `dotnet build`/);
+  assert.match(fix, /You cannot debug[\s\S]*section «Para depurar» for the person/, 'what only debugging would settle is left to the person');
   assert.match(stagePrompt({ stage: 'fix', ticket: { ...ticket, lastOutcome: 'build_failed' }, folder: '/t/NEO-1', files: [], settings, previous: { build: '/t/NEO-1/compilacion-1.md' } }), /did not build: read the latest build report[\s\S]*Latest build report: \/t\/NEO-1\/compilacion-1\.md|Latest build report: \/t\/NEO-1\/compilacion-1\.md[\s\S]*did not build: read the latest build report/);
   assert.match(stagePrompt({ stage: 'verify', ticket, folder: '/t/NEO-1', files: [], settings }), /built right before you started, as the first part of this step[\s\S]*do not build again/);
   assert.doesNotMatch(fix, /winapp ui/);
