@@ -266,10 +266,15 @@ function liveField(run, draft = '') {
     ? `<button class="button small" data-action="jira-pause" data-on="false" title="El agente sigue con su tarea" ${off}>Continuar</button>`
     : `<button class="button small" data-action="jira-pause" data-on="true" title="Interrumpe al agente donde está, sin perder lo que lleva, y espera" ${off}>Pausar</button>`}</div>`;
 }
-export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set(), live = {}) {
+export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set(), live = {}, unread = 0) {
   const state = general?.conversation, run = live.run ?? null, agent = !!run && !stepOf(run.stage)?.byCode;
   const target = agent && live.to !== 'general' ? 'live' : 'general';
-  if (closed) return `<aside class="jira-side is-closed"><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="false" title="Mostrar el asistente${state === 'waiting' || run?.conversation === 'waiting' ? ': espera tu respuesta' : ''}" aria-label="Mostrar el asistente">${CHAT}${['starting', 'working'].includes(state) || run ? '<span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? '<span class="jira-side-dot" aria-hidden="true"></span>' : ''}</button></aside>`;
+  // Folded: how many new lines arrived, whether something works, whether someone waits for you.
+  if (closed) {
+    const news = unread ? `${unread} ${unread === 1 ? 'novedad' : 'novedades'}` : '', waiting = state === 'waiting' || run?.conversation === 'waiting';
+    const title = ['Mostrar el asistente', news, waiting && 'espera tu respuesta'].filter(Boolean).join(' · ');
+    return `<aside class="jira-side is-closed"><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="false" title="${title}" aria-label="${title}">${CHAT}${unread ? `<span class="jira-side-count" aria-hidden="true">${unread > 99 ? '99+' : unread}</span>` : waiting ? '<span class="jira-side-dot" aria-hidden="true"></span>' : ''}${['starting', 'working'].includes(state) || run ? '<span class="spinner" aria-hidden="true"></span>' : ''}</button></aside>`;
+  }
   const busy = target === 'general' && ['starting', 'working'].includes(state) ? ' <span class="spinner" aria-hidden="true"></span>' : target === 'general' && state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : '';
   // The step at work: which, for how long, and stopping it.
   const working = run ? `<span class="jira-working"><span class="spinner" aria-hidden="true"></span>${escape(run.key)} · ${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}${run.conversation === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ''}<button class="icon-button jira-stop-run" data-action="jira-stop" title="Detener el paso al momento: queda pendiente" aria-label="Detener ${escape(run.key)}" ${run.stopping ? 'disabled' : ''}>■</button></span>` : '';
@@ -279,7 +284,7 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
   return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null) {
+function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null, unread = 0) {
   const missing = missingOf(board, copilot);
   const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
   const columns = COLUMNS.map(column => {
@@ -299,7 +304,7 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
   const run = desktopRun(board), ticket = run && board.tickets.find(t => t.key === run.key);
   // The assistant and the activity, beside the board (and under the ticket while the app is driven).
-  const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to });
+  const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to }, unread);
   if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${assistant(false)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
   return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
 }
@@ -502,7 +507,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(settingsView(state.jira));
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to));
+  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to, ui.unread));
 }
 
 export function settingsFrom(form) {

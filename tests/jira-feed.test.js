@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ActivityFeed, curate, split } from '../server/jira-feed.js';
-import { feedView } from '../dist/jira.js';
+import { feedView, generalView } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-feed-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
 
@@ -51,4 +51,12 @@ test('the feed reads newest first, coloured by family, and folds what is long', 
   assert.match(html, /<details data-feed="1" open><summary>[\s\S]*Solucionar · Corregido[\s\S]*<small>2 min<\/small><\/summary><div class="feed-md jira-md">[\s\S]*<strong>Exportador\.cs<\/strong>/, 'a report, open as it was left, in Markdown');
   assert.match(html, /<details data-feed="3"><summary>[\s\S]*<\/summary><pre>\*Neo Team\*<\/pre>/, 'a Jira comment as it is sent');
   assert.equal(feedView([]), '');
+});
+
+test('folded, the assistant counts what is new', () => {
+  const folded = unread => generalView({ conversation: null, activity: [] }, '', false, null, true, [], new Set(), {}, unread);
+  assert.match(folded(3), /title="Mostrar el asistente · 3 novedades"[\s\S]*<span class="jira-side-count" aria-hidden="true">3<\/span>/);
+  assert.match(folded(120), />99\+<\/span>/);
+  assert.doesNotMatch(folded(0), /jira-side-count/);
+  assert.match(generalView({ conversation: 'waiting', activity: [] }, '', false, null, true, [], new Set(), {}, 0), /jira-side-dot[\s\S]*/, 'without news, the dot still says it waits for you');
 });

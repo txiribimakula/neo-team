@@ -3,7 +3,7 @@ import { permissionsView, filterPermissions, filterGroups, resetPermissionFilter
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
-import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
+import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, desktopRun, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -1096,6 +1096,20 @@ let backlogWide=false;
 try { backlogWide=localStorage.getItem('neo-team:backlog-wide')==='1'; } catch { /* Without storage it starts narrow. */ }
 let jiraAssistantClosed = false;
 try { jiraAssistantClosed = localStorage.getItem('neo-team:jira-assistant-closed') === '1'; } catch { /* Without storage it starts open. */ }
+// The last line of the activity seen with the assistant open, per mode: folded, its icon
+// counts what came after (what you did yourself and each tool of the AI aside).
+const jiraSeenKey = () => `neo-team:jira-feed-seen:${state?.mode ?? ''}`;
+function jiraUnread() {
+  const feed = jiraUi.board?.pipeline?.feed ?? [], latest = Number(feed.at(-1)?.id ?? 0);
+  let seen = 0;
+  try { seen = Number(localStorage.getItem(jiraSeenKey()) ?? 0) || 0; } catch { /* Counted for this visit only. */ }
+  // While the app is driven the assistant is always on view, folded or not.
+  if (!jiraAssistantClosed || desktopRun(jiraUi.board) || seen > latest) {
+    if (seen !== latest) try { localStorage.setItem(jiraSeenKey(), String(latest)); } catch { /* idem */ }
+    return 0;
+  }
+  return feed.filter(item => Number(item.id) > seen && !['person', 'tool'].includes(item.family)).length;
+}
 const expandIcon=icon('<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/>'), shrinkIcon=icon('<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="m14 10 7-7"/><path d="m3 21 7-7"/>');
 function unassignedTasks(iteration=selected()) {
   return state.workspace.effectiveItems.filter(i=>isExecutable(i) && iteration && i.iterationPath===iteration.path && !i.assignedTo);
@@ -1541,7 +1555,7 @@ function renderJira() {
   const focus = document.activeElement?.dataset?.focus;
   // Who the prompt speaks to: chosen for the step at work; a new step starts with its agent.
   const to = jiraUi.to?.run === String(jiraUi.board?.pipeline?.running?.startedAt) ? jiraUi.to.value : null;
-  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to }, prUi.copilot);
+  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread() }, prUi.copilot);
   const nextLog = $('#app .jira-activity ol');
   if (nextLog && logScroll > 0 && !newRun) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
   if (controlsOpen && $('#app .jira-other-tickets')) $('#app .jira-other-tickets').open = true;
