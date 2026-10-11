@@ -75,6 +75,7 @@ function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sinc
 // Pending changes are counted by the server, with the same rules as the review.
 const pendingCount = (ws = state?.workspace) => ws?.pendingChanges ?? 0;
 const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+const isPlanningTab = () => !['home', 'permissions', 'maintenance', 'my-iteration', 'reviews', 'jira'].includes(tab);
 function savedStatus() {
   const count=pendingCount();
   return count ? `${plural(count,'pendiente')} de sincronizar` : 'Sin cambios pendientes';
@@ -159,7 +160,7 @@ async function request(path, input = {}) {
     throw error;
   } finally {
     clearTimeout(busy); pending = false; enabled.forEach(el => el.disabled = false);
-    $('#save-status').textContent = savedStatus();
+    $('#save-status').textContent = isPlanningTab() ? savedStatus() : '';
     if (recover) setTimeout(() => resumeOperation(), 0);
   }
 }
@@ -547,7 +548,7 @@ async function resumeOperation() {
     pending = false;
     recoveringOperation = false;
     enabled.forEach(el => el.disabled = false);
-    $('#save-status').textContent = savedStatus();
+    $('#save-status').textContent = isPlanningTab() ? savedStatus() : '';
   }
 }
 async function saveConfig(importNow) {
@@ -1134,8 +1135,12 @@ function board(iteration, planned) {
 function render() {
   syncUrl();
   const ws=state.workspace;
-  $('#save-status').textContent=ws ? savedStatus() : '';
+  // Pending changes only come from Planificación: its button and status are only there,
+  // so they are not mistaken for updating other sections (Jira has its own ⟳).
+  const planning=isPlanningTab();
+  $('#save-status').textContent=ws && planning ? savedStatus() : '';
   const syncButton=$('#sync-button'), changes=pendingCount();
+  syncButton.hidden=!planning;
   // Each new pending change restarts the spin straight away.
   if (changes>shownPending) { syncButton.classList.remove('has-pending'); void syncButton.offsetWidth; }
   shownPending=changes;
@@ -1437,7 +1442,7 @@ async function securityQuery(descriptor, reauthenticate = false) {
 // Home: the entry point to every area of the team management.
 function homeView() {
   return `<section class="home"><div class="home-sections">
-    <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong></button>
+    <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong>${pendingCount() ? `<small class="home-pending" title="Cambios guardados en local que aún no se han subido a Azure DevOps">${plural(pendingCount(),'pendiente')} de sincronizar</small>` : ''}</button>
     <button class="home-card my-iteration" data-action="open-my-iteration"><span class="home-icon" aria-hidden="true">▦</span><strong>Mi iteración</strong></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
     <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong></button>
