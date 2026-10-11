@@ -333,8 +333,10 @@ test('rewinding undoes the latest step and the ticket does it again', async t =>
   const runs = [];
   const agent = { run: async options => { runs.push(options); return { outcome: 'fixed', report: 'Otra vez', model: null, usage: null }; }, abort: async () => {} };
   const pipeline = new JiraPipeline({ tickets, agent, demo: true, settings: async () => ({ repository: '/r', maxIterations: 3, models: {}, modes: { verify: 'off' } }) });
+  await tickets.update('NEO-1', t => ({ ...t, history: t.history.map((h, i) => i === 3 ? { ...h, pendingComment: '*Neo Team · agente Solucionar:* Corregido' } : h) }));
   await pipeline.rewind('NEO-1');
   let ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.history[3].pendingComment, ticket.history[3].declined], [undefined, true], 'the comment of the step undone is not published');
   assert.deepEqual([ticket.stage, ticket.status, ticket.iterations, ticket.lastOutcome], ['fix', 'pending', 0, 'reproduced'], 'back to the column of the step undone');
   assert.deepEqual(ticket.history.map(h => [h.stage, !!h.rewound]), [['collect', false], ['analyze', false], ['reproduce', false], ['fix', true]], 'the step stays in the history, marked');
   // The agent does it again without the report of the step undone.
@@ -654,6 +656,7 @@ test('a comment ready for Jira is asked about, and can be decided from its step'
   const ticket = { key: 'NEO-4', summary: 'Cuatro', stage: 'fix', status: 'pending', history: [{ stage: 'collect', number: 1, outcome: 'ok' }, { stage: 'analyze', number: 1, outcome: 'analyzed', finishedAt: '2026-10-06T10:00:00Z', pendingComment: '*Neo Team · agente Analizar:* <b>Analizado</b>' }] };
   const board = { settings: { modes: {} }, pipeline: {}, tickets: [ticket] };
   assert.deepEqual(pendingComments(board), [{ key: 'NEO-4', index: 1, stage: 'analyze', text: '*Neo Team · agente Analizar:* <b>Analizado</b>' }]);
+  assert.deepEqual(pendingComments({ ...board, tickets: [{ ...ticket, history: ticket.history.map(h => ({ ...h, commentAsked: true })) }] }), [], 'asked once, it is not asked again');
   const prompt = commentPrompt(pendingComments(board)[0]);
   assert.match(prompt.body, /&lt;b&gt;Analizado/, 'the text to publish is shown, escaped');
   assert.match(prompt.actions, /data-action="jira-comment" data-key="NEO-4" data-index="1" data-publish="false">No publicar[\s\S]*data-publish="true">Publicar en Jira/);

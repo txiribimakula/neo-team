@@ -429,7 +429,7 @@ function stepPanel(entry, detail, demo, options, log = '', key = '', index = 0) 
 }
 // Nothing reaches Jira without the person: each step leaves its comment ready and asks.
 const commentButtons = (key, index) => `<button class="button small" data-action="jira-comment" data-key="${escape(key)}" data-index="${index}" data-publish="false">No publicar</button><button class="button small primary" data-action="jira-comment" data-key="${escape(key)}" data-index="${index}" data-publish="true">Publicar en Jira</button>`;
-export const pendingComments = board => (board?.tickets ?? []).flatMap(t => (t.history ?? []).map((h, index) => h.pendingComment ? { key: t.key, index, stage: h.stage, text: h.pendingComment } : null).filter(Boolean));
+export const pendingComments = board => (board?.tickets ?? []).flatMap(t => (t.history ?? []).map((h, index) => h.pendingComment && !h.commentAsked ? { key: t.key, index, stage: h.stage, text: h.pendingComment } : null).filter(Boolean));
 export const commentPrompt = item => ({
   title: `¿Publicar en Jira? · ${item.key}`,
   body: `<p class="text-muted">Comentario del agente de ${escape(stageName(item.stage))}:</p><pre class="jira-comment-preview">${escape(item.text)}</pre>`,

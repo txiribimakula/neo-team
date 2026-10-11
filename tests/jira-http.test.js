@@ -162,6 +162,9 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.ok(detail.history.every(h => h.posted === undefined), 'nothing is published in Jira without asking');
   assert.ok(detail.history.every(h => ['collect', 'build'].includes(h.stage) ? !h.pendingComment : /^\*Neo Team · agente /.test(h.pendingComment)), 'each agent step leaves its comment ready; collecting and building do not');
   const analyze = detail.history.findIndex(h => h.stage === 'analyze'), fix = detail.history.findIndex(h => h.stage === 'fix');
+  // Asked once: after reloading it is not asked again, but it can still be decided in its step.
+  board = (await post('/api/jira-comment', { key: 'NEO-102', index: analyze, asked: true })).data.jira;
+  assert.deepEqual([board.tickets.find(t => t.key === 'NEO-102').history[analyze].commentAsked, !!board.tickets.find(t => t.key === 'NEO-102').history[analyze].pendingComment], [true, true]);
   board = (await post('/api/jira-comment', { key: 'NEO-102', index: analyze, publish: true })).data.jira;
   board = (await post('/api/jira-comment', { key: 'NEO-102', index: fix, publish: false })).data.jira;
   const decided = board.tickets.find(t => t.key === 'NEO-102').history;

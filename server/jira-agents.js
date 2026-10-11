@@ -920,6 +920,11 @@ Read what you need from them and the ticket files before answering.`;
     if (on) { this.activity({ kind: 'person', message: 'Tú: pausa.' }); await this.agent.pause(); }
     else { this.activity({ kind: 'person', message: 'Tú: continúa.' }); this.agent.resume(); }
   }
+  // The comment of a step is asked once: closed without deciding, it waits in its step.
+  async commentAsked(key, index) {
+    checkKey(key);
+    await this.tickets.update(key, t => ({ ...t, history: (t.history ?? []).map((h, i) => i === index && h.pendingComment ? { ...h, commentAsked: true } : h) }));
+  }
   // The person decides on the comment a step left ready: it is published in Jira or dropped.
   async decideComment(key, index, publish) {
     checkKey(key);
@@ -946,7 +951,8 @@ Read what you need from them and the ticket files before answering.`;
     const undone = ticket.history[index];
     this.feed.add({ family: 'person', key, stage: undone.stage, title: `Rebobinado: ${stageOf(undone.stage)?.name ?? undone.stage} ${undone.number ?? ''}`.trim() });
     await this.tickets.update(key, t => {
-      const entry = t.history[index], history = t.history.map((h, i) => i === index ? { ...h, rewound: new Date().toISOString() } : h);
+      // A step undone no longer counts: its comment is not published either.
+      const entry = t.history[index], history = t.history.map((h, i) => { if (i !== index) return h; const { pendingComment, ...rest } = h; return { ...rest, rewound: new Date().toISOString(), ...(pendingComment ? { declined: true } : {}) }; });
       return { ...t, stage: entry.stage, status: 'pending', note: null, question: null, lastOutcome: history.findLast(h => !h.rewound)?.outcome ?? null, history,
         ...(entry.stage === 'fix' ? { iterations: Math.max(0, (t.iterations ?? 0) - 1) } : {}), ...(entry.stage === 'reproduce' ? { reproduceAttempts: Math.max(0, (t.reproduceAttempts ?? 0) - 1) } : {}) };
     });

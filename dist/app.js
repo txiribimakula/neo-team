@@ -1543,12 +1543,14 @@ function renderJira() {
   if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
   askJiraComment();
 }
-// Each comment a step leaves ready is asked once; closed without deciding, it waits in its step.
+// Each comment a step leaves ready is asked once, also after reloading: closed without
+// deciding, it waits in the tab of its step.
 function askJiraComment() {
   if (modal.open || jiraUi.view !== 'board') return;
   const item = pendingComments(jiraUi.board).find(c => !jiraAsked.has(`${c.key}#${c.index}`));
   if (!item) return;
   jiraAsked.add(`${item.key}#${item.index}`);
+  send('/api/jira-comment', { key: item.key, index: item.index, asked: true }).catch(() => {});
   const prompt = commentPrompt(item);
   showModal(prompt.title, '', prompt.body, prompt.actions);
 }

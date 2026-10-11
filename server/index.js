@@ -611,8 +611,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (path === '/api/jira-comment') {
           // Only with the person's confirmation does a step's comment reach Jira.
-          if (!Number.isInteger(input.index) || input.index < 0 || typeof input.publish !== 'boolean') throw fail('Valor no válido.');
-          await jiraPipeline().decideComment(checkKey(input.key), input.index, input.publish);
+          if (!Number.isInteger(input.index) || input.index < 0 || (typeof input.publish !== 'boolean' && input.asked !== true)) throw fail('Valor no válido.');
+          if (input.asked === true) await jiraPipeline().commentAsked(checkKey(input.key), input.index);
+          else await jiraPipeline().decideComment(checkKey(input.key), input.index, input.publish);
           return json(res, { jira: await jiraBoard() });
         }
         if (path === '/api/jira-mode') {
