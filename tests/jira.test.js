@@ -710,7 +710,9 @@ test('tickets show their type and priority with icons like Jira', () => {
   assert.match(priorityIcon('Medium'), /<title>Prioridad: Medium<\/title>/);
   assert.equal(typeIcon(''), '');
   const board = { settings: {}, pipeline: {}, tickets: [{ key: 'NEO-9', summary: 'x', stage: 'collect', status: 'pending', type: 'Bug', priority: 'High' }] };
-  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><svg class="jira-type"[^>]*aria-label="Bug"[\s\S]*?<span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
+  assert.doesNotMatch(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /jira-type/, 'the card has no type icon: for now every ticket is a bug');
+  assert.match(ticketHead({ ...board, tickets: [{ ...board.tickets[0] }] }, 'NEO-9', true), /<svg class="jira-type"[^>]*aria-label="Bug"/, 'the ticket popup still says its type');
+  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><strong>NEO-9<\/strong><span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
 });
 
 test('ticket texts, comments and reports are shown formatted and safe', () => {
