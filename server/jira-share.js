@@ -3,7 +3,7 @@
 // that travels as an attachment of the ticket. What comes from Jira (description,
 // comments, attachments) is not included: each computer downloads it.
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -34,7 +34,9 @@ export async function codeChanges(path) {
   const index = resolve(path, (await git(path, ['rev-parse', '--git-path', 'index'])).toString('utf8').trim());
   const temp = join(tmpdir(), `neo-team-index-${randomUUID()}`);
   try {
-    await copyFile(index, temp).catch(() => {});
+    // With the date of the index, so files changed in the same second are not taken for unchanged.
+    const dates = await stat(index).catch(() => null);
+    if (dates) { await copyFile(index, temp); await utimes(temp, dates.atime, dates.mtime); }
     const env = { GIT_INDEX_FILE: temp };
     await git(path, ['add', '-A'], { env });
     const patch = await git(path, ['diff', '--cached', '--binary', '--full-index', 'HEAD'], { env });

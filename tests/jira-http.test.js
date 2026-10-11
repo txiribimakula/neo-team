@@ -155,9 +155,19 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   await idle();
   byKey = Object.fromEntries(board.tickets.map(t => [t.key, t]));
   assert.deepEqual([byKey['NEO-101'].stage, byKey['NEO-101'].status], ['done', 'done']);
-  assert.deepEqual([byKey['NEO-102'].stage, byKey['NEO-102'].iterations], ['done', 2], 'a failed verification goes back to fix');
+  assert.deepEqual([byKey['NEO-102'].stage, byKey['NEO-102'].iterations], ['done', 3], 'a failed verification and a review with comments go back to fix');
   assert.deepEqual([byKey['NEO-103'].stage, byKey['NEO-103'].status], ['done', 'done']);
-  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'analyze:analyzed', 'reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:not_fixed', 'fix:fixed', 'build:built', 'verify:verified']);
+  assert.deepEqual(byKey['NEO-102'].history.map(h => `${h.stage}:${h.outcome}`), ['collect:ok', 'analyze:analyzed', 'reproduce:reproduced', 'fix:fixed', 'build:built', 'verify:not_fixed', 'fix:fixed', 'build:built', 'verify:verified',
+    'review:commented', 'fix:fixed', 'build:built', 'verify:verified', 'review:approved']);
+  assert.deepEqual(byKey['NEO-101'].history.slice(-2).map(h => `${h.stage}:${h.outcome}`), ['verify:verified', 'review:approved'], 'every verified fix is reviewed');
+  // The review is a draft pull request (simulated in the example) with its comments;
+  // the fix answered each one and left the manual check for the verification.
+  const review = byKey['NEO-102'].review;
+  assert.ok(Number.isInteger(review.pullRequest.id) && review.pullRequest.id !== byKey['NEO-101'].review.pullRequest.id, 'a pull request per ticket');
+  assert.deepEqual(review.comments.map(c => [c.id, c.severity, c.manual, c.posted, c.answers.map(a => `${a.stage}:${a.action}${a.ok === undefined ? '' : `:${a.ok}`}:${a.posted}`)]), [
+    ['c1', 'minor', false, true, ['fix:changed:true']],
+    ['c2', 'check', true, true, ['fix:verify:true', 'verify:checked:true:true']],
+  ]);
   const detail = (await get('/api/jira-ticket?key=NEO-102')).ticket;
   assert.ok(detail.history.every(h => h.posted === undefined), 'nothing is published in Jira without asking');
   assert.ok(detail.history.every(h => ['collect', 'build'].includes(h.stage) ? !h.pendingComment : /^\*Neo Team · agente /.test(h.pendingComment)), 'each agent step leaves its comment ready; collecting and building do not');
@@ -171,11 +181,15 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([decided[analyze].posted, decided[analyze].pendingComment, decided[fix].declined, decided[fix].posted], [true, undefined, true, undefined], 'published when confirmed (simulated in the example), dropped when not');
   assert.equal((await post('/api/jira-comment', { key: 'NEO-102', index: analyze, publish: true })).status, 409, 'and only once');
   assert.equal((await post('/api/jira-comment', { key: 'NEO-102', index: 'x', publish: true })).status, 400);
-  assert.equal(detail.reports.length, 9);
+  assert.equal(detail.reports.length, 14);
   assert.deepEqual([detail.ease.reproduce, detail.ease.fix], ['easy', 'medium'], 'the analysis leaves how easy it looks');
   assert.deepEqual(detail.history.find(h => h.stage === 'analyze').ease.reason, detail.ease.reason);
-  assert.match(detail.reports.at(-1).text, /ya no ocurre/);
-  assert.ok(detail.files.includes('resumen.md') && detail.files.includes('verificacion-2.md'));
+  assert.match(detail.reports.find(r => r.report === 'verificacion-2.md').text, /ya no ocurre/);
+  assert.match(detail.reports.find(r => r.report === 'revision-1.md').text, /## Pull request[\s\S]*## Comentarios\n\n- c1 · \*\*Minor\*\* · `Clientes\/FiltroClientes\.cs:42` — The filter is saved twice[\s\S]*- c2 · \*\*Check \(manual test\)\*\*/, 'the review says where its comments are');
+  assert.match(detail.reports.find(r => r.report === 'solucion-3.md').text, /## Respuestas a la revisión\n\n- c1 · \*\*Changed\*\*: [\s\S]*- c2 · \*\*Left for the manual verification\*\*/);
+  assert.match(detail.reports.find(r => r.report === 'verificacion-3.md').text, /## Comprobaciones de la revisión\n\n- c2 · \*\*Verified\*\*: Closed with Escape/);
+  assert.match(detail.reports.at(-1).text, /no afecta a otros usos/);
+  assert.ok(detail.files.includes('resumen.md') && detail.files.includes('verificacion-2.md') && detail.files.includes('revision-2.md'));
   const learnings = (await get('/api/jira-learnings')).learnings;
   assert.match(learnings.general, /NeoDesk se abre/);
   assert.equal(learnings.general.match(/NeoDesk se abre/g).length, 1, 'a lesson is saved once');
@@ -203,12 +217,13 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   board = (await post('/api/jira-auto', { on: false })).data.jira;
   assert.ok(board.tickets.find(t => t.key === 'NEO-101').archived);
   assert.deepEqual([board.tickets.find(t => t.key === 'NEO-103').stage, board.tickets.find(t => t.key === 'NEO-103').reproduceAttempts], ['analyze', 0], 'updating indexed it again and it is back in Analizar');
-  // Rewinding a solved ticket: its verification is undone and it waits in Verificar.
+  // Rewinding a solved ticket: its review is undone and it waits in Revisar.
   board = (await post('/api/jira-rewind', { key: 'NEO-102' })).data.jira;
   const rewound = board.tickets.find(t => t.key === 'NEO-102');
-  assert.deepEqual([rewound.stage, rewound.status, rewound.history.at(-1).stage, !!rewound.history.at(-1).rewound], ['verify', 'pending', 'verify', true]);
+  assert.deepEqual([rewound.stage, rewound.status, rewound.history.at(-1).stage, !!rewound.history.at(-1).rewound], ['review', 'pending', 'review', true]);
   assert.equal(board.pipeline.running, null, 'paused: nothing runs after it');
-  assert.ok(board.pipeline.feed.some(item => item.family === 'person' && item.key === 'NEO-102' && /^Rebobinado: Verificar \d$/.test(item.title)));
+  assert.ok(board.pipeline.feed.some(item => item.family === 'person' && item.key === 'NEO-102' && /^Rebobinado: Revisar \d$/.test(item.title)));
+  assert.ok(board.pipeline.feed.some(item => item.family === 'jira' && item.key === 'NEO-102' && /^2 comentarios en el pull request \d+$/.test(item.title)), 'publishing the review shows in the activity');
   assert.ok(board.pipeline.feed.some(item => item.family === 'step' && /^Verificar · Verificado$/.test(item.title) && item.detail), 'each step ends in one line, its report folded');
   assert.ok(!board.pipeline.feed.some(item => /Preparando archivos|sigue en curso/.test(item.title)), 'without the noise');
   assert.equal((await post('/api/jira-rewind', { key: 'NEO-999' })).status, 404);

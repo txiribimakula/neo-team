@@ -318,4 +318,32 @@ server.tool('neo_pull_request_comment_write', 'Add one new active comment thread
   if (!created?.id) throw new Error('Azure DevOps no confirmó el comentario.');
   return { content: [{ type: 'text', text: JSON.stringify({ id: created.id }) }] };
 });
+// Revisar of the Jira board: the draft pull request of a ticket's branch (the active
+// one is reused) and replies in the threads of its review, with their status.
+server.tool('neo_pull_request_create_write', 'Create a draft pull request from a branch, or return the active one that already exists for that branch.', {
+  project: z.string().min(1).max(200), repository: z.string().min(1).max(200), sourceRefName: z.string().regex(/^refs\/heads\/.{1,250}$/), targetRefName: z.string().regex(/^refs\/heads\/.{1,250}$/).optional(),
+  title: z.string().min(1).max(400), description: z.string().max(4000), isDraft: z.boolean(),
+}, async ({ project, repository, sourceRefName, targetRefName, title, description, isDraft }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const repo = await git.getRepository(repository, project);
+  if (!repo?.id) throw new Error(`Azure DevOps no encontró el repositorio «${repository}» en «${project}».`);
+  const [existing] = await git.getPullRequests(repo.id, { status: 1, sourceRefName }, project, undefined, 0, 1) ?? [];
+  if (existing) return { content: [{ type: 'text', text: JSON.stringify({ pullRequestId: existing.pullRequestId, repositoryId: repo.id, targetRefName: existing.targetRefName ?? '', isDraft: !!existing.isDraft, created: false }) }] };
+  const target = targetRefName || repo.defaultBranch;
+  if (!target) throw new Error('El repositorio no tiene rama predeterminada: indica la rama base en la configuración de Jira.');
+  const pr = await git.createPullRequest({ sourceRefName, targetRefName: target, title, description, isDraft }, repo.id, project);
+  if (!pr?.pullRequestId) throw new Error('Azure DevOps no confirmó el pull request.');
+  return { content: [{ type: 'text', text: JSON.stringify({ pullRequestId: pr.pullRequestId, repositoryId: repo.id, targetRefName: target, isDraft: !!pr.isDraft, created: true }) }] };
+});
+const THREAD_STATUS = { active: 1, fixed: 2, wontFix: 3, closed: 4, pending: 6 };
+server.tool('neo_pull_request_reply_write', 'Reply in a comment thread of a pull request and set the status of the thread.', {
+  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(), threadId: z.number().int().positive(),
+  content: z.string().min(1).max(20000), status: z.enum(['active', 'fixed', 'wontFix', 'closed', 'pending']),
+}, async ({ project, repositoryId, pullRequestId, threadId, content, status }) => {
+  const git = await (await connectionProvider()).getGitApi();
+  const created = await git.createComment({ parentCommentId: 1, content, commentType: 1 }, repositoryId, pullRequestId, threadId, project);
+  if (!created?.id) throw new Error('Azure DevOps no confirmó la respuesta.');
+  await git.updateThread({ status: THREAD_STATUS[status] }, repositoryId, pullRequestId, threadId, project);
+  return { content: [{ type: 'text', text: JSON.stringify({ id: created.id }) }] };
+});
 await server.connect(new StdioServerTransport());

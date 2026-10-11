@@ -29,7 +29,7 @@ const toolNames = {
   neo_team_days_off_write: 'escritura de días libres', neo_work_item_states: 'estados del tipo', neo_security_read: 'seguridad',
   neo_security_login: 'inicio de sesión', neo_create_item: 'creación de elemento',
   neo_git_repositories: 'repositorios', neo_pull_requests: 'pull requests', neo_pull_request: 'pull request',
-  neo_pull_request_threads: 'comentarios del pull request', neo_pull_request_comment_write: 'publicación de comentario',
+  neo_pull_request_threads: 'comentarios del pull request', neo_pull_request_comment_write: 'publicación de comentario', neo_pull_request_create_write: 'creación del pull request', neo_pull_request_reply_write: 'respuesta a un comentario',
 };
 export function describeCall(name, args = {}) {
   const details = [args.action, Number.isInteger(args.id) ? `#${args.id}` : null, Number.isInteger(args.pullRequestId) ? `PR ${args.pullRequestId}` : null, Array.isArray(args.ids) ? `${args.ids.length} elementos` : null, args.type ? `«${args.type}»` : null].filter(Boolean);

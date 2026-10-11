@@ -1,6 +1,6 @@
-// Jira tickets: a board whose columns are agents (collect, reproduce, fix and
-// verify), each with its model. Tickets move between them as the agents report,
-// and back to fix while the verification fails.
+// Jira tickets: a board whose columns are agents (analyze, reproduce, fix, verify
+// and review), each with its model. Tickets move between them as the agents report,
+// back to fix while the verification fails or the review leaves comments.
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const when = value => value ? new Date(value).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const clock = at => new Date(at).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -8,31 +8,32 @@ const minutes = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${
 
 // A column per agent. Collecting is part of downloading (its tickets show in
 // Analizar), building is the start of Verificar, and the solved tickets stay in
-// Verificar, highlighted.
+// Revisar, highlighted.
 export const COLUMNS = [
   { id: 'analyze', name: 'Analizar', tier: 'Medio' },
   { id: 'reproduce', name: 'Reproducir', tier: 'Medio' },
   { id: 'fix', name: 'Solucionar', tier: 'Avanzado' },
   { id: 'verify', name: 'Verificar', tier: 'Medio' },
+  { id: 'review', name: 'Revisar', tier: 'Avanzado' },
 ];
-const SHOWN_IN = { collect: 'analyze', build: 'verify', done: 'verify' };
+const SHOWN_IN = { collect: 'analyze', build: 'verify', done: 'review' };
 // Where a ticket can be: the columns plus the solved ones, in order.
 const FLOW = [...COLUMNS, { id: 'done', name: 'Resueltos' }];
 const STEPS = [{ id: 'collect', name: 'Recolectar', byCode: true }, { id: 'build', name: 'Compilar', byCode: true }, ...FLOW];
 // What each agent needs to work, and what to do when it is missing. An agent that
 // lacks something does not run; what it only uses better (ffmpeg, for the frames of
 // the videos it reads first) is just warned about.
-const NEEDS = { analyze: ['copilot'], reproduce: ['copilot', 'winapp'], fix: ['copilot'], verify: ['copilot', 'winapp'] };
+const NEEDS = { analyze: ['copilot'], reproduce: ['copilot', 'winapp'], fix: ['copilot'], verify: ['copilot', 'winapp'], review: ['copilot', 'azure'] };
 const WANTS = { analyze: ['ffmpeg'] };
-const NEED_FIX = { copilot: 'Copilot: inicia sesión', winapp: 'winapp: instálalo', ffmpeg: 'ffmpeg: instálalo' };
-const missingOf = (board, copilot) => board.tools?.demo ? {} : { copilot: !!board.pipeline?.needsCopilot || copilot?.isAuthenticated === false, winapp: !board.tools?.winapp, ffmpeg: !board.tools?.ffmpeg };
+const NEED_FIX = { copilot: 'Copilot: inicia sesión', winapp: 'winapp: instálalo', ffmpeg: 'ffmpeg: instálalo', azure: 'Azure DevOps: conéctalo' };
+const missingOf = (board, copilot) => board.tools?.demo ? {} : { copilot: !!board.pipeline?.needsCopilot || copilot?.isAuthenticated === false, winapp: !board.tools?.winapp, ffmpeg: !board.tools?.ffmpeg, azure: board.tools?.azure === false };
 const lackingOf = (stage, missing, wants = false) => [...(NEEDS[stage] ?? []), ...(wants ? WANTS[stage] ?? [] : [])].filter(need => missing[need]);
 function warnView(id, name, lacking, open) {
   if (!lacking.length) return '';
   const tip = open ? `<span class="jira-warn-tip" role="tooltip"><strong>Falta</strong><ul>${lacking.map(need => `<li>${need === 'copilot' ? `<button class="link-button" data-action="jira-copilot-login">${escape(NEED_FIX[need])}</button>` : escape(NEED_FIX[need])}</li>`).join('')}</ul></span>` : '';
   return `<span class="jira-warn"><button class="jira-warn-icon" data-action="jira-warn" data-stage="${id}" aria-expanded="${open}" title="Falta algo para ${escape(name)}" aria-label="Falta algo para ${escape(name)}">⚠</button>${tip}</span>`;
 }
-export const OUTCOMES = { ok: 'Recolectado', analyzed: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', built: 'Compila', build_failed: 'No compila', verified: 'Verificado', not_fixed: 'Sigue fallando', stopped: 'Detenido', error: 'Error' };
+export const OUTCOMES = { ok: 'Recolectado', analyzed: 'Analizado', blocked: 'Bloqueado', reproduced: 'Reproducido', not_reproduced: 'No reproducido', fixed: 'Corregido', failed: 'Sin corregir', built: 'Compila', build_failed: 'No compila', verified: 'Verificado', not_fixed: 'Sigue fallando', approved: 'Aprobado', commented: 'Con comentarios', stopped: 'Detenido', error: 'Error' };
 // Traffic light of each column: what its agent may do.
 const LIGHTS = [['off', 'Nada: el agente no actúa'], ['ask', 'Avisar: espera tu aprobación antes de actuar'], ['auto', 'Autopilot: actúa solo']];
 const STATUS = { pending: 'Pendiente', running: 'En curso', blocked: 'Necesita ayuda', done: 'Resuelto' };
@@ -144,6 +145,14 @@ function lockButton(ticket) {
   return `<button class="icon-button jira-lock${ticket.locked ? ' locked' : ''}" data-action="jira-autolock" data-key="${escape(ticket.key)}" data-locked="${!ticket.locked}" aria-pressed="${!!ticket.locked}" title="${escape(title)}" aria-label="${escape(title)}">${ticket.locked ? LOCK : UNLOCK}</button>`;
 }
 // What a ticket brought new from Jira since the person last opened it.
+// The draft pull request of the review, with the comments still waiting for the fix.
+const openComments = review => (review?.comments ?? []).filter(c => !c.withdrawn && (!c.answers?.length || (c.answers.at(-1).action === 'checked' && !c.answers.at(-1).ok))).length;
+function pullRequestPill(review, demo) {
+  const pr = review?.pullRequest;
+  if (!pr) return '';
+  const open = openComments(review), title = `Pull request borrador${open ? ` · ${open} comentario${open === 1 ? '' : 's'} sin responder` : ''}`;
+  return !demo && pr.url ? `<a class="pill jira-pr" href="${escape(pr.url)}" target="_blank" rel="noopener noreferrer" title="${escape(title)}">PR ${escape(pr.id)}${open ? ` · ${open}` : ''}</a>` : `<span class="pill jira-pr" title="${escape(title)}">PR ${escape(pr.id)}${open ? ` · ${open}` : ''}</span>`;
+}
 const newsText = news => `Desde Jira: ${[news.comments && `${news.comments} comentario${news.comments === 1 ? '' : 's'}`, news.attachments && `${news.attachments} adjunto${news.attachments === 1 ? '' : 's'}`].filter(Boolean).join(' y ')} nuevo${(news.comments ?? 0) + (news.attachments ?? 0) === 1 ? '' : 's'}. Ábrelo para verlo`;
 function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued = false, lacking = []) {
   const live = running?.key === ticket.key ? running : null;
@@ -151,6 +160,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
   const last = live?.activity?.at(-1);
   const pills = [
     ticket.news && `<span class="pill jira-news" title="${escape(newsText(ticket.news))}">Novedades</span>`,
+    pullRequestPill(ticket.review, demo),
     ticket.iterations > 1 && `<span class="pill" title="Correcciones intentadas">×${ticket.iterations}</span>`,
     ticket.closedInJira && `<span class="pill" title="Terminado en Jira: se quitó del tablero al sincronizar">${escape(ticket.closedInJira.status || 'Cerrado')} en Jira</span>`,
     ticket.inFilter === false && '<span class="pill demo" title="Ya no está en el filtro de Jira">Fuera del filtro</span>',
@@ -423,6 +433,7 @@ const stepFiles = (entry, files) => files.filter(f => ({
   reproduce: f.startsWith('evidencias/') || f === 'reproducir.ps1',
   build: f === `compilacion-${entry.number}.log`,
   verify: f.startsWith('evidencias/'),
+  review: f === `revision-${entry.number}.diff` || f === `revision-${entry.number}-ultimos.diff`,
 })[entry.stage]);
 const fileList = files => files.length ? `<ul class="jira-files">${files.map(f => `<li><code>${escape(f)}</code></li>`).join('')}</ul>` : '';
 function stepPanel(entry, detail, demo, options, log = '', key = '', index = 0) {

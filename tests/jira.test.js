@@ -190,7 +190,16 @@ test('tickets move between columns and back to fix while verification fails', ()
   assert.deepEqual(nextAfter(t, 'verify', 'not_fixed', 3), { stage: 'fix', status: 'pending' });
   assert.deepEqual(nextAfter({ iterations: 3 }, 'verify', 'not_fixed', 3).status, 'blocked');
   assert.deepEqual(nextAfter({ iterations: 3 }, 'fix', 'failed', 3).status, 'blocked');
-  assert.deepEqual(nextAfter(t, 'verify', 'verified'), { stage: 'done', status: 'done' });
+  assert.deepEqual(nextAfter(t, 'verify', 'verified'), { stage: 'review', status: 'pending' }, 'a verified fix is reviewed');
+  assert.deepEqual(nextAfter(t, 'review', 'approved'), { stage: 'done', status: 'done' });
+  assert.deepEqual(nextAfter(t, 'review', 'commented', 3), { stage: 'fix', status: 'pending' }, 'comments go back to fix');
+  assert.deepEqual(nextAfter(t, 'fix', 'fixed', 3, { unchanged: true }), { stage: 'review', status: 'pending' }, 'answered without changing code, straight back to review');
+  // A review starts a new round of fixes; the rounds of comments are limited too.
+  const reviewed = { iterations: 4, history: [...['fix', 'fix', 'fix'].map(stage => ({ stage })), { stage: 'review', outcome: 'commented' }, { stage: 'fix' }] };
+  assert.deepEqual(nextAfter(reviewed, 'verify', 'not_fixed', 3), { stage: 'fix', status: 'pending' }, 'the fixes before the review do not count');
+  const rounds = { iterations: 3, history: [1, 2, 3].flatMap(() => [{ stage: 'fix' }, { stage: 'review', outcome: 'commented' }]) };
+  assert.deepEqual(nextAfter(rounds, 'review', 'commented', 3), { stage: 'review', status: 'blocked', note: 'Sigue con comentarios tras 4 revisiones.' });
+  assert.deepEqual(nextAfter({ ...rounds, history: rounds.history.map((h, i) => i === 1 ? { ...h, rewound: 'x' } : h) }, 'review', 'commented', 3).stage, 'fix', 'a rewound review does not count');
   assert.deepEqual(nextAfter(t, 'fix', 'blocked'), { stage: 'fix', status: 'blocked' });
   assert.throws(() => checkKey('../NEO-1'), /no válida/);
 });
@@ -280,7 +289,7 @@ test('verifying starts by building: a failure goes back to fix before any agent 
   assert.match(runs[1].prompt, /Latest build report: .*compilacion-1\.md/);
   await pipeline.runStage('NEO-1');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => `${h.stage}:${h.outcome}`)], ['done', 2, ['fix:fixed', 'build:build_failed', 'fix:fixed', 'build:built', 'verify:verified']], 'built, it is verified right away');
+  assert.deepEqual([ticket.stage, ticket.iterations, ticket.history.map(h => `${h.stage}:${h.outcome}`)], ['review', 2, ['fix:fixed', 'build:build_failed', 'fix:fixed', 'build:built', 'verify:verified']], 'built, it is verified right away, and then reviewed');
   assert.match(runs[2].prompt, /built right before you started, as the first part of this step/);
   const lessons = await tickets.learnings('general');
   assert.equal(lessons.match(/Compilar con dotnet build/g).length, 1);
@@ -376,11 +385,12 @@ test('the board shows a column per agent with its model and the live step', () =
     pipeline: { auto: true, running: { key: 'NEO-1', stage: 'reproduce', model: 'claude-sonnet-4.5', startedAt: Date.now(), activity: [{ at: Date.now(), kind: 'tool', message: 'winapp ui inspect -a App' }] } },
     tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }, { key: 'NEO-3', summary: 'Tres', stage: 'done', status: 'done', archived: true }] };
   const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3 }] });
-  assert.deepEqual([...html.matchAll(/<section class="jira-column[^"]*" aria-label="([^"]+)">/g)].map(m => m[1]), ['Analizar', 'Reproducir', 'Solucionar', 'Verificar'], 'a column per agent: collecting, building and the solved ones have none');
+  assert.deepEqual([...html.matchAll(/<section class="jira-column[^"]*" aria-label="([^"]+)">/g)].map(m => m[1]), ['Analizar', 'Reproducir', 'Solucionar', 'Verificar', 'Revisar'], 'a column per agent: collecting, building and the solved ones have none');
   const flow = jiraView(state, { view: 'board', board: { ...board, pipeline: {}, tickets: [{ key: 'NEO-7', summary: 'Hecho', stage: 'done', status: 'done' }, { key: 'NEO-8', summary: 'Por compilar', stage: 'build', status: 'pending' }, { key: 'NEO-9', summary: 'Nuevo', stage: 'collect', status: 'pending' }] } }, { isAuthenticated: true, models: [] });
   const column = name => flow.match(new RegExp(`aria-label="${name}">([\\s\\S]*?)</section>`))[1];
-  assert.match(column('Verificar'), /NEO-8[\s\S]*<article class="jira-card status-done[^"]*"[^>]*aria-label="NEO-7 · Hecho"/, 'the solved ones stay in Verificar, at the end and highlighted, as one waiting for its build');
-  assert.doesNotMatch(column('Verificar').match(/aria-label="NEO-7 · Hecho">([\s\S]*?)<\/article>/)[1], /data-action="jira-(run|done|autolock)"/, 'with nothing left to do');
+  assert.match(column('Verificar'), /NEO-8/, 'one waiting for its build is in Verificar');
+  assert.match(column('Revisar'), /<article class="jira-card status-done[^"]*"[^>]*aria-label="NEO-7 · Hecho"/, 'the solved ones stay in Revisar, highlighted');
+  assert.doesNotMatch(column('Revisar').match(/aria-label="NEO-7 · Hecho">([\s\S]*?)<\/article>/)[1], /data-action="jira-(run|done|autolock)"/, 'with nothing left to do');
   assert.match(column('Analizar'), /NEO-9/, 'a ticket being indexed shows in Analizar');
   assert.match(html, /aria-label="Reproducir">[\s\S]*?data-action="jira-warn" data-stage="reproduce"/, 'an agent that lacks something it needs warns');
   assert.doesNotMatch(html, /data-stage="analyze" aria-expanded/, 'and one that has everything does not');

@@ -51,7 +51,7 @@ function workflowStates(states) {
 const REVISION_CHANGED = /TF401289|\b(409|412)\b|Precondition Failed|test operation|\/rev\b/i;
 // Writes that would be duplicated if repeated after an uncertain answer. They are
 // never retried here: their callers look for the result before sending again.
-const NOT_REPEATABLE = new Set(['neo_create_item', 'neo_pull_request_comment_write', 'wit_work_item_comment_write']);
+const NOT_REPEATABLE = new Set(['neo_create_item', 'neo_pull_request_comment_write', 'neo_pull_request_reply_write', 'wit_work_item_comment_write']);
 const isTransient = error => [-32001, -32000].includes(error?.code) || /Connection closed|Conecta Azure DevOps|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed out|\b(408|429|500|502|503|504)\b/i.test(String(error?.message ?? ''));
 
 export class AzureGateway {
@@ -75,7 +75,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -361,6 +361,18 @@ export class AzureGateway {
   async addPullRequestComment(config, { repositoryId, pullRequestId, content, filePath, line, endLine, endOffset }) {
     const result = await this.call('neo_pull_request_comment_write', { project: config.project, repositoryId, pullRequestId, content, ...(filePath ? { filePath } : {}), ...(filePath && line ? { line } : {}), ...(filePath && line && endLine ? { endLine, endOffset } : {}) });
     if (!Number.isInteger(result?.id)) throw new Error('Azure DevOps no confirmó el comentario.');
+    return result;
+  }
+  // The draft pull request of a Jira ticket: the active one of its branch is reused,
+  // so creating it again after a lost answer does not duplicate it.
+  async createPullRequest(config, { repository, sourceRefName, targetRefName, title, description }) {
+    const result = await this.call('neo_pull_request_create_write', { project: config.project, repository, sourceRefName, ...(targetRefName ? { targetRefName } : {}), title, description, isDraft: true });
+    if (!Number.isInteger(result?.pullRequestId)) throw new Error('Azure DevOps no confirmó el pull request.');
+    return result;
+  }
+  async replyPullRequestComment(config, { repositoryId, pullRequestId, threadId, content, status }) {
+    const result = await this.call('neo_pull_request_reply_write', { project: config.project, repositoryId, pullRequestId, threadId, content, status });
+    if (!Number.isInteger(result?.id)) throw new Error('Azure DevOps no confirmó la respuesta.');
     return result;
   }
   // Finds a creation whose response was lost, by what it contains: same type and
