@@ -485,7 +485,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-status .spinner{width:11px;height:11px;margin:0}
 .status-blocked .jira-status{color:#9a3128}
 .jira-card-title{font-size:14px;line-height:1.35;overflow-wrap:anywhere}
-.jira-card-meta{display:flex;align-items:center;gap:5px}.jira-card-pills{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:1;min-width:0}.jira-card-pills>*{max-width:100%;overflow:hidden;text-overflow:ellipsis}.jira-card-meta .jira-card-tools{flex:none}.jira-card-tools{display:inline-flex;gap:2px;margin-left:auto}.jira-tool{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#8a968d}.jira-tool:hover{border-color:#d5dfce;background:#fff}
+.jira-card-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.jira-card-actions{display:flex;align-items:center;justify-content:space-between;min-height:22px}.jira-card-actions .jira-done{margin-left:auto}.jira-card-tools{display:inline-flex;gap:2px;margin-left:auto}.jira-tool{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#8a968d}.jira-tool:hover{border-color:#d5dfce;background:#fff}
 .jira-live,.jira-note{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .jira-note{color:#9a3128}
 .jira-archived{align-self:flex-start;font-size:13px}
@@ -577,7 +577,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-ease{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;flex-shrink:0;cursor:help}
 .jira-ease rect{fill:#d9dfd9}.jira-ease.ease-3{color:#47772f}.jira-ease.ease-2{color:#a06f12}.jira-ease.ease-1{color:#9a3128}
 .jira-ease.ease-3 rect.on{fill:#5d9440}.jira-ease.ease-2 rect.on{fill:#d79a24}.jira-ease.ease-1 rect.on{fill:#c2564b}
-.jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-meta .jira-done,.jira-card-meta .jira-run{width:22px;min-width:22px;height:22px}
+.jira-card-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;min-height:22px}.jira-card-actions .jira-done,.jira-card-actions .jira-run{width:22px;min-width:22px;height:22px}
 .jira-lock{width:22px;min-width:22px;height:22px;border-color:transparent;background:transparent;color:#a3ada6}
 .jira-lock:hover{border-color:#d5dfce;background:#fff}
 .jira-lock.locked{color:#8a5a12;background:#fff4dc;border-color:#ecd49c}
