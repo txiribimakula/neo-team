@@ -449,7 +449,7 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(ticketDetail(board, { ...detail, history: [{ ...detail.history[0], rewound: '2026-10-10T10:00:00Z' }] }, false, {}, 'step-0'), /<span class="pill" title="Deshecho [^"]+">Rebobinado<\/span>/);
   const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
   assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, '⏩ moves the ticket on, as done by hand');
-  assert.match(cardHtml, /<span class="jira-card-meta"><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button>[\s\S]*?<span class="jira-card-tools">/, '▶ opens the last row, on the left, with the other icons on the right');
+  assert.match(cardHtml, /<span class="jira-card-meta"><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button>[\s\S]*?<span class="jira-card-tools">[\s\S]*?data-action="jira-archive"[^>]*>[\s\S]*?<\/button><button class="icon-button jira-done"[^>]*>[\s\S]*?<\/button><\/span><\/span>/, '▶ opens the last row, on the left; ⏩ closes it, on the far right');
   const at = stage => jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, stage, status: stage === 'done' ? 'done' : 'pending' }] } }, null);
   assert.match(at('build'), /title="Ya lo he hecho yo: pasar a Revisar"/, 'waiting for its build, the verification is the step done');
   assert.match(at('review'), /title="Ya lo he hecho yo: pasar a Resueltos"/);

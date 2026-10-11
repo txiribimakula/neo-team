@@ -101,7 +101,7 @@ Encima del tablero están **Actualizar** (⟳) y qué trae Actualizar; a la dere
 
 **Asignado.** Cada tarjeta muestra a quién está asignado el ticket en Jira («tú» si es tu cuenta, o «Sin asignar»). Un ticket asignado a otra persona queda fuera del modo automático: solo se ejecuta con ▶ sobre ese ticket. El candado de la tarjeta cambia esto ticket a ticket.
 
-**Tarjeta.** Además del candado y ⏩ (ya lo he hecho yo), junto al asignado, la última fila de cada tarjeta empieza por ▶ a la izquierda y a la derecha tiene un icono de carpeta, que abre la del ticket, y uno de papelera, que lo quita del tablero conservando su carpeta (en «Mostrar quitados» la flecha lo devuelve).
+**Tarjeta.** Además del candado, la última fila de cada tarjeta empieza por ▶ a la izquierda y a la derecha tiene un icono de carpeta, que abre la del ticket, uno de papelera, que lo quita del tablero conservando su carpeta (en «Mostrar quitados» la flecha lo devuelve), y, al final del todo, ⏩ (ya lo he hecho yo).
 
 **Agentes y modelos.** Cada columna tiene su agente y, bajo su nombre y su número de tickets, su semáforo y un selector de modelo (recolectar y compilar no usan IA); **Auto** (el modelo que usa se ve al pasar el ratón) elige el más reciente de tu cuenta de Copilot según la dificultad: medio para analizar, reproducir y verificar (Sonnet) y avanzado para solucionar y revisar (Opus).
 
