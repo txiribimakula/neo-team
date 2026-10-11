@@ -150,7 +150,7 @@ test('the board chooses what updating brings and shares the state of a ticket', 
   assert.doesNotMatch(view({ mode: 'mine', key: '' }), /data-jira-collect-key/);
   assert.match(view({ mode: 'single', key: 'NEO-7' }), /<input data-jira-collect-key[^>]*value="NEO-7"/);
   const html = view({ mode: 'filter', key: '' }), card = key => html.match(new RegExp(`aria-label="${key} · [^"]+">([\\s\\S]*?)</article>`))[1];
-  assert.match(card('NEO-1'), /data-action="jira-share"/);
+  assert.match(card('NEO-1'), /<span class="jira-card-actions"><button class="icon-button jira-lock[\s\S]*?<\/button><button class="icon-button jira-run"[^>]*>▶<\/button><button class="icon-button jira-tool" data-action="jira-share"[\s\S]*?<\/button><button class="icon-button jira-done"/, 'uploading its state goes right after ▶');
   assert.doesNotMatch(card('NEO-1'), /jira-resume/);
   assert.match(card('NEO-2'), /data-action="jira-resume"[^>]*title="Traer el estado que subió Ana/, 'what another computer shared is offered');
   assert.doesNotMatch(card('NEO-3'), /data-action="jira-(resume|share)"/, 'nothing to share yet, and its own state is not offered back');
@@ -459,7 +459,8 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(status, /<span class="jira-card-foot"><span class="jira-assignee"[\s\S]*?Lucía Martín<\/span><\/span><span class="jira-card-end"><span class="tag jira-card-status" title="Estado en Jira: Tareas por hacer">Tareas por hacer<\/span>/, 'the status in Jira goes beside who has the ticket');
   assert.doesNotMatch(status.match(/<span class="jira-card-meta">[\s\S]*?<\/article>/)[0], /Tareas por hacer/, 'and not in the bottom row');
   assert.doesNotMatch(at('review'), /jira-rewind/, 'there is no rewinding back');
-  assert.match(cardHtml, /<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-open-folder" data-key="NEO-3"[^>]*><svg[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
+  assert.match(cardHtml, /<header><a class="jira-key"[^>]*>NEO-3<small[^>]*>↗<\/small><\/a><button class="icon-button jira-tool jira-card-folder" data-action="jira-open-folder" data-key="NEO-3" title="Abrir su carpeta"/, 'its folder opens from right after its key');
+  assert.match(cardHtml, /<span class="jira-card-tools">[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
   const archivedCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', showArchived: true, board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, archived: true }] } }, null);
   assert.match(archivedCard, /data-action="jira-archive" data-key="NEO-3" data-archived="false" title="Volver al tablero"/, 'and comes back the same way');
   assert.match(ticketDetail(board, detail, false, {}, 'ticket'), /data-part="description" open/);
@@ -712,7 +713,7 @@ test('tickets show their type and priority with icons like Jira', () => {
   const board = { settings: {}, pipeline: {}, tickets: [{ key: 'NEO-9', summary: 'x', stage: 'collect', status: 'pending', type: 'Bug', priority: 'High' }] };
   assert.doesNotMatch(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /jira-type/, 'the card has no type icon: for now every ticket is a bug');
   assert.match(ticketHead({ ...board, tickets: [{ ...board.tickets[0] }] }, 'NEO-9', true), /<svg class="jira-type"[^>]*aria-label="Bug"/, 'the ticket popup still says its type');
-  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><strong>NEO-9<\/strong><span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
+  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><strong>NEO-9<\/strong><button class="icon-button jira-tool jira-card-folder"[\s\S]*?<\/button><span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
 });
 
 test('ticket texts, comments and reports are shown formatted and safe', () => {
