@@ -50,6 +50,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   const collected = await post('/api/jira-refresh');
   assert.equal(collected.status, 200);
   assert.deepEqual([collected.data.result.collect.found, collected.data.result.collect.downloaded, collected.data.result.sync.checked], [3, 3, 0], 'the first update downloads the filter');
+  assert.deepEqual([collected.data.jira.pipeline.feed.at(-1).family, collected.data.jira.pipeline.feed.at(-1).title], ['jira', 'Actualizado desde Jira: 3 descargados'], 'the activity tells it, curated');
   const folder = join(directory, 'jira-ejemplo', 'NEO-101');
   assert.deepEqual(collected.data.jira.tickets.map(t => [t.stage, t.history.map(h => h.stage)]), [['analyze', ['collect']], ['analyze', ['collect']], ['analyze', ['collect']]], 'downloading also indexes: new tickets go straight to Analizar');
   assert.match(await readFile(join(folder, 'resumen.md'), 'utf8'), /NEO-101/);
@@ -204,6 +205,9 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   const rewound = board.tickets.find(t => t.key === 'NEO-102');
   assert.deepEqual([rewound.stage, rewound.status, rewound.history.at(-1).stage, !!rewound.history.at(-1).rewound], ['verify', 'pending', 'verify', true]);
   assert.equal(board.pipeline.running, null, 'paused: nothing runs after it');
+  assert.ok(board.pipeline.feed.some(item => item.family === 'person' && item.key === 'NEO-102' && /^Rebobinado: Verificar \d$/.test(item.title)));
+  assert.ok(board.pipeline.feed.some(item => item.family === 'step' && /^Verificar · Verificado$/.test(item.title) && item.detail), 'each step ends in one line, its report folded');
+  assert.ok(!board.pipeline.feed.some(item => /Preparando archivos|sigue en curso/.test(item.title)), 'without the noise');
   assert.equal((await post('/api/jira-rewind', { key: 'NEO-999' })).status, 404);
   assert.equal((await post('/api/jira-run', { key: '../../etc' })).status, 400);
   // Updating can bring only your tickets or a single one.

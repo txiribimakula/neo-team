@@ -503,6 +503,9 @@ const server = http.createServer(async (req, res) => {
           if (sync.closed.includes(pipeline.focus)) pipeline.focus = null;
           const collect = single ?? await collectFilter(options);
           await pipeline.collectAll();
+          const news = sync.updated.filter(u => u.comments || u.attachments).map(u => u.key);
+          const told = [collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}`, sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira`, news.length && `novedades en ${news.join(', ')}`, collect.left && `${collect.left} fuera del filtro`, sync.missing.length && `${sync.missing.length} sin acceso`].filter(Boolean);
+          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', key: collect.mode === 'single' ? settings.collect.key : undefined, title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: { filter: 'todo el filtro', mine: 'asignados a mí', single: 'un ticket' }[collect.mode], detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.missing.length && `Sin acceso o ya no existen: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
           return json(res, { result: { sync, collect }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-share' || path === '/api/jira-resume') {
@@ -522,6 +525,7 @@ const server = http.createServer(async (req, res) => {
             if (!mine) return;
             const theirs = `${shared.author || 'Otra persona'}${shared.created ? ` · ${new Date(shared.created).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}`;
             await pipeline.tickets.update(key, t => ({ ...t, shared, diverged: { id: shared.id, mine, theirs } }));
+            pipeline.feed.add({ family: 'warning', key, title: `Trabajado en los dos equipos: tú ${mine}; ${theirs} subió otro estado`, meta: 'elige en la tarjeta' });
             throw Object.assign(fail(`${key}: tienes ${mine} sin subir y ${theirs} subió otro estado. Elige en la tarjeta cuál sigue.`, 409), { reason: 'diverged' });
           };
           if (path === '/api/jira-share') {
@@ -547,6 +551,7 @@ const server = http.createServer(async (req, res) => {
               progress({ message: `Borrando el estado anterior de ${key}…` });
               replaced = await client.deleteAttachment(latest.id).then(() => true, () => false);
             }
+            pipeline.feed.add({ family: 'jira', key, title: `Estado subido a Jira${replaced ? ' en lugar del anterior' : ''}`, meta: `${pack.files} archivos${pack.patch ? ' y código' : ''}` });
             return json(res, { result: { key, files: pack.files, patch: pack.patch, size: pack.data.length, replaced }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
           }
           if (!ticket.shared?.content) throw fail(`${key} no tiene un estado compartido en Jira. Actualiza el tablero para buscarlo.`, 404);
@@ -558,6 +563,7 @@ const server = http.createServer(async (req, res) => {
           const resumed = await unpackState({ tickets: pipeline.tickets, key, data, settings, me: jiraMe() });
           const base = await fingerprint(pipeline.tickets, key);
           await pipeline.tickets.update(key, t => { const { diverged: _, ...rest } = t; return { ...rest, sharedSeen: ticket.shared.id, sharedBase: base }; });
+          pipeline.feed.add({ family: resumed.warnings.length ? 'warning' : 'jira', key, title: `Estado traído de Jira${resumed.manifest.by ? `: sigue donde lo dejó ${resumed.manifest.by}` : ''}`, detail: [...resumed.warnings, resumed.backup && `Lo anterior de este equipo: ${resumed.backup}`].filter(Boolean).join('\n') });
           return json(res, { result: { key, warnings: resumed.warnings, backup: resumed.backup, by: resumed.manifest.by ?? '' }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-collect') {
@@ -669,9 +675,10 @@ const server = http.createServer(async (req, res) => {
         }
         if (['/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-move', '/api/jira-archive', '/api/jira-learnings', '/api/jira-open'].includes(path)) {
           const pipeline = jiraPipeline();
-          if (path === '/api/jira-run') await pipeline.enqueue(checkKey(input.key));
-          else if (path === '/api/jira-auto') pipeline.setAuto(input.on === true);
+          if (path === '/api/jira-run') { await pipeline.enqueue(checkKey(input.key)); pipeline.feed.add({ family: 'person', key: input.key, title: 'Ejecutar' }); }
+          else if (path === '/api/jira-auto') { pipeline.setAuto(input.on === true); pipeline.feed.add({ family: 'person', title: input.on === true ? 'Empezar: los pendientes, uno tras otro' : 'Pausar al terminar el paso en curso' }); }
           else if (path === '/api/jira-stop') {
+            if (input.general !== true && input.index === undefined) pipeline.feed.add({ family: 'person', key: pipeline.running?.key, title: 'Detener' });
             if (input.general === true) await pipeline.stopGeneral();
             else if (input.index !== undefined) await pipeline.stopChat(checkKey(input.key), input.index);
             else await pipeline.stop();
@@ -683,7 +690,10 @@ const server = http.createServer(async (req, res) => {
             if (path === '/api/jira-move') {
               if (!STAGE_IDS.includes(input.stage)) throw fail('Columna no válida.');
               await pipeline.tickets.update(key, t => ({ ...t, stage: input.stage, status: input.stage === 'done' ? 'done' : 'pending', note: null, ...(input.resetIterations ? { iterations: 0, reproduceAttempts: 0 } : {}) }));
-            } else await pipeline.tickets.update(key, t => ({ ...t, archived: input.archived !== false }));
+            } else {
+              await pipeline.tickets.update(key, t => ({ ...t, archived: input.archived !== false }));
+              pipeline.feed.add({ family: 'person', key, title: input.archived !== false ? 'Quitado del tablero' : 'Vuelve al tablero' });
+            }
             pipeline.queue = pipeline.queue.filter(q => q.key !== key);
           } else if (path === '/api/jira-learnings') {
             if (typeof input.text !== 'string' || input.text.length > 200000) throw fail('Texto no válido.');

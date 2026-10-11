@@ -623,7 +623,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-close-log{margin-left:auto;width:24px;height:24px}
 .jira-general-reset{margin-left:auto;font-size:12px}
 /* The assistant beside the board, its conversation as tall as the window allows. */
-.jira-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);gap:16px;align-items:start}
+.jira-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,420px);gap:16px;align-items:start}
 .jira-main.side-closed{grid-template-columns:minmax(0,1fr) auto}
 .jira-main-board{min-width:0}
 .jira-side{position:sticky;top:12px}
@@ -688,3 +688,25 @@ body.jira-fit .jira-side.is-closed{display:block}
 .jira-tool.jira-resume{color:var(--green);border-color:#bfe0c7;background:#eef8f0}
 .jira-board-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}.jira-board-foot .jira-archived{align-self:center}
 .jira-diverged{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+/* Activity under the assistant: a line per event, its family by colour, the long part folded. */
+.jira-feed{list-style:none;margin:0;padding:8px;display:flex;flex-direction:column;gap:4px;overflow:auto;overflow-anchor:none;flex:1;min-height:0}
+.jira-feed .feed{border-left:3px solid var(--fc);border-radius:6px;background:var(--fb);font-size:12.5px;line-height:1.4;padding:0;border-bottom:0;min-width:0}
+.feed-row,.feed summary{display:flex;align-items:baseline;gap:8px;padding:6px 9px;min-width:0}
+.feed summary{cursor:pointer;list-style:none}.feed summary::-webkit-details-marker{display:none}
+.feed summary::after{content:'›';flex:none;color:var(--muted);font-size:14px;line-height:1;transition:transform .15s}.feed details[open] summary::after{transform:rotate(90deg)}
+.feed time{flex:none;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.feed-key{flex:none;font-size:11px;font-weight:650;color:var(--ink)}
+.feed-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.feed small{flex:none;color:var(--muted);font-size:11px}
+.feed .spinner{flex:none;width:11px;height:11px;align-self:center}
+.feed-mark{flex:none;font-size:11px;color:var(--muted)}.feed-failed{color:#c94545;font-weight:700}
+.jira-feed .feed pre{margin:0;padding:6px 10px 9px 12px;border-top:1px solid rgba(0,0,0,.05);max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#3d463c}
+.jira-feed .feed-md{padding:4px 12px 8px;border-top:1px solid rgba(0,0,0,.05);max-height:320px;overflow:auto;font-size:12.5px}.jira-feed .feed-md>:first-child{margin-top:4px}.jira-feed .feed-md h1,.jira-feed .feed-md h2,.jira-feed .feed-md h3{font-size:13px;margin:8px 0 4px}
+.feed-person .feed-title,.feed-ai .feed-title,.feed-jira .feed-title,.feed-warning .feed-title,.feed-error .feed-title{white-space:normal;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.feed-person{--fb:#eef3fb;--fc:#6f8fd0}
+.feed-ai{--fb:#f1f7ee;--fc:#5d9440}
+.feed-tool{--fb:#f6f6f3;--fc:#c3c7bb}.feed-tool .feed-title{font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
+.feed-step{--fb:#f4f0fb;--fc:#8a6cc7}.feed-step .feed-title{font-weight:600}
+.feed-jira{--fb:#e9f5f6;--fc:#3a9aa6}
+.feed-warning{--fb:#fff4e9;--fc:#d9822b}
+.feed-error{--fb:#fdeeee;--fc:#c94545}

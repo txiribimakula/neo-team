@@ -235,14 +235,28 @@ export function activityView(run, live = true, tell = '', closable = false, chat
 // changing the learnings of the agents. Its conversation stays until started anew.
 // Without a Copilot session the assistant cannot answer: its field stays disabled.
 // The assistant, beside the board: folded, a strip that still says when it is busy or waiting.
-export function generalView(general, draft = '', signedOut = false, warn = null, closed = false) {
+// What happens on the board, curated: a line per event, coloured by its family, with
+// the long part folded. Newest first.
+const FEED_FAMILY = { person: 'Tú', ai: 'Lo que dice la IA', tool: 'Lo que hace la IA', step: 'Paso del flujo', jira: 'Jira', warning: 'Aviso', error: 'Error' };
+const FEED_STATUS = { running: '<span class="spinner" aria-hidden="true"></span>', failed: '<span class="feed-mark feed-failed" title="Falló">✕</span>', stopped: '<span class="feed-mark" title="No terminó">■</span>' };
+function feedItem(item, open) {
+  const family = FEED_FAMILY[item.family] ? item.family : 'ai', stage = item.stage && item.family !== 'step' ? stageName(item.stage) : '';
+  const row = `<time>${clock(item.at).slice(0, 5)}</time>${item.key ? `<span class="feed-key">${escape(item.key)}</span>` : ''}<span class="feed-title" title="${escape(item.title ?? '')}">${escape(item.title ?? '')}</span>${item.meta || stage ? `<small>${escape([stage, item.meta].filter(Boolean).join(' · '))}</small>` : ''}${FEED_STATUS[item.status] ?? ''}`;
+  const head = `<li class="feed feed-${family}" title="${escape(FEED_FAMILY[family])}">`;
+  // Reports and what the AI says are Markdown; commands, outputs and Jira comments, plain text.
+  const body = ['step', 'ai', 'warning'].includes(family) && !item.output ? `<div class="feed-md jira-md">${markdown(item.detail)}</div>` : `<pre>${escape(item.detail)}</pre>`;
+  return item.detail ? `${head}<details data-feed="${escape(item.id)}"${open ? ' open' : ''}><summary>${row}</summary>${body}</details></li>` : `${head}<div class="feed-row">${row}</div></li>`;
+}
+export const feedView = (feed = [], open = new Set()) => feed.length ? `<ol class="jira-feed" aria-label="Actividad">${[...feed].reverse().map(item => feedItem(item, open.has(item.id))).join('')}</ol>` : '';
+
+export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set()) {
   const entries = [...(general?.activity ?? [])].reverse(), state = general?.conversation;
   if (closed) return `<aside class="jira-side is-closed"><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="false" title="Mostrar el asistente${state === 'waiting' ? ': espera tu respuesta' : ''}" aria-label="Mostrar el asistente">${CHAT}${['starting', 'working'].includes(state) ? '<span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? '<span class="jira-side-dot" aria-hidden="true"></span>' : ''}</button></aside>`;
   const busy = ['starting', 'working'].includes(state) ? ' <span class="spinner" aria-hidden="true"></span>' : state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : '';
-  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${entries.length ? '<button class="link-button jira-general-reset" data-action="jira-general-reset" title="Empieza una conversación nueva, sin el contexto de la anterior">Nueva conversación</button>' : ''}</header>${tellView(null, draft, { id: 'general', general: true, state, ...(signedOut ? { offline: 'Inicia sesión en Copilot para usar el asistente' } : {}) })}${entries.length ? logList(entries) : ''}</section></aside>`;
+  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${entries.length ? '<button class="link-button jira-general-reset" data-action="jira-general-reset" title="Empieza una conversación nueva, sin el contexto de la anterior">Nueva conversación</button>' : ''}</header>${tellView(null, draft, { id: 'general', general: true, state, ...(signedOut ? { offline: 'Inicia sesión en Copilot para usar el asistente' } : {}) })}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '', tell = '', closedLog = null, tells = {}, warn = null, assistantClosed = false, collectKey = null) {
+function boardView(board, copilot, showArchived, drafts, search = '', tell = '', closedLog = null, tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set()) {
   const missing = missingOf(board, copilot);
   const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
   const columns = COLUMNS.map(column => {
@@ -264,7 +278,7 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${activityView(run, true, tell)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
   const last = board.pipeline?.last, log = board.pipeline?.running ? activityView(board.pipeline.running, true, tell)
     : last && String(last.startedAt) !== String(closedLog) ? activityView(last, false, '', true) : '';
-  return `${log}${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${generalView(board.pipeline?.general, tells.general, missing.copilot, warn, assistantClosed)}</div>`;
+  return `${log}${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${generalView(board.pipeline?.general, tells.general, missing.copilot, warn, assistantClosed, board.pipeline?.feed ?? [], feedOpen)}</div>`;
 }
 
 export const SETTINGS_SUBMIT = '<button class="button primary" type="submit" form="jira-settings-form" title="Guarda y comprueba la conexión con Jira">Conectar</button>';
@@ -464,7 +478,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(settingsView(state.jira));
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.closedLog, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey));
+  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.closedLog, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen));
 }
 
 export function settingsFrom(form) {

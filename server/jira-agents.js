@@ -11,6 +11,7 @@ import { appendFile, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
 import { IMAGE, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
+import { ActivityFeed } from './jira-feed.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 
@@ -596,7 +597,7 @@ export class CopilotAgent {
     };
   }
   listen(session, onActivity, usage) {
-    session.on('assistant.intent', event => onActivity({ kind: 'info', message: short(event.data?.intent) }));
+    session.on('assistant.intent', event => onActivity({ kind: 'info', source: 'intent', message: short(event.data?.intent) }));
     const tools = new Map();
     // What it says after the person spoke is its answer to them.
     session.on('assistant.message', event => { if (event.data?.content?.trim()) onActivity({ kind: this.conversation?.byPerson ? 'agent' : 'info', message: activityText(event.data.content) }); });
@@ -604,15 +605,16 @@ export class CopilotAgent {
       if (data?.toolName === 'report_intent') return;
       const description = describeTool(data);
       tools.set(data.toolCallId, { description, at: Date.now() });
-      onActivity({ kind: 'tool', message: `Iniciando ${description}` });
+      onActivity({ kind: 'tool', message: `Iniciando ${description}`, toolId: data.toolCallId, phase: 'start', title: description });
     });
-    session.on('tool.execution_progress', ({ data }) => onActivity({ kind: 'tool', message: activityText(data?.progressMessage) }));
+    session.on('tool.execution_progress', ({ data }) => onActivity({ kind: 'tool', message: activityText(data?.progressMessage), toolId: data?.toolCallId }));
     session.on('tool.execution_complete', ({ data }) => {
       const tool = tools.get(data?.toolCallId);
       if (!tool) return;
       tools.delete(data.toolCallId);
       const detail = data.error?.message ?? data.result?.content;
-      onActivity({ kind: data.success ? 'result' : 'warning', message: `${data.success ? 'Completado' : 'Falló'} ${tool.description} · ${((Date.now() - tool.at) / 1000).toFixed(1)} s${detail ? `\n${activityText(detail)}` : ''}` });
+      const seconds = ((Date.now() - tool.at) / 1000).toFixed(1);
+      onActivity({ kind: data.success ? 'result' : 'warning', message: `${data.success ? 'Completado' : 'Falló'} ${tool.description} · ${seconds} s${detail ? `\n${activityText(detail)}` : ''}`, toolId: data.toolCallId, phase: 'end', title: tool.description, ok: !!data.success, seconds, detail: detail ? activityText(detail) : '' });
     });
     session.on('assistant.usage', event => { usage.model = event.data?.model ?? usage.model; usage.inputTokens += event.data?.inputTokens ?? 0; usage.outputTokens += event.data?.outputTokens ?? 0; });
     session.on('session.error', event => { usage.error = event.data?.message ?? 'Error de GitHub Copilot.'; onActivity({ kind: 'warning', message: usage.error }); });
@@ -659,7 +661,7 @@ export class CopilotAgent {
         tools: [reportTool(stage, value => { result = value; }), learnTool(stage, onLearn), ...(desktop ? [desktopTool(desktop)] : [])] }));
       onSession(session.sessionId);
       this.listen(session, onActivity, usage);
-      onActivity({ kind: 'info', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'} · cuenta ${auth.login ?? 'de GitHub'}` });
+      onActivity({ kind: 'note', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'} · cuenta ${auth.login ?? 'de GitHub'}` });
       // One reminder at the end: the step only counts with its report.
       await this.conversationOf(session, onState).run({ prompt, attachments, timeoutMs: stageOf(stage).timeoutMs, finished: () => !!result });
       if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
@@ -715,21 +717,31 @@ export class JiraPipeline {
   constructor({ tickets, agent, settings, build = runBuild, worktree = ensureWorktree, models = async () => [], demo = false, comment = null, desktop = () => new JiraDesktop(), chatAgent = () => new CopilotAgent(), missing = async () => ({}) }) {
     Object.assign(this, { tickets, agent, settings, build, worktree, models, demo, comment, desktop, chatAgent, missing });
     this.queue = []; this.auto = false; this.running = null; this.lastKey = null; this.error = null; this.log = []; this.chats = new Map();
+    this.feed = new ActivityFeed(join(tickets.root, 'actividad.json'));
   }
   writeLog(key, file, items) {
     const path = join(this.tickets.folder(key), file);
     this.logWrites = (this.logWrites ?? Promise.resolve()).then(async () => { await mkdir(dirname(path), { recursive: true }); await appendFile(path, logLines(items)); }).catch(() => {});
     return this.logWrites;
   }
-  snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, last: this.last ?? null, chats: Object.fromEntries([...this.chats].map(([id, chat]) => [id, chat.conversation])), general: this.general ? { conversation: this.general.conversation, activity: this.general.activity.slice(-100) } : null, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false }; }
+  snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, last: this.last ?? null, chats: Object.fromEntries([...this.chats].map(([id, chat]) => [id, chat.conversation])), general: this.general ? { conversation: this.general.conversation, activity: this.general.activity.slice(-100) } : null, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false, feed: this.feed.recent() }; }
+  // The end of a step, in one line: its outcome, how long it took and its report folded.
+  feedOutcome(key, stage, outcome, { seconds = null, report = null, error = null, question = null } = {}) {
+    const family = outcome === 'error' ? 'error' : ['blocked', 'not_reproduced', 'failed', 'build_failed', 'not_fixed'].includes(outcome) ? 'warning' : 'step';
+    const time = seconds == null ? undefined : seconds < 60 ? `${Math.max(1, Math.round(seconds))} s` : `${Math.round(seconds / 60)} min`;
+    const detail = [question && `Pregunta: ${question}`, error, report && String(report).trim()].filter(Boolean).join('\n\n');
+    this.feed?.add({ family, key, stage: stage.id, title: `${stage.name} · ${OUTCOME_LABELS[outcome] ?? outcome}`, meta: time, detail: detail.length > 4000 ? `${detail.slice(0, 4000)}\n…` : detail });
+  }
   activity(entry) {
     if (!this.running) return;
+    this.feed?.activity(entry, { key: this.running.key, stage: this.running.stage });
     const item = { at: Date.now(), kind: entry.kind ?? 'info', message: activityText(entry.message) };
     this.running = { ...this.running, activity: [...this.running.activity, item].slice(-250), updatedAt: item.at };
     if (this.running.log) void this.writeLog(this.running.key, this.running.log, [item]);
   }
   // What happens in the chat about a step that ended goes to the log of that step.
   async stepActivity(key, index, entry) {
+    this.feed?.activity(entry, { key, stage: (await this.tickets.get(key))?.history?.[index]?.stage });
     const item = { at: Date.now(), kind: entry.kind ?? 'info', message: activityText(entry.message) };
     const ticket = await this.tickets.update(key, t => ({ ...t, history: (t.history ?? []).map((h, i) => i === index ? { ...h, log: h.log ?? logName(h.stage, h.number), activity: [...(h.activity ?? []), item].slice(-250) } : h) }));
     await this.writeLog(key, ticket.history[index].log, [item]);
@@ -788,6 +800,7 @@ Read what you need from them and the ticket files before answering.`;
     return this.generalWrites;
   }
   async generalActivity(entry) {
+    this.feed?.activity(entry, { scope: 'general' });
     const general = await this.generalState();
     general.activity = [...general.activity, { at: Date.now(), kind: entry.kind ?? 'info', message: activityText(entry.message) }].slice(-250);
     await this.saveGeneral();
@@ -833,6 +846,8 @@ Read what you need from them and the ticket files before answering.`;
     const result = await collectSummary(folder, ticket, note);
     await writeAtomic(join(folder, 'resumen.md'), result.report);
     note({ message: `Recolectar finalizado: ${OUTCOME_LABELS[result.outcome]} · informe resumen.md.` });
+    // Collecting is quiet unless the ticket has nothing to go on.
+    if (result.outcome === 'blocked') this.feedOutcome(key, stageOf('collect'), result.outcome, { question: result.question });
     await this.writeLog(key, log, activity);
     const entry = { stage: 'collect', number, outcome: result.outcome, report: 'resumen.md', question: result.question ?? null, model: null, usage: null, startedAt, finishedAt: new Date().toISOString(), error: null, log, activity };
     return this.tickets.update(key, t => {
@@ -911,6 +926,7 @@ Read what you need from them and the ticket files before answering.`;
     const entry = (await this.tickets.get(key))?.history?.[index];
     if (!entry?.pendingComment) throw fail('Ese comentario ya no está pendiente.', 409);
     if (publish) await this.comment(key, entry.pendingComment);
+    if (publish) this.feed.add({ family: 'jira', key, stage: entry.stage, title: `Comentario de ${stageOf(entry.stage)?.name ?? entry.stage} publicado en Jira`, detail: entry.pendingComment });
     await this.tickets.update(key, t => ({ ...t, history: t.history.map((h, i) => {
       if (i !== index) return h;
       const { pendingComment, ...rest } = h;
@@ -927,6 +943,8 @@ Read what you need from them and the ticket files before answering.`;
     if (!ticket) throw fail('El ticket ya no está disponible.', 404);
     const index = rewindable(ticket);
     if (index < 0) throw fail('No hay ningún paso que rebobinar.', 409);
+    const undone = ticket.history[index];
+    this.feed.add({ family: 'person', key, stage: undone.stage, title: `Rebobinado: ${stageOf(undone.stage)?.name ?? undone.stage} ${undone.number ?? ''}`.trim() });
     await this.tickets.update(key, t => {
       const entry = t.history[index], history = t.history.map((h, i) => i === index ? { ...h, rewound: new Date().toISOString() } : h);
       return { ...t, stage: entry.stage, status: 'pending', note: null, question: null, lastOutcome: history.findLast(h => !h.rewound)?.outcome ?? null, history,
@@ -994,10 +1012,11 @@ Read what you need from them and the ticket files before answering.`;
     let outcome, report = null, result = {}, failure = null, reportText = null;
     const desktop = !this.demo && desktopStage(stage.id) ? this.desktop() : null;
     if (desktopStage(stage.id)) this.running.desktopTitle = desktopTitle(this.running);
-    this.activity({ message: `${key} · ${stage.name} · intento ${number}. Preparando archivos y entorno…` });
+    this.activity({ kind: 'note', message: `${key} · ${stage.name} · intento ${number}. Preparando archivos y entorno…` });
+    const started = this.feed?.add({ family: 'step', key, stage: stage.id, status: 'running', title: `${stage.name} · empieza${number > 1 ? ` (intento ${number})` : ''}`, meta: model ?? undefined });
     const heartbeat = setInterval(() => {
       const idle = Math.floor((Date.now() - this.running.updatedAt) / 1000);
-      if (idle >= 20 && this.running.conversation !== 'waiting') this.activity({ message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
+      if (idle >= 20 && this.running.conversation !== 'waiting') this.activity({ kind: 'note', message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
     }, 20000);
     try {
       if (desktop) await desktop.start(this.running, entry => this.activity(entry)).catch(error => this.activity({ kind: 'warning', message: `No se pudo preparar la distribución: ${error.message}` }));
@@ -1008,7 +1027,7 @@ Read what you need from them and the ticket files before answering.`;
       const [files, general, own, paired] = await Promise.all([listFiles(folder), this.tickets.learnings('general'), this.tickets.learnings(stage.id), pair ? this.tickets.learnings(pair) : null]);
       const previous = latestReports(ticket, folder);
       const images = stage.id === 'fix' ? [] : files.filter(f => f.startsWith('adjuntos/') && IMAGE.test(f) && !f.includes('.fotogramas/')).slice(0, 8);
-      this.activity({ message: `${stage.name} · ${files.length} archivos del ticket${worktree ? ` · código en ${worktree.path}` : ''}` });
+      this.activity({ kind: 'note', message: `${stage.name} · ${files.length} archivos del ticket${worktree ? ` · código en ${worktree.path}` : ''}` });
       if (this.running.stopping) throw Object.assign(fail('Detenido.'), { stopped: true });
       if (stage.id === 'build') this.building = new AbortController();
       result = stage.id === 'collect' ? await collectSummary(folder, ticket, entry => this.activity(entry))
@@ -1040,7 +1059,9 @@ Read what you need from them and the ticket files before answering.`;
       this.building = null;
       await desktop?.stop().catch(error => this.activity({ kind: 'warning', message: `No se pudo cerrar el control de ventanas: ${error.message}` }));
     }
-    this.activity({ message: `${stage.name} finalizado: ${OUTCOME_LABELS[outcome] ?? outcome}${report ? ` · informe ${report}` : ''}.` });
+    this.activity({ kind: 'note', message: `${stage.name} finalizado: ${OUTCOME_LABELS[outcome] ?? outcome}${report ? ` · informe ${report}` : ''}.` });
+    if (started) this.feed.update(started, { status: undefined });
+    this.feedOutcome(key, stage, outcome, { seconds: (Date.now() - startedAt) / 1000, report: reportText, error: failure?.message, question: result.question });
     const finishedAt = Date.now();
     const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null, ...(result.ease ? { ease: result.ease } : {}), log, ...(sessionId ? { sessionId } : {}), activity: this.running.activity };
     // What the agent achieved is left ready as a Jira comment: it is published only when the person confirms it.

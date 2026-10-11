@@ -14,7 +14,8 @@ export const desktopTitle = run => `Neo Team [${run.key}:${run.startedAt}]`;
 export class JiraDesktop {
   constructor({ platform = process.platform, launch = spawn } = {}) { Object.assign(this, { platform, launch }); }
   async start(run, onActivity) {
-    this.log = onActivity;
+    // Its own notes (arranging windows) go to the step's log, not to the activity summary.
+    this.log = entry => onActivity({ kind: 'note', ...entry });
     if (this.platform !== 'win32') {
       this.log({ kind: 'warning', message: 'Distribución de ventanas no disponible: requiere ejecutar Neo Team y el navegador en el mismo escritorio de Windows.' });
       return;

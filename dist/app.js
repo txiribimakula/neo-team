@@ -2099,6 +2099,8 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('toggle',event=>{
   const element=event.target;
+  // The lines of the activity stay open or folded across redraws.
+  if (element.matches?.('details[data-feed]')) { jiraUi.feedOpen ??= new Set(); if (element.open) jiraUi.feedOpen.add(element.dataset.feed); else jiraUi.feedOpen.delete(element.dataset.feed); return; }
   if (!element.matches?.('details[data-node], details[data-project]')) return;
   const id=element.dataset.project ? `project:${element.dataset.project}` : Number(element.dataset.node);
   if(element.open)collapsed.delete(id);else collapsed.add(id);
