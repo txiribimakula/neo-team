@@ -573,7 +573,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-assignee.me .jira-avatar{background:var(--green);color:#fff}
 .jira-assignee.unassigned{color:var(--muted);font-weight:500}.jira-assignee.unassigned .jira-avatar{background:#eef1ee;color:var(--muted)}
 .jira-done{color:#47772f}
-.jira-card-end{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.jira-card-end{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;flex:1;min-width:0}.jira-card-status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.jira-card-foot>.jira-assignee{flex:0 0 70%}.jira-assignee-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.jira-assignee .jira-avatar{flex:none}
 .jira-ease{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;flex-shrink:0;cursor:help}
 .jira-ease rect{fill:#d9dfd9}.jira-ease.ease-3{color:#47772f}.jira-ease.ease-2{color:#a06f12}.jira-ease.ease-1{color:#9a3128}
 .jira-ease.ease-3 rect.on{fill:#5d9440}.jira-ease.ease-2 rect.on{fill:#d79a24}.jira-ease.ease-1 rect.on{fill:#c2564b}

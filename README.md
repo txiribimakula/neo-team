@@ -99,7 +99,7 @@ Encima del tablero están **Actualizar** (⟳) y qué trae Actualizar; a la dere
 - `adjuntos/`: cada adjunto con su nombre de Jira, que es como lo citan los textos (si dos se llaman igual, el más antiguo lleva su id). De cada vídeo se extrae un fotograma cada 2 segundos en `adjuntos/<vídeo>.fotogramas/` si `ffmpeg` está instalado, para que los agentes puedan verlo.
 - Los informes de cada agente (`resumen.md`, `analisis-N.md`, `reproduccion-N.md`, `solucion-N.md`, `verificacion-N.md`, `revision-N.md` con los diffs que revisó), el resultado de cada compilación (`compilacion-N.md` y su registro `compilacion-N.log`), `evidencias/`, `reproducir.ps1` y `estado.json`.
 
-**Asignado.** Cada tarjeta muestra a quién está asignado el ticket en Jira («tú» si es tu cuenta, o «Sin asignar»). Un ticket asignado a otra persona queda fuera del modo automático: solo se ejecuta con ▶ sobre ese ticket. El candado de la tarjeta cambia esto ticket a ticket.
+**Asignado.** Cada tarjeta muestra a quién está asignado el ticket en Jira («tú» si es tu cuenta, o «Sin asignar») y, en la misma fila, su estado en Jira (por ejemplo «Tareas por hacer»); el nombre ocupa el 70 % y lo que no cabe se ve al pasar el ratón. Un ticket asignado a otra persona queda fuera del modo automático: solo se ejecuta con ▶ sobre ese ticket. El candado de la tarjeta cambia esto ticket a ticket.
 
 **Tarjeta.** Además del candado, cada tarjeta tiene una fila con ▶ a la izquierda y ⏩ (ya lo he hecho yo) a la derecha y, abajo del todo, un icono de carpeta, que abre la del ticket, y uno de papelera, que lo quita del tablero conservando su carpeta (en «Mostrar quitados» la flecha lo devuelve).
 

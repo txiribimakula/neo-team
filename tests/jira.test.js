@@ -455,6 +455,9 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(at('review'), /title="Ya lo he hecho yo: pasar a Resueltos"/);
   assert.doesNotMatch(at('done'), /jira-done/, 'a solved ticket has no step left');
   assert.doesNotMatch(at('done'), /jira-card-actions/, 'a solved ticket has no row of actions');
+  const status = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, jiraStatus: 'Tareas por hacer', assignee: { name: 'Lucía Martín' } }] } }, null);
+  assert.match(status, /<span class="jira-card-foot"><span class="jira-assignee"[\s\S]*?Lucía Martín<\/span><\/span><span class="jira-card-end"><span class="tag jira-card-status" title="Estado en Jira: Tareas por hacer">Tareas por hacer<\/span>/, 'the status in Jira goes beside who has the ticket');
+  assert.doesNotMatch(status.match(/<span class="jira-card-meta">[\s\S]*?<\/article>/)[0], /Tareas por hacer/, 'and not in the bottom row');
   assert.doesNotMatch(at('review'), /jira-rewind/, 'there is no rewinding back');
   assert.match(cardHtml, /<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-open-folder" data-key="NEO-3"[^>]*><svg[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
   const archivedCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', showArchived: true, board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, archived: true }] } }, null);
@@ -808,7 +811,7 @@ test('an agent that lacks what it needs does not run, by hand or in the automati
 });
 
 test('who a ticket is assigned to is visible, and tickets of others stay out of the automatic mode', async t => {
-  assert.match(assigneeView({ name: 'Lucía Martín', me: false }), /<span class="jira-avatar"[^>]*>LM<\/span>Lucía Martín<\/span>/);
+  assert.match(assigneeView({ name: 'Lucía Martín', me: false }), /<span class="jira-avatar"[^>]*>LM<\/span><span class="jira-assignee-name">Lucía Martín<\/span><\/span>/);
   assert.match(assigneeView({ name: 'Pablo T', me: true }), /class="jira-assignee me"[\s\S]*Pablo T · tú/);
   assert.match(assigneeView(null), /Sin asignar/);
   assert.equal(autoLocked({ assignee: { me: false } }), true, 'assigned to someone else');
