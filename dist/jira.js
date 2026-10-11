@@ -91,8 +91,10 @@ export function priorityIcon(name) {
 }
 
 // When an agent gets stuck it asks; the answer is saved and the ticket resumes with it.
-function answerField(ticket, drafts = {}) {
-  return `<div class="jira-answer"><textarea data-jira-answer="${escape(ticket.key)}" data-focus="jira-answer:${escape(ticket.key)}" rows="2" maxlength="10000" placeholder="Tu respuesta" aria-label="Respuesta para el agente de ${escape(stageName(ticket.stage))}">${escape(drafts[ticket.key] ?? '')}</textarea><button class="button small" data-action="jira-answer" data-key="${escape(ticket.key)}" title="Guardar la respuesta y retomar el ticket (Ctrl+Enter)">Responder</button></div>`;
+// On the card, «Revisar» opens the ticket on its latest step, to read why it stopped before answering.
+function answerField(ticket, drafts = {}, onCard = false) {
+  const review = onCard ? `<button class="button small" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" title="Abrir el ticket para revisar por qué se paró">Revisar</button>` : '';
+  return `<div class="jira-answer"><textarea data-jira-answer="${escape(ticket.key)}" data-focus="jira-answer:${escape(ticket.key)}" rows="2" maxlength="10000" placeholder="Tu respuesta" aria-label="Respuesta para el agente de ${escape(stageName(ticket.stage))}">${escape(drafts[ticket.key] ?? '')}</textarea><div class="jira-answer-actions">${review}<button class="button small" data-action="jira-answer" data-key="${escape(ticket.key)}" title="Guardar la respuesta y retomar el ticket (Ctrl+Enter)">Responder</button></div></div>`;
 }
 // How easy the analysis found the ticket: three bars, as many lit as the harder of
 // reproducing it and fixing it allows. The details are in the tooltip.
@@ -180,7 +182,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
     <span class="jira-card-meta">${pills}<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-archive" data-key="${escape(ticket.key)}" data-archived="${!ticket.archived}" title="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero (su carpeta se conserva)'}" aria-label="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero'} ${escape(ticket.key)}" ${live ? 'disabled' : ''}>${ticket.archived ? RESTORE : TRASH}</button></span></span>
     ${live?.conversation === 'waiting' ? '<small class="jira-live jira-waiting">Esperando tu respuesta</small>'
       : live ? `<small class="jira-live" title="${escape(last?.message ?? '')}">${escape(last?.message ?? 'Iniciando…')}</small>`
-      : status === 'blocked' ? `<p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts)}`
+      : status === 'blocked' ? `<p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts, true)}`
       : queued ? '<small class="jira-await" title="Se ejecuta cuando termine el paso en curso">En cola</small>'
       : awaiting ? '<small class="jira-await">Espera tu OK ▶</small>' : ''}
     ${live || ticket.stage === 'done' ? '' : divergedChoice(ticket)}

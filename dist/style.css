@@ -524,7 +524,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-question{margin:0;font-size:13px;line-height:1.4;color:#7b2e26;overflow-wrap:anywhere;white-space:pre-wrap}
 .jira-answer{display:flex;flex-direction:column;gap:6px}
 .jira-answer textarea{font-size:13px;padding:6px 8px;min-height:52px;cursor:text}
-.jira-answer .button{align-self:flex-end}
+.jira-answer-actions{display:flex;justify-content:flex-end;gap:6px}.jira-answer-actions .button{flex:1 1 0;min-width:0;padding-left:6px;padding-right:6px}.jira-answer-actions .button:only-child{flex:none;padding-left:10px;padding-right:10px}
 .jira-blocked{display:flex;flex-direction:column;gap:8px}
 .jira-answers{margin:8px 0 0;font-size:13px}.jira-answers dt{color:var(--muted);margin-top:8px}.jira-answers dd{margin:2px 0 0;white-space:pre-wrap}
 .jira-key{font-weight:700;font-size:13px;color:var(--ink);text-decoration:none;white-space:nowrap}.jira-key:hover{text-decoration:underline}

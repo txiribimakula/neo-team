@@ -434,6 +434,9 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(html, /No falla con mis impresoras/);
   assert.match(html, /evidencias\/1\.png/, 'with the files of that step');
   assert.match(html, /<textarea data-jira-answer="NEO-3"[^>]*>Borrador<\/textarea>/, 'the answer field keeps the draft');
+  assert.doesNotMatch(html, />Revisar<\/button>/, 'inside the ticket there is nothing to open');
+  const stuckCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
+  assert.match(stuckCard, /<p class="jira-question">¿Qué impresora\?<\/p><div class="jira-answer"><textarea[\s\S]*?<\/textarea><div class="jira-answer-actions"><button class="button small" data-action="jira-open-ticket" data-key="NEO-3"[^>]*>Revisar<\/button><button class="button small" data-action="jira-answer" data-key="NEO-3"/, 'on the card, «Revisar» opens the ticket to see why it stopped');
   const head = ticketHead(board, 'NEO-3', false);
   assert.match(head, /^<div class="jira-head"><h2 id="modal-title"><a class="jira-title-link" href="https:\/\/e\/browse\/NEO-3" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">NEO-3 · Tres<\/a><\/h2>/, 'the key and title open it in Jira');
   assert.match(head, /<p class="jira-meta">[\s\S]*<span>Reproducir<\/span><span>Necesita ayuda<\/span><\/p><\/div>$/, 'what describes it goes next to the title');
