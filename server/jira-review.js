@@ -92,15 +92,14 @@ export async function publishCode({ path, remote, branch, base, tree, message })
 export const SEVERITIES = ['blocker', 'major', 'minor', 'suggestion', 'check'];
 export const SEVERITY_LABELS = { blocker: 'Blocker', major: 'Major', minor: 'Minor', suggestion: 'Suggestion', check: 'Check' };
 export const ANSWERS = ['changed', 'declined', 'verify'];
-const ANSWER_LABELS = { changed: 'Changed', declined: 'Not changed', verify: 'Left for the manual verification' };
+const ANSWER_LABELS = { changed: 'Changed', declined: 'Not changed', verify: 'Left for the manual verification', person: 'Done by hand' };
 // Azure DevOps thread status after each answer.
 const THREAD_STATUS = { changed: 'fixed', declined: 'wontFix', verify: 'active' };
 export const severityOf = c => c.severity === 'check' && c.manual ? 'Check (manual test)' : SEVERITY_LABELS[c.severity] ?? 'Minor';
 
-// Where each comment is: waiting for the fix, left for the verification, answered,
-// or withdrawn with its rewound review.
+// Where each comment is: waiting for the fix, left for the verification or answered
+// (also by the person, with ⏩).
 export function commentState(comment) {
-  if (comment.withdrawn) return 'withdrawn';
   const last = (comment.answers ?? []).at(-1);
   if (!last) return 'open';
   if (last.action === 'verify') return 'deferred';
@@ -134,7 +133,7 @@ const answerStatus = answer => answer.action === 'checked' ? (answer.ok ? 'fixed
 
 // The comments to answer and the checks to do, as the agents read them.
 export function commentsBlock(comments, { answers = true } = {}) {
-  return comments.map(c => `- ${c.id} [${severityOf(c)}] ${c.file ? `${c.file}${c.line ? `:${c.line}` : ''}` : 'general'}${c.replyTo ? ` (about ${c.replyTo})` : ''}: ${c.text.replace(/\n/g, ' ')}${answers && c.answers?.length ? `\n${c.answers.map(a => `  ${a.stage === 'verify' ? 'Verification' : 'Fix'}: ${answerText(a).replace(/\*\*/g, '')}`).join('\n')}` : ''}${c.withdrawn ? ' (withdrawn)' : ''}`).join('\n');
+  return comments.map(c => `- ${c.id} [${severityOf(c)}] ${c.file ? `${c.file}${c.line ? `:${c.line}` : ''}` : 'general'}${c.replyTo ? ` (about ${c.replyTo})` : ''}: ${c.text.replace(/\n/g, ' ')}${answers && c.answers?.length ? `\n${c.answers.map(a => `  ${a.stage === 'verify' ? 'Verification' : 'Fix'}: ${answerText(a).replace(/\*\*/g, '')}`).join('\n')}` : ''}`).join('\n');
 }
 
 // Publishes what is still only local: the comments of the review (each in its own
@@ -144,7 +143,7 @@ export function commentsBlock(comments, { answers = true } = {}) {
 export async function publishPending({ hub, review, changed = [], save, onActivity = () => {} }) {
   const pr = review.pullRequest, target = { organization: pr.organization, project: pr.project, repositoryId: pr.repositoryId, pullRequestId: pr.id };
   for (const comment of review.comments) {
-    if (comment.posted || comment.withdrawn) continue;
+    if (comment.posted) continue;
     const content = commentText(comment, changed);
     const thread = comment.thread
       ? (await hub.reply({ ...target, threadId: comment.thread, content, status: 'active' }), comment.thread)

@@ -46,7 +46,7 @@ test('review comments are short, with their severity, and each one is answered',
   assert.equal(commentText(comments[0], ['src/A.cs']), '**Major:** Null when the list is empty.');
   assert.equal(commentText(comments[1], ['src/A.cs']), '**Check (manual test):** `src/B.cs:3` · Check the export.', 'a file outside the pull request is named in the text');
   assert.equal(commentText(comments[2]), '**Suggestion:** Rename it.');
-  assert.deepEqual([{}, { answers: [{ action: 'changed' }] }, { answers: [{ action: 'verify' }] }, { answers: [{ action: 'verify' }, { action: 'checked', ok: false }] }, { withdrawn: true }].map(commentState), ['open', 'answered', 'deferred', 'open', 'withdrawn']);
+  assert.deepEqual([{}, { answers: [{ action: 'changed' }] }, { answers: [{ action: 'verify' }] }, { answers: [{ action: 'verify' }, { action: 'checked', ok: false }] }, { answers: [{ action: 'person' }] }].map(commentState), ['open', 'answered', 'deferred', 'open', 'answered']);
 
   const open = [{ id: 'c1', manual: false }, { id: 'c2', manual: true }];
   assert.match(reviewDuties('fix', 'fixed', { answers: [{ id: 'c1', action: 'changed', answer: 'Done.' }] }, { open }), /Missing: c2/, 'every comment has to be answered');
@@ -175,14 +175,12 @@ test('Revisar publishes the fix as a draft pull request, and its comments go bac
   assert.deepEqual([ticket.stage, ticket.status, await stages()], ['done', 'done', ['fix:fixed', 'verify:verified', 'review:commented', 'fix:fixed', 'verify:verified', 'review:commented', 'fix:fixed', 'review:approved']]);
   assert.ok(ticket.review.comments.every(c => commentState(c) === 'answered' && c.posted && c.answers.every(a => a.posted)), 'every comment answered and published');
 
-  // Rewinding a fix owes its answers again; rewinding a review withdraws its comments.
-  await pipeline.rewind('NEO-1');
-  await pipeline.rewind('NEO-1');
+  // A fix done by hand (⏩) answers what it owed as the person's, without publishing it.
+  await tickets.update('NEO-1', t => ({ ...t, stage: 'fix', status: 'pending', review: { ...t.review, comments: [...t.review.comments, { id: 'c4', severity: 'minor', text: 'Typo.', thread: 300, posted: true, answers: [] }] } }));
+  const sent = calls.length;
+  await pipeline.markDone('NEO-1', 'Fixed it in the PR myself.');
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.review.comments.find(c => c.id === 'c3').answers], ['fix', []]);
-  await pipeline.rewind('NEO-1');
-  ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.review.comments.find(c => c.id === 'c3').withdrawn], ['review', true]);
+  assert.deepEqual([ticket.stage, ticket.review.comments.at(-1).answers.map(a => [a.action, a.text, a.posted]), commentState(ticket.review.comments.at(-1)), calls.length], ['verify', [['person', 'Fixed it in the PR myself.', true]], 'answered', sent]);
   assert.ok(await stat(join(folder, 'revision-1.diff')));
 
   // The card links to the pull request.

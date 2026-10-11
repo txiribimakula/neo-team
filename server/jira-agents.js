@@ -156,8 +156,6 @@ export class TicketStore {
     await writeAtomic(this.learningFile(scope), String(text ?? '').slice(0, 200000));
   }
 }
-// The step rewinding would undo: the latest one not rewound yet, other than collecting.
-export const rewindable = ticket => { const index = (ticket.history ?? []).findLastIndex(h => !h.rewound); return index >= 0 && ticket.history[index].stage !== 'collect' ? index : -1; };
 export const newTicket = meta => ({ ...meta, stage: 'collect', status: 'pending', iterations: 0, reproduceAttempts: 0, history: [], inFilter: true });
 
 // Reads the filter and downloads the tickets that are new or changed in Jira. A
@@ -341,7 +339,7 @@ export const PAIRED = { reproduce: 'verify', verify: 'reproduce' };
 // The review of the ticket as the agents see it: the draft pull request, the
 // comments the fix has to answer, the checks left for the verification and, for the
 // reviewer, every comment so far and the diffs to review.
-const reviewOf = review => review ? { pullRequest: review.pullRequest ?? null, all: (review.comments ?? []).filter(c => !c.withdrawn || c.posted), open: commentsIn(review, 'open'), deferred: commentsIn(review, 'deferred') } : { pullRequest: null, all: [], open: [], deferred: [] };
+const reviewOf = review => review ? { pullRequest: review.pullRequest ?? null, all: review.comments ?? [], open: commentsIn(review, 'open'), deferred: commentsIn(review, 'deferred') } : { pullRequest: null, all: [], open: [], deferred: [] };
 export function stagePrompt({ stage, ticket, folder, files, settings, worktree = null, lessons = {}, previous = {}, diff = null }) {
   const review = reviewOf(ticket.review), pr = review.pullRequest ? `the draft pull request ${review.pullRequest.url}` : 'the draft pull request';
   const fileList = files.map(f => `- ${f}`).join('\n') || '(none)';
@@ -1023,29 +1021,34 @@ Read what you need from them and the ticket files before answering.`;
       return publish ? { ...rest, posted: true } : { ...rest, declined: true };
     }) }));
   }
-  // Rewinding undoes the latest step: the ticket goes back to that step's column,
-  // waiting to do it again. The step stays in the history, marked, with its log and
-  // report, but the agents no longer take it into account.
-  async rewind(key) {
+  // ⏩ Ya lo he hecho yo: the person did the step of the ticket's column. It is
+  // recorded as theirs, with what they wrote as its report, and the ticket goes on as
+  // if the agent had succeeded (the first outcome of each step); later agents read that
+  // report. The review comments the step owed count as answered by the person.
+  async markDone(key, note = '') {
     checkKey(key);
     if (this.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
     const ticket = await this.tickets.get(key);
     if (!ticket) throw fail('El ticket ya no está disponible.', 404);
-    const index = rewindable(ticket);
-    if (index < 0) throw fail('No hay ningún paso que rebobinar.', 409);
-    const undone = ticket.history[index];
-    this.feed.add({ family: 'person', key, stage: undone.stage, title: `Rebobinado: ${stageOf(undone.stage)?.name ?? undone.stage} ${undone.number ?? ''}`.trim() });
+    // Building is the start of Verificar: done by hand, the verification is.
+    const stage = stageOf(ticket.stage === 'build' ? 'verify' : ticket.stage);
+    if (!stage) throw fail('Este ticket ya está resuelto.', 409);
+    const settings = await this.settings(), outcome = stage.outcomes[0], at = new Date().toISOString();
+    const number = (ticket.history ?? []).filter(h => h.stage === stage.id).length + 1, report = stage.report(number);
+    const text = String(note ?? '').trim().slice(0, 10000);
+    await writeAtomic(join(this.tickets.folder(key), report), `# ${stage.name} · ${key} (hecho por una persona)\n\nEste paso lo hizo una persona a mano, no el agente.${text ? `\n\n${text}` : ''}\n`);
+    const log = logName(stage.id, number), activity = [{ at: Date.now(), kind: 'person', message: `Hecho a mano por ti: ${stage.name} pasa a ${OUTCOME_LABELS[outcome]}.${text ? `\n${text}` : ''}` }];
+    await this.writeLog(key, log, activity);
+    this.feed.add({ family: 'person', key, stage: stage.id, title: `Hecho por ti: ${stage.name}`, ...(text ? { detail: text } : {}) });
+    const entry = { stage: stage.id, number, outcome, report, by: 'person', question: null, model: null, usage: null, startedAt: at, finishedAt: at, error: null, log, activity };
+    const owed = { fix: 'open', verify: 'deferred' }[stage.id];
     await this.tickets.update(key, t => {
-      // A step undone no longer counts: its comment is not published either.
-      const entry = t.history[index], history = t.history.map((h, i) => { if (i !== index) return h; const { pendingComment, ...rest } = h; return { ...rest, rewound: new Date().toISOString(), ...(pendingComment ? { declined: true } : {}) }; });
-      // The comments of an undone review need no answer, and the answers of an undone
-      // fix or verification are owed again. What reached the pull request stays there.
-      const review = t.review ? { ...t.review, comments: (t.review.comments ?? []).map(c => entry.stage === 'review' && c.round === entry.number ? { ...c, withdrawn: true }
-        : { ...c, answers: (c.answers ?? []).filter(a => !(a.stage === entry.stage && a.number === entry.number)) }) } : t.review;
-      return { ...t, stage: entry.stage, status: 'pending', note: null, question: null, lastOutcome: history.findLast(h => !h.rewound)?.outcome ?? null, history, ...(review ? { review } : {}),
-        ...(entry.stage === 'fix' ? { iterations: Math.max(0, (t.iterations ?? 0) - 1) } : {}), ...(entry.stage === 'reproduce' ? { reproduceAttempts: Math.max(0, (t.reproduceAttempts ?? 0) - 1) } : {}) };
+      const counted = { ...t, ...(stage.id === 'fix' ? { iterations: (t.iterations ?? 0) + 1 } : {}), ...(stage.id === 'reproduce' ? { reproduceAttempts: (t.reproduceAttempts ?? 0) + 1 } : {}) };
+      const review = owed && t.review ? { ...t.review, comments: (t.review.comments ?? []).map(c => commentState(c) === owed ? { ...c, answers: [...(c.answers ?? []), { stage: stage.id, number, action: 'person', text: text || 'Done by hand.', at, posted: true }] } : c) } : null;
+      return { ...counted, ...nextAfter(counted, stage.id, outcome, settings.maxIterations ?? 3), note: null, question: null, lastOutcome: outcome, history: [...(t.history ?? []), entry], ...(review ? { review } : {}) };
     });
     this.queue = this.queue.filter(q => q.key !== key);
+    if (this.auto || this.focus === key) void this.loop();
   }
   async nextKey() {
     while (this.queue.length) {

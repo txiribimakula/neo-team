@@ -334,32 +334,33 @@ test('the build command runs in its folder and stops when asked', async t => {
   assert.deepEqual([(await slow).ok, (await slow).stopped], [false, true]);
 });
 
-test('rewinding undoes the latest step and the ticket does it again', async t => {
+test('⏩ records the step as done by the person and the ticket goes on', async t => {
   const root = await temp(t), tickets = new TicketStore(root);
-  const step = (stage, number, outcome, report) => ({ stage, number, outcome, report, finishedAt: '2026-10-10T10:00:00Z' });
-  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'verify', status: 'pending', iterations: 1, reproduceAttempts: 1, lastOutcome: 'fixed',
-    history: [step('collect', 1, 'ok', 'resumen.md'), step('analyze', 1, 'analyzed', 'analisis.md'), step('reproduce', 1, 'reproduced', 'reproduccion-1.md'), step('fix', 1, 'fixed', 'solucion-1.md')] }));
+  await tickets.update('NEO-1', () => ({ ...newTicket({ summary: 'Falla' }), stage: 'fix', status: 'blocked', question: '¿Dónde?', history: [{ stage: 'collect', number: 1, outcome: 'ok', report: 'resumen.md' }] }));
   const runs = [];
-  const agent = { run: async options => { runs.push(options); return { outcome: 'fixed', report: 'Otra vez', model: null, usage: null }; }, abort: async () => {} };
-  const pipeline = new JiraPipeline({ tickets, agent, demo: true, settings: async () => ({ repository: '/r', maxIterations: 3, models: {}, modes: { verify: 'off' } }) });
-  await tickets.update('NEO-1', t => ({ ...t, history: t.history.map((h, i) => i === 3 ? { ...h, pendingComment: '*Neo Team · agente Solucionar:* Corregido' } : h) }));
-  await pipeline.rewind('NEO-1');
+  const agent = { run: async options => { runs.push(options); return { outcome: 'verified', report: 'Bien', model: null, usage: null }; }, abort: async () => {} };
+  const pipeline = new JiraPipeline({ tickets, agent, demo: true, settings: async () => ({ repository: '/r', maxIterations: 3, models: {}, modes: {} }) });
+  await pipeline.markDone('NEO-1', '  Corregido en Exportador.cs.  ');
   let ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.history[3].pendingComment, ticket.history[3].declined], [undefined, true], 'the comment of the step undone is not published');
-  assert.deepEqual([ticket.stage, ticket.status, ticket.iterations, ticket.lastOutcome], ['fix', 'pending', 0, 'reproduced'], 'back to the column of the step undone');
-  assert.deepEqual(ticket.history.map(h => [h.stage, !!h.rewound]), [['collect', false], ['analyze', false], ['reproduce', false], ['fix', true]], 'the step stays in the history, marked');
-  // The agent does it again without the report of the step undone.
-  await pipeline.enqueue('NEO-1');
-  for (let i = 0; i < 50 && (await tickets.get('NEO-1')).history.length < 5; i++) await new Promise(done => setTimeout(done, 10));
-  assert.doesNotMatch(runs[0].prompt, /solucion-1\.md/);
-  assert.deepEqual((await tickets.get('NEO-1')).history.slice(4).map(h => [h.stage, h.number, h.report]), [['fix', 2, 'solucion-2.md']], 'numbered after the one undone');
-  for (let i = 0; i < 100 && (pipeline.looping || pipeline.running); i++) await new Promise(done => setTimeout(done, 10));
-  await pipeline.rewind('NEO-1'); await pipeline.rewind('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.question, ticket.iterations, ticket.lastOutcome], ['verify', 'pending', null, 1, 'fixed'], 'it goes on as if the agent had succeeded, even when it was stuck');
+  assert.deepEqual([ticket.history.at(-1).by, ticket.history.at(-1).report, ticket.history.at(-1).pendingComment], ['person', 'solucion-1.md', undefined], 'recorded as the person\'s, and nothing to publish in Jira');
+  assert.match(await readFile(join(root, 'NEO-1', 'solucion-1.md'), 'utf8'), /hecho por una persona[\s\S]*\n\nCorregido en Exportador\.cs\.\n$/);
+  assert.match(await readFile(join(root, 'NEO-1', 'registros', 'solucionar-1.log'), 'utf8'), /Hecho a mano por ti: Solucionar pasa a Corregido/);
+  assert.ok(pipeline.feed.recent().some(item => item.family === 'person' && item.key === 'NEO-1' && item.title === 'Hecho por ti: Solucionar'));
+  // The next agent reads that report, knowing a person made the fix.
+  await pipeline.runStage('NEO-1');
+  assert.match(runs[0].prompt, /Latest fix report: .*solucion-1\.md[\s\S]*The latest fix was made by a person/);
   ticket = await tickets.get('NEO-1');
-  assert.deepEqual([ticket.stage, ticket.reproduceAttempts, ticket.iterations], ['reproduce', 0, 0]);
-  await pipeline.rewind('NEO-1');
-  assert.equal((await tickets.get('NEO-1')).stage, 'analyze');
-  await assert.rejects(pipeline.rewind('NEO-1'), /No hay ningún paso que rebobinar/, 'collecting is not undone');
+  assert.equal(ticket.stage, 'review');
+  await pipeline.markDone('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.status, ticket.history.at(-1).outcome], ['done', 'done', 'approved'], 'the review too: solved');
+  await assert.rejects(pipeline.markDone('NEO-1'), /ya está resuelto/);
+  // Waiting for its build, it is the verification that is done.
+  await tickets.update('NEO-1', t => ({ ...t, stage: 'build', status: 'blocked' }));
+  await pipeline.markDone('NEO-1');
+  ticket = await tickets.get('NEO-1');
+  assert.deepEqual([ticket.stage, ticket.history.at(-1).stage, ticket.history.at(-1).outcome], ['review', 'verify', 'verified']);
 });
 
 test('each ticket is fixed in its own worktree and branch', async t => {
@@ -442,15 +443,18 @@ test('the ticket popup has a tab per completed step and the answer field while s
   const first = ticketDetail(board, detail, false, {}, 'step-0');
   assert.match(first, /Resumen del ticket/);
   assert.match(first, /En Jira/, 'and whether it was published in Jira');
-  assert.doesNotMatch(html, /data-action="jira-(rewind|run|autolock|archive|open-folder)"|data-jira-move/, 'the popup leaves every action to the card, and has no column picker');
+  assert.doesNotMatch(html, /data-action="jira-(done|run|autolock|archive|open-folder)"|data-jira-move/, 'the popup leaves every action to the card, and has no column picker');
   const byHand = ticketDetail(board, { ...detail, history: [{ ...detail.history[0], by: 'person', model: null }] }, false, {}, 'step-0');
   assert.match(byHand, /Hecho por ti/);
   assert.match(ticketDetail(board, { ...detail, history: [{ ...detail.history[0], rewound: '2026-10-10T10:00:00Z' }] }, false, {}, 'step-0'), /<span class="pill" title="Deshecho [^"]+">Rebobinado<\/span>/);
   const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
-  assert.doesNotMatch(cardHtml, /data-action="jira-done"/, 'there is no «done by hand» any more');
-  const rewindCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, history: [{ stage: 'collect', number: 1 }, { stage: 'build', number: 2, outcome: 'build_failed' }, { stage: 'fix', number: 3, rewound: '2026-10-10' }] }] } }, null);
-  assert.match(rewindCard, /class="icon-button jira-rewind" data-action="jira-rewind" data-key="NEO-3" title="Rebobinar: deshacer Compilar 2 y volver a Verificar"/, 'the latest step not undone yet, in the column it shows in');
-  assert.doesNotMatch(jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, history: [{ stage: 'collect', number: 1 }] }] } }, null), /jira-rewind/, 'collecting is not rewound');
+  assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, '⏩ moves the ticket on, as done by hand');
+  assert.match(cardHtml, /<span class="jira-card-meta"><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button>[\s\S]*?<span class="jira-card-tools">/, '▶ opens the last row, on the left, with the other icons on the right');
+  const at = stage => jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, stage, status: stage === 'done' ? 'done' : 'pending' }] } }, null);
+  assert.match(at('build'), /title="Ya lo he hecho yo: pasar a Revisar"/, 'waiting for its build, the verification is the step done');
+  assert.match(at('review'), /title="Ya lo he hecho yo: pasar a Resueltos"/);
+  assert.doesNotMatch(at('done'), /jira-done/, 'a solved ticket has no step left');
+  assert.doesNotMatch(at('review'), /jira-rewind/, 'there is no rewinding back');
   assert.match(cardHtml, /<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-open-folder" data-key="NEO-3"[^>]*><svg[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
   const archivedCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', showArchived: true, board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, archived: true }] } }, null);
   assert.match(archivedCard, /data-action="jira-archive" data-key="NEO-3" data-archived="false" title="Volver al tablero"/, 'and comes back the same way');

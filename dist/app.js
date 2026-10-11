@@ -1791,7 +1791,11 @@ const actions = {
   },
   'jira-general-reset': () => jiraAction('/api/jira-general-reset', {}),
   'jira-pause': el => jiraAction('/api/jira-pause', { on: el.dataset.on === 'true' }),
-  'jira-rewind': async el => { await jiraAction('/api/jira-rewind', { key: el.dataset.key }); jiraSeen = ''; render(); },
+  'jira-done': async el => {
+    const key = el.dataset.key;
+    await jiraAction('/api/jira-done', { key, note: (jiraUi.answers[key] ?? '').trim() });
+    delete jiraUi.answers[key]; jiraSeen = ''; render();
+  },
   'jira-comment': async el => {
     const publish = el.dataset.publish === 'true';
     if (!ticketOpen()) modal.close();
