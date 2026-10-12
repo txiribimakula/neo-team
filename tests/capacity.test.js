@@ -193,6 +193,14 @@ test('downloading one iteration overwrites local capacity and keeps each local d
   assert.equal(next.capacityDownloads[iteration.id],undefined,'every difference validated');
   assert.equal(capacityEntry(next.capacities[iteration.id],'marcos').activities[0].capacityPerDay,2);
   assert.throws(()=>chooseDownloadedCapacity(next,iteration.id,'marcos','azure'),/No hay diferencias/);
+  // Every difference at once.
+  const all=await downloadCapacity(workspace,iteration.id,azure), mine=structuredClone(all);
+  chooseDownloadedCapacity(all,iteration.id,'*','azure');
+  assert.equal(all.capacityDownloads[iteration.id],undefined);assert.equal(all.capacityDrafts[iteration.id],undefined);
+  chooseDownloadedCapacity(mine,iteration.id,'*','local');
+  assert.equal(mine.capacityDownloads[iteration.id],undefined);
+  assert.deepEqual(Object.keys(mine.capacityDrafts[iteration.id]).sort(),['ana','marcos']);
+  assert.throws(()=>chooseDownloadedCapacity(mine,iteration.id,'*','azure'),/No hay diferencias/);
   // Setting another value also settles the difference.
   const again=await downloadCapacity(next,iteration.id,azure);
   assert.ok(again.capacityDownloads[iteration.id].local.ana);

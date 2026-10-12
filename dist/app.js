@@ -1410,7 +1410,9 @@ function capacityControls() {
   if(!iteration || (ws?.mode!=='azure' && !previous)) return '';
   const copy=previous ? `<button class="button small" data-action="copy-capacity" title="Copia las horas al día de cada persona en ${escape(previous.name)}; los días libres no cambian">Copiar de ${escape(previous.name)}</button>` : '';
   const download=ws.mode==='azure' ? `<button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button>` : '';
-  return `<div class="workspace-controls">${copy}${download}</div>${download ? '<div id="capacity-download-progress" hidden></div>' : ''}`;
+  const pending=Object.keys(ws.capacityDownloads?.[iteration.id]?.local ?? {}).length;
+  const choices=pending ? `<button class="button small primary" data-action="download-choice-all" data-choice="azure">Validar todo Azure (${pending})</button><button class="button small" data-action="download-choice-all" data-choice="local">Quedarme con todo lo mío</button>` : '';
+  return `<div class="workspace-controls">${choices}${copy}${download}</div>${download ? '<div id="capacity-download-progress" hidden></div>' : ''}`;
 }
 async function copyCapacity() {
   const ws=state.workspace;
@@ -1962,6 +1964,11 @@ const actions = {
   'toggle-backlog-width':()=>{backlogWide=!backlogWide;try{localStorage.setItem('neo-team:backlog-wide',backlogWide ? '1' : '0');}catch{/* Kept for this visit only. */}updatePlanningView();$('[data-action="toggle-backlog-width"]')?.focus({preventScroll:true});},
   'assistant-clear':()=>{const ui=assistantOf(tab);Object.assign(ui,{asked:'',reply:'',changes:[],error:''});updateAssistant(tab);$('#assistant-prompt')?.focus({preventScroll:true});},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
+  'download-choice-all':async el=>{
+    const choice=el.dataset.choice, owners=Object.keys(state.workspace.capacityDownloads?.[selectedIteration]?.local ?? {});
+    await trackCapacity(owners,()=>request('/api/capacity-download-choice',{iterationId:selectedIteration,key:'*',choice}));
+    toast(choice==='azure' ? `Validada la capacidad de Azure DevOps de ${plural(owners.length,'diferencia','diferencias')}.` : 'Recuperada toda tu capacidad local. Pendiente de sincronizar.');
+  },
   'download-choice':async el=>{
     const choice=el.dataset.choice;
     await trackCapacity(el.dataset.owner,()=>request('/api/capacity-download-choice',{iterationId:selectedIteration,key:el.dataset.owner,choice}));

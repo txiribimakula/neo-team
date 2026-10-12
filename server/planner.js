@@ -304,7 +304,14 @@ function clearDownloadedDifference(workspace, iterationId, key) {
   delete download.local[key];
   if (!Object.keys(download.local).length) delete workspace.capacityDownloads[iterationId];
 }
+// key '*' applies the same choice to every difference of the iteration.
 export function chooseDownloadedCapacity(workspace, iterationId, key, choice) {
+  if (key === '*') {
+    const keys = Object.keys(workspace?.capacityDownloads?.[iterationId]?.local ?? {});
+    if (!keys.length) throw new Error('No hay diferencias de capacidad por validar.');
+    for (const each of keys) chooseDownloadedCapacity(workspace, iterationId, each, choice);
+    return;
+  }
   const mine = workspace?.capacityDownloads?.[iterationId]?.local?.[key];
   if (!mine) throw new Error('No hay diferencias de capacidad por validar para esta persona.');
   if (!['azure', 'local'].includes(choice)) throw new Error('Elige la capacidad de Azure DevOps o la local.');
