@@ -1,6 +1,7 @@
 import { availableImportRules, isImportType } from './import-query.js';
 import { normalizeItem } from './planner.js';
 import { boardItem, myIterationBoard } from './my-iteration.js';
+import { maintenanceIssue } from './maintenance.js';
 export function createDemo() {
   const monday = new Date(); monday.setUTCHours(0,0,0,0); monday.setUTCDate(monday.getUTCDate() + ((8 - monday.getUTCDay()) % 7 || 7));
   const date = offset => new Date(+monday + offset * 86400000).toISOString();
@@ -92,19 +93,27 @@ export function applyDemoImportRules(workspace, section) {
 }
 
 export const DEMO_STATES = [['New', 'proposed'], ['Active', 'inprogress'], ['Ready for Test', 'inprogress'], ['Resolved', 'resolved'], ['Closed', 'completed'], ['Removed', 'removed']].map(([name, category]) => ({ name, category }));
-export function demoFunctionalIssues(settings) {
+export const DEMO_MAINTENANCE_FIELDS = [['System.State', 'State', 'string'], ['System.Reason', 'Reason', 'string'], ['System.AssignedTo', 'Assigned To', 'identity'], ['System.CreatedBy', 'Created By', 'identity'], ['System.AreaPath', 'Area Path', 'treePath'], ['System.IterationPath', 'Iteration Path', 'treePath'], ['Microsoft.VSTS.Common.Priority', 'Priority', 'integer'], ['Microsoft.VSTS.Common.Severity', 'Severity', 'string'], ['Custom.Cliente', 'Cliente', 'string'], ['System.Tags', 'Tags', 'plainText'], ['System.CreatedDate', 'Created Date', 'dateTime'], ['System.ChangedDate', 'Changed Date', 'dateTime']].map(([ref, name, type]) => ({ ref, name, type }));
+export function demoFunctionalIssues(settings, { includeClosed = false } = {}) {
   const day = offset => new Date(Date.now() - offset * 86400000).toISOString();
   const issues = [
-    [2101, 'El informe mensual no incluye los proyectos archivados', 'Active', 'Ana García', 1, 1, ['Informes']],
-    [2107, 'El aviso de sesión caducada aparece dos veces', 'Active', 'Marcos Ruiz', 2, 0, ['Sesión']],
-    [2104, 'La búsqueda ignora las tildes en los nombres', 'New', '', 2, 3, ['Búsqueda']],
-    [2110, 'Los filtros guardados se pierden al cambiar de equipo', 'New', 'Lucía Martín', 2, 6, []],
-    [2112, 'La exportación a CSV duplica la cabecera', 'Resolved', 'David López', 2, 2, ['Exportación']],
-    [2113, 'Texto cortado en el menú en pantallas pequeñas', 'New', '', 3, 9, ['Móvil']],
-    [2098, 'El logo no se ve en modo oscuro', 'Closed', 'Ana García', 3, 15, []],
-  ].filter(([, , state]) => !settings.closedStates.includes(state))
-    .map(([id, title, state, assignedTo, priority, changed, tags]) => ({ id, title, state, category: settings.states.find(s => s.name === state)?.category ?? '', assignedTo, areaPath: 'Neo Platform\\Producto', iterationPath: 'Neo Platform', priority, createdAt: day(changed + 20), changedAt: day(changed), tags }));
-  return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', issues };
+    [2101, 'El informe mensual no incluye los proyectos archivados', 'Active', 'Ana García', 1, 1, ['Informes'], '2 - High', 'Acme', 'Producto'],
+    [2107, 'El aviso de sesión caducada aparece dos veces', 'Active', 'Marcos Ruiz', 2, 0, ['Sesión'], '3 - Medium', 'Globex', 'Plataforma'],
+    [2104, 'La búsqueda ignora las tildes en los nombres', 'New', '', 2, 3, ['Búsqueda'], '3 - Medium', 'Acme', 'Producto'],
+    [2110, 'Los filtros guardados se pierden al cambiar de equipo', 'New', 'Lucía Martín', 2, 6, [], '2 - High', 'Initech', 'Producto'],
+    [2112, 'La exportación a CSV duplica la cabecera', 'Resolved', 'David López', 2, 2, ['Exportación'], '3 - Medium', 'Globex', 'Plataforma'],
+    [2113, 'Texto cortado en el menú en pantallas pequeñas', 'New', '', 3, 9, ['Móvil'], '4 - Low', 'Acme', 'Producto'],
+    [2115, 'La fecha de entrega se muestra en UTC', 'Ready for Test', 'Ana García', 2, 4, ['Fechas'], '3 - Medium', 'Initech', 'Plataforma'],
+    [2116, 'El total del pedido no suma los descuentos', 'Ready for Test', 'Marcos Ruiz', 1, 1, ['Pedidos'], '1 - Critical', 'Acme', 'Producto'],
+    [2118, 'El enlace de recuperar contraseña caduca al instante', 'Active', 'Lucía Martín', 1, 0, ['Sesión'], '1 - Critical', 'Globex', 'Plataforma'],
+    [2098, 'El logo no se ve en modo oscuro', 'Closed', 'Ana García', 3, 15, [], '4 - Low', 'Acme', 'Producto'],
+    [2095, 'Las notificaciones llegan duplicadas', 'Closed', 'David López', 2, 20, ['Avisos'], '2 - High', 'Initech', 'Plataforma'],
+  ].filter(([, , state]) => includeClosed || !settings.closedStates.includes(state))
+    .map(([id, title, state, assignedTo, priority, changed, tags, severity, client, area]) => {
+      const raw = { id, fields: { 'System.Title': title, 'System.State': state, 'System.Reason': state === 'New' ? 'New defect reported' : `Moved to ${state}`, 'System.AssignedTo': assignedTo ? { displayName: assignedTo } : undefined, 'System.CreatedBy': { displayName: id % 2 ? 'Soporte' : 'Lucía Martín' }, 'System.AreaPath': `Neo Platform\\${area}`, 'System.IterationPath': 'Neo Platform', 'Microsoft.VSTS.Common.Priority': priority, 'Microsoft.VSTS.Common.Severity': severity, 'Custom.Cliente': client, 'System.Tags': tags.join('; '), 'System.CreatedDate': day(changed + 20), 'System.ChangedDate': day(changed) } };
+      return maintenanceIssue(raw, settings.states, DEMO_MAINTENANCE_FIELDS);
+    });
+  return { type: settings.type, states: settings.states, closedStates: settings.closedStates, verifyStates: settings.verifyStates ?? [], includeClosed, fields: DEMO_MAINTENANCE_FIELDS, fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', issues };
 }
 
 // My iteration in the example: Ana García's items in the current iteration.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reviewsView, publishConfirmation } from '../dist/reviews.js';
-import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from '../dist/maintenance.js';
+import { maintenanceView, filterMaintenance, resetMaintenanceFilters, toggleMaintenanceState, addMaintenanceCondition, removeMaintenanceCondition, setMaintenanceView } from '../dist/maintenance.js';
 
 const review = () => ({
   id:'review-1', mode:'demo', repository:{name:'web'},
@@ -46,7 +46,7 @@ test('maintenance searches ignore accents, report empty filters and can reset', 
   const snapshot={demo:true,type:'Issue',issues:[{id:7,title:'Revisión del área',state:'Active',assignedTo:'Ana García',areaPath:'Equipo',tags:[],priority:2}]};
   filterMaintenance(snapshot,'text','  garcia  ');
   assert.match(target.innerHTML,/Revisión del área/);
-  filterMaintenance(snapshot,'state','New');
+  toggleMaintenanceState(snapshot,'New');
   assert.match(target.innerHTML,/Mostrar todos los elementos/);
   assert.doesNotMatch(target.innerHTML,/<tbody>/);
   resetMaintenanceFilters();
@@ -54,3 +54,34 @@ test('maintenance searches ignore accents, report empty filters and can reset', 
   assert.match(html,/Revisión del área/);
   assert.match(html,/Limpiar filtros/);
 });
+test('maintenance colors states by group, filters by any field and groups by person', t => {
+  const target={innerHTML:''};
+  const original=globalThis.document;
+  globalThis.document={querySelector:()=>target};
+  t.after(()=>{globalThis.document=original;resetMaintenanceFilters();setMaintenanceView('list');});
+  const states=[{name:'New',category:'proposed'},{name:'Active',category:'inprogress'},{name:'Ready for Test',category:'inprogress'},{name:'Resolved',category:'resolved'},{name:'Closed',category:'completed'}];
+  const issue=(id,state,assignedTo,cliente)=>({id,title:`Elemento ${id}`,state,assignedTo,areaPath:'Equipo',tags:[],priority:2,values:{'System.State':state,'Custom.Cliente':cliente}});
+  const snapshot={demo:true,type:'Issue',states,closedStates:['Closed'],verifyStates:['Ready for Test','Resolved'],includeClosed:true,fields:[{ref:'System.State',name:'State',type:'string'},{ref:'Custom.Cliente',name:'Cliente',type:'string'}],
+    issues:[issue(1,'New','',''),issue(2,'Active','Ana García','Acme'),issue(3,'Ready for Test','Ana García','Globex'),issue(4,'Resolved','Marcos Ruiz','Acme'),issue(5,'Closed','Marcos Ruiz','Acme')]};
+  const settings={type:'Issue',states,closedStates:['Closed'],verifyStates:['Ready for Test','Resolved']};
+  const html=maintenanceView(snapshot,{mode:'demo',maintenanceSettings:settings},null);
+  assert.match(html,/<tr class="st st-closed st-t0"><td>#5/);
+  assert.match(html,/class="pill st st-verify st-t0"[^>]*>Ready for Test/);
+  assert.match(html,/class="pill st st-verify st-t1"[^>]*>Resolved/,'states of a group get different tones');
+  assert.match(html,/Verificación<b>2<\/b>/);
+  assert.match(html,/data-maintenance-include-closed checked/);
+  assert.match(html,/<option value="Custom.Cliente">Cliente<\/option>/);
+  const index=addMaintenanceCondition('Custom.Cliente');
+  filterMaintenance(snapshot,'condition','Acme',index);
+  assert.match(target.innerHTML,/3 de 5 elementos/);
+  assert.match(maintenanceView(snapshot,{mode:'demo',maintenanceSettings:settings},null),/<th>Cliente<\/th>/,'a filtered field becomes a column');
+  filterMaintenance(snapshot,'condition','__empty__',index);
+  assert.match(target.innerHTML,/1 de 5 elementos/);
+  removeMaintenanceCondition(index);
+  setMaintenanceView('people');
+  filterMaintenance(snapshot,'text','');
+  const people=target.innerHTML;
+  assert.ok(people.indexOf('Ana García')<people.indexOf('Sin asignar')&&people.indexOf('Marcos Ruiz')<people.indexOf('Sin asignar'),'unassigned items go last');
+  assert.equal((people.match(/class="person-card"/g)||[]).length,3);
+});
+

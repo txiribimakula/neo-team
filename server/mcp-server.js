@@ -117,6 +117,17 @@ server.tool('neo_work_item_states', 'Read workflow state categories for a work i
   return { content: [{ type: 'text', text: JSON.stringify(await api.getWorkItemTypeStates(project, type)) }] };
 });
 
+// Every field of a type with its data type, so maintenance can filter by any of them.
+const FIELD_TYPES=['string','integer','dateTime','plainText','html','treePath','history','double','guid','boolean','identity','picklistString','picklistInteger','picklistDouble'];
+server.tool('neo_work_item_type_fields', 'Read the fields of a work item type with their data types.', {
+  project: z.string().min(1), type: z.string().min(1),
+}, async ({ project, type }) => {
+  const api = await (await connectionProvider()).getWorkItemTrackingApi();
+  const [own, all] = await Promise.all([api.getWorkItemTypeFieldsWithReferences(project, type), api.getFields(project)]);
+  const kinds = new Map((all ?? []).map(f => [f.referenceName, typeof f.type === 'number' ? FIELD_TYPES[f.type] : f.type]));
+  return { content: [{ type: 'text', text: JSON.stringify((own ?? []).map(f => ({ referenceName: f.referenceName, name: f.name, type: kinds.get(f.referenceName) ?? 'string' }))) }] };
+});
+
 // The official 2.10.0 core tools list teams, but do not expose their complete
 // membership. This read-only extension also includes team-wide holidays.
 server.tool('neo_team_members', 'List every team member, including members without capacity or assigned work.', {
@@ -165,7 +176,7 @@ server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an ite
 // A query and the fields of its results in one tool call: batches of 200 are
 // read in parallel inside the MCP instead of one round trip per batch.
 server.tool('neo_query_work_items', 'Run a WIQL query and return the requested fields of the matching work items.', {
-  project: z.string().min(1), wiql: z.string().min(1).max(32768), fields: z.array(z.string().min(1).max(200)).min(1).max(50), top: z.number().int().min(1).max(5000),
+  project: z.string().min(1), wiql: z.string().min(1).max(32768), fields: z.array(z.string().min(1).max(200)).min(1).max(200), top: z.number().int().min(1).max(5000),
 }, async ({ project, wiql, fields, top }) => {
   const api = await (await connectionProvider()).getWorkItemTrackingApi();
   const result = await api.queryByWiql({ query: wiql }, { project }, false, top + 1);

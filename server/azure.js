@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { normalizeItem, descriptionHtml } from './planner.js';
 import { isExecutable, localDay } from '../dist/hierarchy.js';
 import { activityReader, describeCall, seconds } from './activity.js';
-import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceIssue, maintenanceWiql } from './maintenance.js';
+import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceFields, maintenanceIssue, maintenanceWiql } from './maintenance.js';
 import { MY_ITERATION_FIELDS, MY_ITERATION_LIMIT, boardItem, currentIteration, myIterationBoard, myIterationWiql, parentsWiql } from './my-iteration.js';
 
 export function parseToolResult(result) {
@@ -75,7 +75,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -165,15 +165,22 @@ export class AzureGateway {
     return result;
   }
   // Maintenance: every item of the chosen type whose state is not one of the
-  // closed states, in a single MCP call (WIQL plus parallel batched fields).
-  async functionalIssues(config, settings, onProgress = () => {}) {
-    onProgress({ message: `Consultando los «${settings.type}» no cerrados del proyecto ${config.project}…` });
-    const result = await this.call('neo_query_work_items', { project: config.project, wiql: maintenanceWiql(settings), fields: MAINTENANCE_FIELDS, top: MAINTENANCE_LIMIT });
+  // closed states (or every item, closed included), with all the fields of the
+  // type so the person can filter by any of them. Without the fields, the query
+  // still answers with the usual columns.
+  async functionalIssues(config, settings, onProgress = () => {}, { includeClosed = false } = {}) {
+    onProgress({ message: `Consultando los campos de «${settings.type}»…` });
+    let fields = [];
+    try { fields = maintenanceFields(await this.call('neo_work_item_type_fields', { project: config.project, type: settings.type })); }
+    catch (error) { if (/cancel/i.test(error.message)) throw error; }
+    onProgress({ message: `Consultando los «${settings.type}» ${includeClosed ? '' : 'no cerrados '}del proyecto ${config.project}…` });
+    const read = [...new Set([...MAINTENANCE_FIELDS, ...fields.map(f => f.ref)])].slice(0, 200);
+    const result = await this.call('neo_query_work_items', { project: config.project, wiql: maintenanceWiql(settings, { includeClosed }), fields: read, top: MAINTENANCE_LIMIT });
     if (!Array.isArray(result?.workItems)) throw new Error('Azure DevOps no devolvió una lista válida de elementos.');
     const order = new Map((result.ids ?? []).map((id, index) => [id, index]));
-    const issues = result.workItems.map(raw => maintenanceIssue(raw, settings.states)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    const issues = result.workItems.map(raw => maintenanceIssue(raw, settings.states, fields)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     onProgress({ message: `${issues.length} elementos obtenidos.`, counts: { issuesFound: issues.length, issuesRead: issues.length } });
-    return { type: settings.type, closedStates: settings.closedStates, fetchedAt: new Date().toISOString(), limited: !!result.limited, demo: false, organization: config.organization, project: config.project, issues };
+    return { type: settings.type, states: settings.states, closedStates: settings.closedStates, verifyStates: settings.verifyStates ?? [], includeClosed, fields, fetchedAt: new Date().toISOString(), limited: !!result.limited, demo: false, organization: config.organization, project: config.project, issues };
   }
   // My iteration: what the signed-in account has assigned in the team's current
   // iteration, with the parents as rows and the task states as columns.

@@ -1,6 +1,6 @@
 import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
-import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './maintenance.js';
+import { maintenanceView, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, setMaintenanceView, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, desktopRun, COLUMNS as JIRA_COLUMNS } from './jira.js';
@@ -85,7 +85,7 @@ function setState(next) {
   const scope = value => JSON.stringify([value?.mode, value?.config?.organization, value?.config?.project]);
   if (state && scope(state) !== scope(next)) {
     prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
-    maintenanceSnapshot = null; maintenanceSetup = null; resetMaintenanceFilters();
+    maintenanceSnapshot = null; maintenanceSetup = null;
   }
   if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {}, tells: {} };
   if (scope(state) !== scope(next) || state?.config?.team !== next?.config?.team) myIterationSnapshot = null;
@@ -831,7 +831,15 @@ async function decidePrevious(id, decision, path) {
   const finished=decision!=='undo' && !previousTasks(iteration).tasks.some(t=>t.status==='open' && groupOf(t.item.assignedTo)===group);
   if (finished) { expandedPrevious.delete(group); previousGroupOrder=null; }
   review=null;render();
-  if (finished) ($('.previous-person.has-open .previous-toggle') || $(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`))?.focus({preventScroll:true});
+  // ...and opens whoever is now first with tasks to decide, to keep reviewing there.
+  const next=finished && $('.previous-person.has-open .previous-toggle')?.dataset.group;
+  if (next && !expandedPrevious.has(next)) { expandedPrevious.add(next); updatePlanningView(); }
+  if (next) {
+    const toggle=$(`[data-action="toggle-previous"][data-group="${CSS.escape(next)}"]`);
+    toggle?.scrollIntoView({block:'nearest'});
+    (toggle?.closest('.previous-person').querySelector('.previous-task.status-open .previous-task-actions button') || toggle)?.focus({preventScroll:true});
+  }
+  else if (finished) $(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});
   else document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
   // Allowed, but flagged: the owner has no capacity in the destination or is not in the team.
   const target=decision==='carry' ? iteration : decision==='move' ? ws.iterations.find(i=>i.path===path) : null, owner=item.assignedTo;
@@ -1497,11 +1505,13 @@ async function myIterationQuery() {
   const result = await importWithProgress($('#connection-progress'), null, { path: '/api/my-iteration', input: {}, title: 'Consultando mi iteración' });
   myIterationSnapshot = result.myIteration; tab = 'my-iteration'; modal.close(); render();
 }
-async function maintenanceQuery() {
+// The closed items are only read when the person asks for them; the choice is
+// remembered once the query with or without them succeeds.
+async function maintenanceQuery(includeClosed = maintenanceIncludeClosed()) {
   const settings = state.maintenanceSettings;
-  showModal(`Consultar ${settings.type}`, `${state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project} · estados distintos de ${settings.closedStates.join(', ') || 'ninguno'}.`, '<div id="connection-progress"></div>');
-  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: {}, title: `Consultando ${settings.type} no cerrados` });
-  maintenanceSnapshot = result.maintenance; tab = 'maintenance'; modal.close(); render();
+  showModal(`Consultar ${settings.type}`, `${state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project}${includeClosed ? '' : ` · estados distintos de ${settings.closedStates.join(', ') || 'ninguno'}`}.`, '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: { includeClosed }, title: `Consultando ${settings.type}${includeClosed ? '' : ' no cerrados'}` });
+  maintenanceSnapshot = result.maintenance; setMaintenanceIncludeClosed(!!maintenanceSnapshot?.includeClosed); tab = 'maintenance'; modal.close(); render();
 }
 function exportSecurity() {
   const blob = new Blob([JSON.stringify(securitySnapshot, null, 2)], { type: 'application/json' });
@@ -1745,13 +1755,16 @@ const actions = {
     await loadMaintenance(); maintenanceSetup = null; tab = 'maintenance'; render();
     if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
   },
-  'maintenance-refresh': () => maintenanceQuery(),
+  'maintenance-refresh': () => maintenanceQuery(maintenanceSnapshot ? !!maintenanceSnapshot.includeClosed : maintenanceIncludeClosed()),
   'open-my-iteration': async () => {
     await loadMyIteration(); tab = 'my-iteration'; render();
     if (!myIterationSnapshot && (state.config?.team || state.mode === 'demo')) await myIterationQuery();
   },
   'my-iteration-refresh': () => myIterationQuery(),
   'maintenance-clear-filters': () => { resetMaintenanceFilters(); render(); $('[data-maintenance-filter="text"]')?.focus(); },
+  'maintenance-state': el => toggleMaintenanceState(maintenanceSnapshot, el.dataset.state),
+  'maintenance-view': el => { setMaintenanceView(el.dataset.view); render(); $(`[data-action="maintenance-view"][data-view="${el.dataset.view}"]`)?.focus(); },
+  'maintenance-remove-condition': el => { removeMaintenanceCondition(Number(el.dataset.index)); render(); $('[data-maintenance-add]')?.focus(); },
   'security-clear-filters': () => { resetPermissionFilters(); render(); $('[data-security-filter="text"]')?.focus(); },
   'open-reviews': async () => {
     prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
@@ -2043,8 +2056,8 @@ document.addEventListener('submit', async event => {
   try {
     if (event.target.id === 'maintenance-settings-form') {
       if ($('#maintenance-type').value.trim() !== event.target.dataset.type) throw new Error('Vuelve a cargar los estados del tipo de elemento antes de guardar.');
-      const closedStates = [...event.target.querySelectorAll('input[name="closed"]:checked')].map(el => el.value);
-      await request('/api/maintenance-settings', { type: event.target.dataset.type, states: maintenanceSetup?.states ?? [], closedStates });
+      const roles = [...event.target.querySelectorAll('input[type="radio"]:checked')], states = role => roles.filter(el => el.value === role).map(el => el.dataset.state);
+      await request('/api/maintenance-settings', { type: event.target.dataset.type, states: maintenanceSetup?.states ?? [], closedStates: states('closed'), verifyStates: states('verify') });
       maintenanceSetup = null; maintenanceSnapshot = null; render();
       await maintenanceQuery();
       return;
@@ -2093,7 +2106,9 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
-  if (el.dataset.maintenanceFilter) { filterMaintenance(maintenanceSnapshot, el.dataset.maintenanceFilter, el.value); return; }
+  if (el.dataset.maintenanceFilter) { filterMaintenance(maintenanceSnapshot, el.dataset.maintenanceFilter, el.value, Number(el.dataset.index)); return; }
+  if ('maintenanceAdd' in el.dataset) { if (el.value) { const index = addMaintenanceCondition(el.value); render(); $(`[data-maintenance-filter="condition"][data-index="${index}"]`)?.focus(); } return; }
+  if ('maintenanceIncludeClosed' in el.dataset) { try { await maintenanceQuery(el.checked); } catch (error) { render(); errorInModal(error); } return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
@@ -2132,7 +2147,7 @@ document.addEventListener('input',event=>{
   }
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
-  if (event.target.dataset.maintenanceFilter === 'text') filterMaintenance(maintenanceSnapshot, 'text', event.target.value);
+  if (event.target.dataset.maintenanceFilter && event.target.tagName === 'INPUT') filterMaintenance(maintenanceSnapshot, event.target.dataset.maintenanceFilter, event.target.value, Number(event.target.dataset.index));
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
   if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraCollectKey!==undefined){jiraUi.collectKey=event.target.value;}

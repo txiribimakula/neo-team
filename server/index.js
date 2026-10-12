@@ -317,14 +317,15 @@ const server = http.createServer(async (req, res) => {
           };
           const settings = currentMaintenanceSettings();
           if (!settings) throw fail('Elige primero qué estados se consideran cerrados.');
-          if (store.data.mode === 'demo') maintenance = { scope: maintenanceScope(), ...demoFunctionalIssues(settings) };
+          const includeClosed = input.includeClosed === true;
+          if (store.data.mode === 'demo') maintenance = { scope: maintenanceScope(), ...demoFunctionalIssues(settings, { includeClosed }) };
           else {
             if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar el mantenimiento.');
             const config = configFrom(store.data.config, false);
             reportProgress({ message: 'Conectando con Azure DevOps…' });
             await azure.open(config);
             if (operation.cancelRequested) throw fail('Consulta cancelada.');
-            maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, settings, reportProgress)) };
+            maintenance = { scope: maintenanceScope(), ...(await azure.functionalIssues(config, settings, reportProgress, { includeClosed })) };
           }
           return json(res, { maintenance: currentMaintenance() });
         }
