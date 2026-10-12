@@ -6,7 +6,9 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
   const taskDrafts=Object.keys(workspace.drafts ?? {}).length;
   const capacityDrafts=Object.keys(workspace.capacityDrafts ?? {}).length;
   // Tasks can be downloaded with local changes: they are kept on top of what Azure has.
-  if(section==='capacity' && capacityDrafts || section==='iterations' && (taskDrafts || capacityDrafts)) throw new Error('Sincroniza o descarta los cambios de esta sección antes de actualizarla.');
+  // Iterations too, as long as Azure only adds new ones (see addNewIterations).
+  if(section==='capacity' && capacityDrafts) throw new Error('Sincroniza o descarta los cambios de esta sección antes de actualizarla.');
+  const onlyAdd=section==='iterations' && !!(taskDrafts || capacityDrafts);
   const next=structuredClone(workspace), originals=sourcesOf(workspace), refreshed=[];
   for(const [index,source] of originals.entries()) {
     refreshed.push(await azure.import(source.config,p=>report({...p,message:`${source.config.project} (${index+1}/${originals.length}) · ${p.message}`}),rules,{section,snapshot:source}));
@@ -48,7 +50,8 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
       for(const iteration of next.iterations) next.capacities[iteration.id]=jointCapacity(next,iteration);
     }
     next.capacityConflicts={};
-  } else if(!next.sources) next.iterations=refreshed[0].iterations;
+  } else if(onlyAdd) addNewIterations(next,originals,refreshed);
+  else if(!next.sources) next.iterations=refreshed[0].iterations;
   else {
     // Rebuild only the shared calendar; keep every other section's payload.
     let calendar;
@@ -70,6 +73,30 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
   }
   next.refreshedAt={...next.refreshedAt,[section]:new Date().toISOString()};
   return next;
+}
+// With local changes pending, the calendar only grows: Azure's new iterations are
+// added and the rest of the plan is left as it is. If an iteration already there
+// changed its path or dates, or is gone, the changes are synchronized first.
+function addNewIterations(next,originals,refreshed) {
+  const day=value=>String(value ?? '').slice(0,10), dates=i=>[day(i.attributes?.startDate),day(i.attributes?.finishDate)];
+  const unchanged=(a,b)=>a.path===b.path && !!a.past===!!b.past && dates(a).join()===dates(b).join();
+  const blocked=()=>new Error('Sincroniza o descarta los cambios pendientes antes de actualizar: alguna iteración que ya tienes ha cambiado o ya no está en Azure. Mientras solo haya iteraciones nuevas, se añaden sin sincronizar.');
+  const added=refreshed.map((data,index)=>{
+    const known=originals[index].iterations;
+    if(known.some(old=>{const now=data.iterations.find(i=>i.id===old.id);return !now || !unchanged(old,now);})) throw blocked();
+    return data.iterations.filter(i=>!known.some(old=>old.id===i.id));
+  });
+  if(!next.sources) { next.iterations=[...next.iterations,...added[0]]; return; }
+  next.sources.forEach((source,index)=>{
+    source.iterations=[...source.iterations,...added[index]];
+    for(const iteration of added[index]) {
+      const [start,end]=dates(iteration);
+      // A new date range that overlaps the shared calendar needs the full rebuild.
+      if(!iteration.past && next.iterations.some(j=>!j.past && dates(j).join()!==[start,end].join() && start && end && dates(j)[0]<=end && start<=dates(j)[1])) throw blocked();
+      jointIteration(next.iterations,source,iteration).sourceIterations[source.id]=iteration.id;
+    }
+  });
+  next.iterations.sort((a,b)=>day(a.attributes?.startDate).localeCompare(day(b.attributes?.startDate)));
 }
 // Azure holds the split budget: reconstruct availability by summing each
 // activity across projects. A day is off when it is off (for the person or the

@@ -117,3 +117,26 @@ test('in a joint plan, a day off counts where the person has hours, so Azure\'s 
  assert.equal(entry.activities[0].capacityPerDay,5);
  assert.deepEqual(entry.daysOff,[{start:holiday,end:holiday}]);
 });
+test('with pending changes, refreshing iterations only adds the new ones, and refuses when an existing one changed',async()=>{
+ const ws=fixture();ws.drafts={[ws.items[0].id]:{title:'Local'}};
+ const added={id:'sprint-new',name:'Sprint nuevo',path:'Neo Platform\\Sprint nuevo',attributes:{startDate:'2099-01-05T00:00:00Z',finishDate:'2099-01-16T00:00:00Z',timeFrame:2}};
+ const {azure,calls}=gateway(ws),base=azure.call;
+ azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [...ws.iterations,added] : base(name,args);
+ const next=await refreshSection(ws,'iterations',azure,[]);
+ assert.deepEqual(next.iterations.map(i=>i.id),[...ws.iterations.map(i=>i.id),'sprint-new']);
+ for(const field of ['items','drafts','capacities','members'])assert.deepEqual(next[field],ws[field]);
+ assert.deepEqual(calls,[],'nothing but the iterations is read');
+ azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [{...ws.iterations[0],attributes:{...ws.iterations[0].attributes,finishDate:'2099-12-31T00:00:00Z'}},...ws.iterations.slice(1)] : base(name,args);
+ await assert.rejects(()=>refreshSection(ws,'iterations',azure,[]),/ha cambiado o ya no está/);
+ azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? ws.iterations.slice(1) : base(name,args);
+ await assert.rejects(()=>refreshSection(ws,'iterations',azure,[]),/ha cambiado o ya no está/);
+});
+test('in a joint plan with pending changes, a new iteration joins the shared calendar',async()=>{
+ const ws=joint();ws.drafts={[ws.items[0].id]:{title:'Local'}};
+ const added=source=>({id:'new-'+source.config.project,name:'Nueva',path:`${source.config.project}\\Nueva`,attributes:{startDate:'2099-01-05T00:00:00Z',finishDate:'2099-01-16T00:00:00Z'}});
+ const azure={import:async(config,report,rules,{snapshot})=>({...snapshot,iterations:[...snapshot.iterations,added(snapshot)]})};
+ const next=await refreshSection(ws,'iterations',azure,[]);
+ const shared=next.iterations.find(i=>i.id==='joint:2099-01-05/2099-01-16');
+ assert.equal(Object.keys(shared.sourceIterations).length,2);
+ for(const field of ['items','drafts','capacities'])assert.deepEqual(next[field],ws[field]);
+});
