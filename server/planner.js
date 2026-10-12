@@ -304,6 +304,15 @@ function clearDownloadedDifference(workspace, iterationId, key) {
   delete download.local[key];
   if (!Object.keys(download.local).length) delete workspace.capacityDownloads[iterationId];
 }
+// A private note per person for whoever plans: it stays from one planning to the
+// next, lives only in the local copy and is never sent to Azure DevOps.
+export function setPersonNote(workspace, memberId, text) {
+  if (!workspace.members?.some(m => m.id === memberId)) throw new Error('Elige una persona del equipo.');
+  const note = typeof text === 'string' ? text.trim().slice(0, 4000) : '';
+  const notes = { ...workspace.personNotes };
+  if (note) notes[memberId] = note; else delete notes[memberId];
+  workspace.personNotes = notes;
+}
 // key '*' applies the same choice to every difference of the iteration.
 export function chooseDownloadedCapacity(workspace, iterationId, key, choice) {
   if (key === '*') {

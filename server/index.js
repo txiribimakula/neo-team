@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
@@ -835,6 +835,7 @@ const server = http.createServer(async (req, res) => {
             step('Calculando la planificación y guardando la copia local…');
             // States chosen as completed by the person take precedence over Azure's categories.
             workspace.completedStates = { ...workspace.completedStates, ...(store.data.azure?.completedStates || {}) };
+            if (store.data.azure?.personNotes) workspace.personNotes = { ...store.data.azure.personNotes, ...workspace.personNotes };
             const data = structuredClone(store.data); data.azure = workspace; data.mode = 'azure';
             await store.save(data); planner.review = null;
             operation = { ...operation, status: 'complete', phase: 'complete', message: 'Importación completada. Copia local guardada.' };
@@ -882,6 +883,11 @@ const server = http.createServer(async (req, res) => {
           if (!workspace) throw fail('Importa datos primero.');
           stageCapacity(workspace, input.iterationId, input);
           await store.save(data); planner.review = null;
+        } else if (path === '/api/person-note') {
+          const data = structuredClone(store.data), workspace = data[data.mode], before = store.data.version;
+          if (!workspace) throw fail('Importa datos primero.');
+          setPersonNote(workspace, input.memberId, input.text);
+          await store.save(data); keepReview(before, () => {});
         } else if (path === '/api/copy-capacity') {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('Importa datos primero.');

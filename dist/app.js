@@ -1132,8 +1132,10 @@ function lane(member, allItems, index, iteration) {
   const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
   const open=expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
   const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
-  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button><div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
+  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
 }
+// What is typed in a note survives a redraw (such as opening the lane) until it is saved.
+const noteDrafts={};
 // The left panel alternates between the available backlog and the sprint's
 // unassigned tasks; people take one row each on the right.
 let leftPanel='backlog', laneOrder=null;
@@ -2159,6 +2161,8 @@ document.addEventListener('change',async event=>{
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.prSuggestion){await saveFinding(el,{suggestion:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
+    // The note is already on screen: it is saved without redrawing, so focus stays.
+    if(el.dataset.personNote!==undefined){const id=el.dataset.personNote,text=el.value;await request('/api/person-note',{memberId:id,text});if(noteDrafts[id]===text)delete noteDrafts[id];return;}
     if(el.dataset.taskField){
       // The control the person moved to (Tab, click) is read once focus has
       // settled, before saving redraws the plan.
@@ -2172,6 +2176,7 @@ document.addEventListener('change',async event=>{
   }catch(error){render();errorInModal(error);}
 });
 document.addEventListener('input',event=>{
+  if (event.target.dataset?.personNote!==undefined) noteDrafts[event.target.dataset.personNote]=event.target.value;
   if (event.target.id === 'maintenance-type') {
     const form = $('#maintenance-settings-form');
     if (form) {

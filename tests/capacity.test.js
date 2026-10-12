@@ -243,3 +243,14 @@ test('copying the previous iteration brings its hours per day and keeps the days
   assert.throws(()=>copyPreviousCapacity(workspace,'sprint-24'),/no tiene capacidad/);
   assert.throws(()=>copyPreviousCapacity(workspace,'sprint-23'),/No hay una iteración anterior/);
 });
+
+test('a private note stays with each person, outside the changes to sync',async()=>{
+  const { setPersonNote, planningWorkspace } = await import('../server/planner.js');
+  const { workspace } = demo();
+  setPersonNote(workspace,'ana','  Que cierre lo de auditoría  ');
+  assert.deepEqual(workspace.personNotes,{ana:'Que cierre lo de auditoría'});
+  assert.equal(planningWorkspace(workspace).pendingChanges,0,'a note is not a change to sync');
+  setPersonNote(workspace,'ana','');
+  assert.deepEqual(workspace.personNotes,{});
+  assert.throws(()=>setPersonNote(workspace,'nadie','x'),/persona del equipo/);
+});
