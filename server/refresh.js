@@ -72,10 +72,12 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
   return next;
 }
 // Azure holds the split budget: reconstruct availability by summing each
-// activity across projects, and union personal/project holidays.
+// activity across projects. A day is off when it is off (for the person or the
+// team) in every project where the person has hours; projects where they have
+// none do not count, or their days would dilute the hours of the others.
 function jointCapacity(next,iteration) {
   const teamMembers=next.members.map(member=>{
-    const activities=new Map();let commonDays=null;
+    const activities=new Map(),withHours=[],withoutHours=[];
     for(const source of next.sources) {
       const remoteIteration=source.iterations.find(i=>i.id===iteration.sourceIterations[source.id]);
       const capacity=source.capacities?.[remoteIteration?.id];
@@ -87,9 +89,11 @@ function jointCapacity(next,iteration) {
         activities.set(activity.name,(activities.get(activity.name) ?? 0)+hours);
       }
       for(const range of [...entry.daysOff,...(capacity.daysOff ?? [])]) for(let date=new Date(range.start.slice(0,10)+'T00:00:00Z');date.toISOString().slice(0,10)<=range.end.slice(0,10);date.setUTCDate(date.getUTCDate()+1)) dates.add(date.toISOString().slice(0,10));
-      commonDays=commonDays===null ? dates : new Set([...commonDays].filter(day=>dates.has(day)));
+      (entry.activities.some(a=>Number(a.capacityPerDay)>0) ? withHours : withoutHours).push(dates);
     }
-    const daysOff=[...(commonDays ?? [])].sort().map(day=>({start:day,end:day}));
+    const voting=withHours.length ? withHours : withoutHours;
+    const commonDays=voting.length ? voting.reduce((common,dates)=>new Set([...common].filter(day=>dates.has(day)))) : new Set();
+    const daysOff=[...commonDays].sort().map(day=>({start:day,end:day}));
     const days=workingCapacity(iteration,{daysOff:[],teamMembers:[{teamMember:member,daysOff,activities:[{name:'',capacityPerDay:1}]}]},member.id,next.settings.workingDays);
     if(!days && [...activities.values()].some(hours=>hours>0)) throw new Error('El calendario global no permite representar la capacidad de Azure. Revisa los días laborables.');
     return {teamMember:member,activities:[...activities].map(([name,hours])=>({name,capacityPerDay:days ? Math.round(hours/days*100)/100 : 0})),daysOff};

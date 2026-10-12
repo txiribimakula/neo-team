@@ -105,3 +105,15 @@ test('in a joint plan the task download brings each project\'s finished iteratio
  assert.equal(next.items.find(i=>i.id===900).iterationPath,done.path);
  assert.ok(!next.capacities[done.id]);
 });
+test('in a joint plan, a day off counts where the person has hours, so Azure\'s hours per day stay',async()=>{
+ const ws=joint(),iteration=ws.iterations.find(i=>!i.past),ana=ws.members[0],[a,b]=ws.sources;
+ const holiday=iteration.attributes.startDate.slice(0,10);
+ const azure={open:async()=>{},capacity:async(config)=>config.project===a.config.project
+  ? {daysOff:[{start:holiday+'T00:00:00Z',end:holiday+'T00:00:00Z'}],teamMembers:[{teamMember:ana,activities:[{name:'Development',capacityPerDay:5}],daysOff:[]}]}
+  : {daysOff:[],teamMembers:[{teamMember:ana,activities:[],daysOff:[]}]}};
+ const {downloadCapacity}=await import('../server/refresh.js');
+ const next=await downloadCapacity(ws,iteration.id,azure);
+ const entry=next.capacities[iteration.id].teamMembers.find(m=>m.teamMember.id===ana.id);
+ assert.equal(entry.activities[0].capacityPerDay,5);
+ assert.deepEqual(entry.daysOff,[{start:holiday,end:holiday}]);
+});
