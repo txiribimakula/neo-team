@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDemo } from '../server/demo.js';
 import { LocalStore } from '../server/store.js';
-import { Planner, stageCapacity, discardCapacity, capacityChanges, effectiveCapacity, capacityEntry, planningWorkspace, resolveCapacityConflict, workingCapacity } from '../server/planner.js';
+import { Planner, stageCapacity, copyPreviousCapacity, discardCapacity, capacityChanges, effectiveCapacity, capacityEntry, planningWorkspace, resolveCapacityConflict, workingCapacity } from '../server/planner.js';
 
 const day = value => value.slice(0,10);
 function demo() {
@@ -222,4 +222,16 @@ test('uploading one iteration writes only its capacity changes and never overwri
   assert.ok(saved.capacityConflicts[iteration.id].marcos);
   assert.ok(saved.capacityDrafts[other.id].ana,'other iterations keep their drafts');
   await assert.rejects(()=>new Planner({data:{mode:'azure',azure:structuredClone(demo().workspace),version:0}},{open:async()=>{}}).uploadCapacity(iteration.id),/No hay cambios de capacidad/);
+});
+
+test('copying the previous iteration brings its hours per day and keeps the days off',()=>{
+  const workspace = createDemo();
+  const next = workspace.iterations.find(i=>i.id==='sprint-25'), start = day(next.attributes.startDate);
+  stageCapacity(workspace,'sprint-24',{key:'ana',activities:[{name:'Development',capacityPerDay:7}]});
+  stageCapacity(workspace,'sprint-25',{key:'ana',daysOff:[{start,end:start}]});
+  assert.deepEqual(copyPreviousCapacity(workspace,'sprint-25'),['ana','marcos','lucia','david']);
+  assert.deepEqual(workspace.capacityDrafts['sprint-25'].ana,{activities:[{name:'Development',capacityPerDay:7}],daysOff:[{start,end:start}]});
+  assert.deepEqual(Object.keys(workspace.capacityDrafts['sprint-25']),['ana'],'equal hours leave nothing pending');
+  assert.throws(()=>copyPreviousCapacity(workspace,'sprint-24'),/no tiene capacidad/);
+  assert.throws(()=>copyPreviousCapacity(workspace,'sprint-23'),/No hay una iteración anterior/);
 });

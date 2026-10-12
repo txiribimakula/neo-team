@@ -1,6 +1,6 @@
 import { sourcesOf, sourceFor, planningItem, remoteFields } from './multi-project.js';
 import { randomUUID } from 'node:crypto';
-import { isExecutable, completedState, estimateFields } from '../dist/hierarchy.js';
+import { isExecutable, completedState, estimateFields, previousIteration } from '../dist/hierarchy.js';
 
 export const FIELD_LABELS = { title: 'Título', assignedTo: 'Responsable', iterationPath: 'Iteración', priority: 'Prioridad', originalEstimate: 'Original Estimate', remainingWork: 'Remaining Work', state: 'Estado' };
 export function identityKey(identity) {
@@ -285,6 +285,17 @@ export function stageCapacity(workspace, iterationId, change) {
   if (Object.keys(drafts).length) workspace.capacityDrafts[iterationId] = drafts; else delete workspace.capacityDrafts[iterationId];
   clearCapacityConflict(workspace, iterationId, key);
   clearDownloadedDifference(workspace, iterationId, key);
+}
+// Hours per day carry over from the previous iteration; its days off are other
+// dates, so each person keeps the ones already marked.
+export function copyPreviousCapacity(workspace, iterationId) {
+  const previous = previousIteration(workspace?.iterations ?? [], iterationId);
+  if (!previous) throw new Error('No hay una iteración anterior de la que copiar.');
+  const capacity = effectiveCapacity(workspace, previous.id);
+  const members = workspace.members.filter(m => capacity.teamMembers?.some(record => record.teamMember?.id === m.id));
+  if (!members.length) throw new Error(`«${previous.name}» no tiene capacidad que copiar.`);
+  for (const member of members) stageCapacity(workspace, iterationId, { key: member.id, activities: capacityEntry(capacity, member.id).activities });
+  return members.map(m => m.id);
 }
 // After downloading capacity, each difference with what was local waits for a decision.
 function clearDownloadedDifference(workspace, iterationId, key) {

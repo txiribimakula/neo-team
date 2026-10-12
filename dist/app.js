@@ -968,19 +968,24 @@ async function saveCapacity(owner, change, focus) {
 // stages the person's previous or next values, so it is one more local edit.
 const capacityHistory={};
 const historyOf=iterationId=>capacityHistory[`${state.mode}|${iterationId}`] ??= {undo:[],redo:[]};
-async function trackCapacity(owner, action) {
-  const iterationId=selectedIteration, before=capacityOf(iterationId,owner);
+// A step may cover several people, as when copying the previous iteration.
+async function trackCapacity(owners, action) {
+  const iterationId=selectedIteration, keys=[owners].flat(), before=keys.map(owner=>capacityOf(iterationId,owner));
   await action();
-  const after=capacityOf(iterationId,owner), history=historyOf(iterationId);
-  if (JSON.stringify(before)!==JSON.stringify(after)) { history.undo.push({owner,before,after}); history.redo=[]; }
+  const history=historyOf(iterationId), step=keys.map((owner,i)=>({owner,before:before[i],after:capacityOf(iterationId,owner)})).filter(c=>JSON.stringify(c.before)!==JSON.stringify(c.after));
+  if (step.length) { history.undo.push(step); history.redo=[]; }
   review=null; render();
 }
 async function stepCapacityHistory(from, to) {
   const history=historyOf(selectedIteration), step=history[from].pop();
   if (!step) return;
-  const entry=from==='undo' ? step.before : step.after;
-  try { await request('/api/capacity',{ iterationId:selectedIteration, key:step.owner, daysOff:entry.daysOff, ...(step.owner==='team' ? {} : {activities:entry.activities}) }); }
-  catch (error) { history[from].push(step); throw error; }
+  try {
+    for (const change of step) {
+      const entry=from==='undo' ? change.before : change.after;
+      await request('/api/capacity',{ iterationId:selectedIteration, key:change.owner, daysOff:entry.daysOff, ...(change.owner==='team' ? {} : {activities:entry.activities}) });
+    }
+  }
+  catch (error) { history[from].push(step); review=null; render(); throw error; }
   history[to].push(step);
   review=null; render();
   const button=$(`[data-action="capacity-${from}"]`);
@@ -1375,9 +1380,16 @@ async function synchronize() {
 // Download replaces the local copy of the iteration's capacity with Azure; the
 // changes go up with the rest in Cambios pendientes.
 function capacityControls() {
-  const ws=state.workspace, iteration=selected();
-  if(ws?.mode!=='azure' || !iteration) return '';
-  return `<div class="workspace-controls"><button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button></div><div id="capacity-download-progress" hidden></div>`;
+  const ws=state.workspace, iteration=selected(), previous=iteration && previousIteration(ws.iterations,iteration.id);
+  if(!iteration || (ws?.mode!=='azure' && !previous)) return '';
+  const copy=previous ? `<button class="button small" data-action="copy-capacity" title="Copia las horas al día de cada persona en ${escape(previous.name)}; los días libres no cambian">Copiar de ${escape(previous.name)}</button>` : '';
+  const download=ws.mode==='azure' ? `<button class="button small" data-action="download-capacity" title="Sobrescribe la capacidad local de ${escape(iteration.name)} con la de Azure DevOps">Descargar capacidad</button>` : '';
+  return `<div class="workspace-controls">${copy}${download}</div>${download ? '<div id="capacity-download-progress" hidden></div>' : ''}`;
+}
+async function copyCapacity() {
+  const ws=state.workspace;
+  await trackCapacity(ws.members.map(m=>m.id),()=>request('/api/copy-capacity',{ iterationId:selectedIteration }));
+  $('[data-action="copy-capacity"]')?.focus({preventScroll:true});
 }
 async function downloadCapacity() {
   const iteration=selected();
@@ -1908,6 +1920,7 @@ const actions = {
   },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
   'download-capacity':downloadCapacity,
+  'copy-capacity':copyCapacity,
   'download-hierarchy':downloadHierarchy,
   'toggle-comments':el=>{const id=Number(el.dataset.task);if(commentsOpen.has(id))commentsOpen.delete(id);else commentsOpen.add(id);updatePlanningView();if(commentsOpen.has(id))$(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});},
   'add-comment':el=>submitComment(Number(el.dataset.task)),

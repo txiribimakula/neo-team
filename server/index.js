@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
@@ -201,7 +201,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -867,6 +867,11 @@ const server = http.createServer(async (req, res) => {
           const data = structuredClone(store.data), workspace = data[data.mode];
           if (!workspace) throw fail('Importa datos primero.');
           stageCapacity(workspace, input.iterationId, input);
+          await store.save(data); planner.review = null;
+        } else if (path === '/api/copy-capacity') {
+          const data = structuredClone(store.data), workspace = data[data.mode];
+          if (!workspace) throw fail('Importa datos primero.');
+          copyPreviousCapacity(workspace, input.iterationId);
           await store.save(data); planner.review = null;
         } else if (path === '/api/discard-capacity') {
           const data = structuredClone(store.data), workspace = data[data.mode];
