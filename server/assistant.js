@@ -2,7 +2,7 @@
 // that tab alone: they read and change the local copy with the same validations
 // as the interface, and never reach Azure DevOps, files, a shell or the web.
 // Every change is a local draft, reviewed and discarded like any other.
-import { planningWorkspace, stageChanges, stageCapacity, identityKey, FIELD_LABELS } from './planner.js';
+import { planningWorkspace, stageChanges, stageCapacity, createLocalItem, identityKey, FIELD_LABELS } from './planner.js';
 import { availableImportRules } from './import-query.js';
 import { isExecutable, previousIteration } from '../dist/hierarchy.js';
 
@@ -52,6 +52,7 @@ function memberOf(workspace, value) {
     ?? workspace.members.find(m => plain(m.displayName) === text)
     ?? (() => { const found = workspace.members.filter(m => plain(m.displayName).includes(text)); return found.length === 1 ? found[0] : null; })();
 }
+const TASK_PARENTS = ['User Story', 'Product Backlog Item', 'Requirement'];
 const nameOf = (workspace, key) => workspace.members.find(m => identityKey(m) === key)?.displayName ?? (key || 'Sin asignar');
 const iterationLabel = (workspace, path) => path === workspace.settings.backlogIteration.path ? 'Backlog' : workspace.iterations.find(i => i.path === path)?.name ?? path;
 
@@ -143,7 +144,7 @@ const TABS = {
   },
 
   planning: {
-    scope: 'the tasks and bugs of the chosen iteration and of the backlog: finding them, assigning them to people, moving them between iterations or to the backlog, their priority, estimates, remaining hours, state and title.',
+    scope: 'the tasks and bugs of the chosen iteration and of the backlog: finding them, creating them under a story, assigning them to people, moving them between iterations or to the backlog, their priority, estimates, remaining hours, state and title.',
     context: ({ ws, iterationId }) => {
       const iteration = chosenIteration(ws, iterationId), previous = previousIteration(ws.iterations, iteration.id);
       return {
@@ -157,9 +158,9 @@ const TABS = {
     },
     tools: ({ read, commit, record, iterationId }) => [{
       name: 'neo_search_tasks',
-      description: 'Search tasks and bugs of the local planning. "text" matches the id, title, tags or the title of any parent (story, feature…), without accents. "where": "iteration" (the chosen one), "previous" (the previous iteration), "backlog" (not in any iteration), "available" (backlog or later iterations, i.e. what can still be planned) or "any". "assignedTo": a person key or name, or "" for unassigned.',
-      parameters: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' }, where: { type: 'string', enum: ['iteration', 'previous', 'backlog', 'available', 'any'] }, assignedTo: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: ASSISTANT_LIMITS.results } } },
-      handler: ({ text = '', where = 'any', assignedTo, limit = 60 }) => {
+      description: 'Search tasks and bugs of the local planning, or with kind "parents" the stories a new task or bug can hang from. "text" matches the id, title, tags or the title of any parent (story, feature…), without accents. "where": "iteration" (the chosen one), "previous" (the previous iteration), "backlog" (not in any iteration), "available" (backlog or later iterations, i.e. what can still be planned) or "any". "assignedTo": a person key or name, or "" for unassigned.',
+      parameters: { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', enum: ['tasks', 'parents'] }, text: { type: 'string' }, where: { type: 'string', enum: ['iteration', 'previous', 'backlog', 'available', 'any'] }, assignedTo: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: ASSISTANT_LIMITS.results } } },
+      handler: ({ kind = 'tasks', text = '', where = 'any', assignedTo, limit = 60 }) => {
         const ws = read(), iteration = chosenIteration(ws, iterationId), previous = previousIteration(ws.iterations, iteration.id);
         const byId = new Map(ws.effectiveItems.map(i => [i.id, i]));
         const parents = item => { const list = []; for (let p = byId.get(item.parent); p && list.length < 5; p = byId.get(p.parent)) list.push(p); return list; };
@@ -168,7 +169,8 @@ const TABS = {
         const owner = assignedTo === undefined ? null : assignedTo === '' ? '' : memberOf(ws, assignedTo);
         if (owner === null && assignedTo !== undefined) return { error: 'No es una persona del equipo.' };
         const words = plain(text).split(/\s+/).filter(Boolean);
-        const found = ws.effectiveItems.filter(i => isExecutable(i) && inScope(i)
+        const wanted = kind === 'parents' ? i => !i.contextOnly && TASK_PARENTS.includes(i.type) : isExecutable;
+        const found = ws.effectiveItems.filter(i => wanted(i) && inScope(i)
           && (owner === null || (owner === '' ? !i.assignedTo : i.assignedTo === identityKey(owner)))
           && words.every(w => plain([i.id, i.title, ...i.tags, ...parents(i).map(p => p.title)].join(' ')).includes(w)))
           .sort((a, b) => (a.priority ?? 5) - (b.priority ?? 5) || a.id - b.id);
@@ -198,6 +200,32 @@ const TABS = {
         record(`#${id} ${item.title} · ${Object.entries(values).map(([field, value]) => `${FIELD_LABELS[field]}: ${field === 'assignedTo' ? nameOf(workspace, value) : field === 'iterationPath' ? iterationLabel(workspace, value) : ['remainingWork', 'originalEstimate'].includes(field) ? `${value} h` : value}`).join(', ')}`);
         return { id, ok: true };
       })),
+    }, {
+      name: 'neo_create_tasks',
+      description: 'Create new tasks or bugs in the local draft, each under a story (its id, from neo_search_tasks with kind "parents"). iterationPath: the path of an iteration or the backlog path; the backlog if omitted. assignedTo: a person key or name. Created in Azure DevOps when the person synchronizes.',
+      parameters: { type: 'object', additionalProperties: false, required: ['items'], properties: { items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', additionalProperties: false, required: ['type', 'title', 'parent'], properties: {
+        type: { type: 'string', enum: ['Task', 'Bug'] }, title: { type: 'string', minLength: 1, maxLength: 255 }, parent: { type: 'integer' },
+        assignedTo: { type: 'string' }, iterationPath: { type: 'string' }, remainingWork: { type: 'number', minimum: 0 }, priority: { type: 'integer', minimum: 1, maximum: 4 },
+      } } } } },
+      handler: ({ items }) => commit(data => items.map(({ type, title, parent, assignedTo, iterationPath, remainingWork, priority }) => {
+        const workspace = data[data.mode], member = assignedTo ? memberOf(workspace, assignedTo) : null;
+        if (assignedTo && !member) return { title, error: 'No es una persona del equipo.' };
+        const before = { count: workspace.items.length, nextLocalId: workspace.nextLocalId };
+        let id;
+        try {
+          id = createLocalItem(workspace, { type, title, parent, ...(member ? { assignedTo: identityKey(member) } : {}), ...(iterationPath ? { iterationPath } : {}), ...(remainingWork !== undefined ? { remainingWork } : {}) });
+          if (priority !== undefined && priority !== 2) stageChanges(workspace, id, { priority });
+        } catch (error) {
+          // Nothing of a rejected item stays in the draft.
+          const added = workspace.items[before.count];
+          if (added) { workspace.items.length = before.count; delete workspace.drafts[added.id]; }
+          workspace.nextLocalId = before.nextLocalId;
+          return { title, error: error.message };
+        }
+        const item = workspace.items.find(i => i.id === id), owner = workspace.drafts[id]?.assignedTo, path = workspace.drafts[id]?.iterationPath ?? item.iterationPath;
+        record(`${type === 'Bug' ? 'Nuevo bug' : 'Nueva tarea'}: ${item.title} · ${iterationLabel(workspace, path)}${owner ? ` · ${nameOf(workspace, owner)}` : ''}${remainingWork !== undefined ? ` · ${remainingWork} h` : ''}`);
+        return { title, ok: true };
+      })),
     }],
   },
 };
@@ -220,7 +248,7 @@ export async function runAssistant({ request, store, agent, model = null, today 
       return { results: result };
     },
   }).map(tool => ({ ...tool, skipPermission: true, defer: 'never', handler: async args => {
-    onActivity(tool.name === 'neo_search_tasks' ? `Buscando tareas${args?.text ? `: ${args.text}` : ''}` : 'Guardando cambios en local…');
+    onActivity(tool.name === 'neo_search_tasks' ? `Buscando ${args?.kind === 'parents' ? 'historias' : 'tareas'}${args?.text ? `: ${args.text}` : ''}` : 'Guardando cambios en local…');
     try { return JSON.stringify(await tool.handler(args ?? {})); } catch (error) { return JSON.stringify({ error: error.message }); }
   } }));
   const context = definition.context({ data: store.data, ws: read(), iterationId });

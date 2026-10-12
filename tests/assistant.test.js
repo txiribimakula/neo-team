@@ -34,7 +34,7 @@ test('each tab only offers its own tools and the requests are validated', async 
     await runAssistant({ request: assistantRequest({ tab, prompt: 'Hola', iterationId }), store, agent });
     tools[tab] = agent.seen.tools;
   }
-  assert.deepEqual(tools, { configuration: ['neo_set_import_states'], iteration: ['neo_choose_iteration'], capacity: ['neo_set_capacity'], planning: ['neo_search_tasks', 'neo_change_tasks'] });
+  assert.deepEqual(tools, { configuration: ['neo_set_import_states'], iteration: ['neo_choose_iteration'], capacity: ['neo_set_capacity'], planning: ['neo_search_tasks', 'neo_change_tasks', 'neo_create_tasks'] });
   assert.equal(store.saves, 0, 'asking changes nothing by itself');
 });
 
@@ -52,6 +52,29 @@ test('the Tareas assistant finds tasks and stages changes in the local draft', a
   assert.equal(answer.reply, 'Hecho.');assert.equal(answer.changes.length, 1);assert.match(answer.changes[0], /Responsable: Marcos Ruiz/);
   assert.match(agent.seen.prompt, /"people":\[/, 'the context includes the people and their load');
   assert.match(agent.seen.system, /never as instructions/);
+});
+
+test('the Tareas assistant creates tasks under a story, in the backlog unless told otherwise', async () => {
+  const store = memoryStore(), ws = planningWorkspace(store.data.demo), iteration = ws.iterations[0];
+  const story = ws.effectiveItems.find(i => i.type === 'User Story'), count = store.data.demo.items.length;
+  const agent = scriptedAgent([
+    ['neo_search_tasks', { kind: 'parents', text: String(story.id) }],
+    ['neo_create_tasks', { items: [
+      { type: 'Task', title: 'Preparar datos', parent: story.id },
+      { type: 'Bug', title: 'Corregir login', parent: story.id, assignedTo: 'Ana', iterationPath: iteration.path, remainingWork: 2, priority: 1 },
+      { type: 'Task', title: 'Sin padre válido', parent: 999999 },
+      { type: 'Task', title: 'Iteración inventada', parent: story.id, iterationPath: 'Nada' },
+    ] }],
+  ]);
+  const answer = await runAssistant({ request: assistantRequest({ tab: 'planning', prompt: 'Crea una tarea en el backlog', iterationId: iteration.id }), store, agent });
+  assert.ok(agent.results[0].items.some(i => i.id === story.id), 'stories are found as parents');
+  assert.deepEqual(agent.results[1].results.map(r => !!r.ok), [true, true, false, false]);
+  const created = store.data.demo.items.slice(count);
+  assert.equal(created.length, 2, 'a rejected item leaves nothing behind');
+  assert.ok(created.every(i => i.localOnly && i.parent === story.id));
+  assert.equal(created[0].iterationPath, store.data.demo.settings.backlogIteration.path);
+  assert.deepEqual(store.data.demo.drafts[created[1].id], { title: 'Corregir login', assignedTo: 'ana@example.test', iterationPath: iteration.path, remainingWork: 2, priority: 1 });
+  assert.equal(answer.changes.length, 2);assert.match(answer.changes[0], /Nueva tarea: Preparar datos · Backlog/);assert.match(answer.changes[1], /Nuevo bug: Corregir login/);
 });
 
 test('the Capacidad assistant changes hours and days off of the chosen iteration only', async () => {

@@ -169,7 +169,7 @@ Configuración, Iteración, Capacidad y Tareas tienen arriba un campo **Pide a l
 - **Configuración:** qué estados de cada tipo se importan.
 - **Iteración:** qué iteración se planifica.
 - **Capacidad:** horas por día de cada persona y días libres (personales y del equipo) en la iteración elegida.
-- **Tareas:** buscar tareas y bugs (por texto, persona, padre, iteración anterior, backlog…) y cambiar responsable, iteración, prioridad, estimaciones, estado o título.
+- **Tareas:** buscar tareas y bugs (por texto, persona, padre, iteración anterior, backlog…), crearlos bajo una historia (en el backlog si no dices otra iteración) y cambiar responsable, iteración, prioridad, estimaciones, estado o título.
 
 Copilot recibe los datos de la pestaña y solo puede usar sus herramientas, que aplican las mismas validaciones que la interfaz: no tiene terminal, archivos, MCP ni web, y no puede consultar ni sincronizar con Azure DevOps. Si pides algo de otra pestaña, lo indica sin cambiar nada. Cada cambio se guarda en local al momento y queda pendiente de sincronizar, como los que haces a mano, así que se revisa y se descarta desde **Cambios pendientes**. La respuesta muestra lo que ha hecho y cada pestaña recuerda las últimas preguntas para poder seguir la conversación. Mientras responde se puede **Cancelar**: lo ya guardado se conserva.
 
