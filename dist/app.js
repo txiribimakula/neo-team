@@ -963,6 +963,22 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total) {
   const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total"></colgroup>`;
   return `<div class="capacity-grid-wrap" tabindex="0" role="region" aria-label="Calendario de capacidad; desplázate horizontalmente para ver todos los días"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
+// Like coordinates, the person and the day of the cell under the pointer (or,
+// without it, the focused one) are marked in the headers.
+let crossCell=null;
+function markCapacityCross() {
+  document.querySelectorAll('.capacity-grid .cg-cross').forEach(el=>el.classList.remove('cg-cross'));
+  const cell=(crossCell?.isConnected ? crossCell : null) ?? document.activeElement?.closest?.('.capacity-grid td');
+  if (!cell) return;
+  cell.closest('tr').querySelector('.cg-person')?.classList.add('cg-cross');
+  if (cell.classList.contains('cg-day')) cell.closest('table').tHead.rows[0].cells[cell.cellIndex]?.classList.add('cg-cross');
+}
+document.addEventListener('mouseover',event=>{
+  const cell=event.target.closest?.('.capacity-grid td') ?? null;
+  if (cell!==crossCell) { crossCell=cell; markCapacityCross(); }
+});
+document.addEventListener('focusin',markCapacityCross);
+document.addEventListener('focusout',()=>setTimeout(markCapacityCross,0));
 function capacityView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration || !ws.members.length) return '<div class="empty-result">Importa un equipo con integrantes e iteraciones para revisar la capacidad.</div>';
