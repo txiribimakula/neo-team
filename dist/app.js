@@ -756,10 +756,20 @@ function iterationView() {
   const ws=state.workspace, selectedOne=selected();
   if (!selectedOne) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
   const iterations=planningIterations(), kinds=iterationKinds(iterations);
-  return `<section class="iteration-step"><div class="iteration-options">${iterations.map(i=>{
+  return `<section class="iteration-step"><div class="iteration-options">${finishedIterations()}${iterations.map(i=>{
     const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne.id;
     return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
   }).join('')}</div></section>`;
+}
+// The finished iteration whose open tasks are decided in Tareas comes first. It
+// is not planned; without it, its tasks can be downloaded from here.
+function finishedIterations() {
+  const ws=state.workspace, past=ws.iterations.filter(i=>i.past).sort((a,b)=>String(a.attributes?.startDate ?? '').localeCompare(String(b.attributes?.startDate ?? '')));
+  if (!past.length) return ws.mode==='azure' && !ws.iterations.some(i=>hasEnded(i)) ? `<div class="iteration-option kind-past"><span class="iteration-tags"><span class="iteration-when">Anterior</span></span><button class="button small" data-action="refresh-section" data-section="tasks">Descargar</button></div>` : '';
+  return past.map(i=>{
+    const open=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path && !isCompleted(item,ws)).length;
+    return `<div class="iteration-option kind-past"><span class="iteration-tags"><span class="iteration-when">Anterior</span></span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${open} tarea${open===1 ? '' : 's'} abierta${open===1 ? '' : 's'}</small></div>`;
+  }).join('');
 }
 // Step 2: each open task of the previous iteration moves to the one being
 // planned or is closed. Both decisions are local drafts until the review.
@@ -1026,7 +1036,8 @@ function plannerView() {
   // The previous iteration comes first while something there is still undecided.
   if (!previous) planningPeriod='current';
   else planningPeriod ??= open ? 'previous' : 'current';
-  const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>${hasEnded(previous) ? 'Iteración anterior' : 'En curso'}</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : '';
+  const missing=!previous && state.workspace.mode==='azure' ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="refresh-section" data-section="tasks"><small>Iteración anterior</small><span>Descargar</span></button><button type="button" aria-pressed="true"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : '';
+  const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>${hasEnded(previous) ? 'Iteración anterior' : 'En curso'}</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : missing;
   if (planningPeriod==='previous') return periods+previousView();
   return periods+board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
 }
