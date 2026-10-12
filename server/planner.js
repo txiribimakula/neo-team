@@ -408,7 +408,7 @@ export function projectCapacityPlans(workspace) {
     if (!people.has(item.assignedTo)) people.set(item.assignedTo,[]);
     people.get(item.assignedTo).push(item);
   }
-  for (const iteration of workspace.iterations.filter(i=>(workspace.allocationIterations ?? []).includes(i.id) || assigned.has(i.path))) {
+  for (const iteration of workspace.iterations.filter(i=>!i.past && ((workspace.allocationIterations ?? []).includes(i.id) || assigned.has(i.path)))) {
     const capacity=effectiveCapacity(workspace,iteration.id);
     for (const member of workspace.members) {
     const global=capacityEntry(capacity,member.id);

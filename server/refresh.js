@@ -1,4 +1,4 @@
-import {sourcesOf,sourceFor,planningItem,remoteFields,mergeProjects} from './multi-project.js';
+import {sourcesOf,sourceFor,planningItem,remoteFields,mergeProjects,jointIteration} from './multi-project.js';
 import {capacityEntry,workingCapacity,effectiveCapacity,sameCapacity,same} from './planner.js';
 export async function refreshSection(workspace,section,azure,rules,report=()=>{}) {
   if(!workspace || workspace.mode!=='azure') throw new Error('Importa proyectos de Azure DevOps primero.');
@@ -12,7 +12,21 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     refreshed.push(await azure.import(source.config,p=>report({...p,message:`${source.config.project} (${index+1}/${originals.length}) · ${p.message}`}),rules,{section,snapshot:source}));
   }
   if(section==='tasks') {
-    const fresh=refreshed.flatMap((data,index)=>data.items.map(item=>planningItem(next,item,originals[index]))), ids=new Set(fresh.map(item=>item.id));
+    // The latest finished iteration, whose open tasks are downloaded now, joins
+    // the calendar so they can be decided. It is never planned.
+    const finished=refreshed.map(data=>data.iterations.filter(i=>i.past));
+    if(!next.sources) {
+      if(finished[0].some(i=>!next.iterations.some(known=>known.id===i.id))) next.iterations=[...finished[0],...next.iterations.filter(i=>!i.past && !finished[0].some(p=>p.id===i.id))];
+    } else {
+      next.sources.forEach((source,index)=>{source.iterations=[...finished[index],...source.iterations.filter(i=>!i.past && !finished[index].some(p=>p.id===i.id))];});
+      const calendar=next.iterations.filter(i=>!i.past);
+      for(const source of next.sources) for(const iteration of source.iterations.filter(i=>i.past)) {
+        if(calendar.some(j=>j.sourceIterations?.[source.id]===iteration.id)) continue;
+        jointIteration(calendar,source,iteration).sourceIterations[source.id]=iteration.id;
+      }
+      next.iterations=calendar.sort((a,b)=>(a.attributes?.startDate ?? '').localeCompare(b.attributes?.startDate ?? ''));
+    }
+    const fresh=refreshed.flatMap((data,index)=>data.items.map(item=>planningItem(next,item,sourcesOf(next)[index]))), ids=new Set(fresh.map(item=>item.id));
     // Local work survives the download: items not created yet, and edited items that
     // Azure no longer lists as open, so their changes can still be reviewed.
     next.items=[...fresh,...workspace.items.filter(item=>!ids.has(item.id) && (item.localOnly || workspace.drafts?.[item.id]))];
@@ -24,12 +38,6 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
       if(!Object.keys(draft).length) delete next.drafts[id];
     }
     next.conflicts={};
-    // The latest finished iteration, whose open tasks were just downloaded, joins
-    // the calendar so they can be decided. It is never planned.
-    if(!next.sources) {
-      const past=refreshed[0].iterations.filter(i=>i.past);
-      if(past.some(i=>!next.iterations.some(known=>known.id===i.id))) next.iterations=[...past,...next.iterations.filter(i=>!i.past && !past.some(p=>p.id===i.id))];
-    }
     if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.workItemStates=refreshed[index].workItemStates ?? source.workItemStates;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
     else {next.backlogLevels=refreshed[0].backlogLevels;next.workItemStates=refreshed[0].workItemStates ?? next.workItemStates;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}
     next.warnings=[...new Set([...(next.warnings ?? []),...refreshed.flatMap(data=>data.warnings ?? [])])];

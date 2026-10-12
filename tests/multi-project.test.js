@@ -167,3 +167,12 @@ test('uploading a joint iteration writes its project split and keeps other itera
  assert.deepEqual(result.failures,[]);assert.deepEqual(calls.map(c=>c[0]),['A','B']);
  assert.equal(planningWorkspace(store.data.azure).capacityPendingByIteration[iterationId],undefined);
 });
+test('each project\'s finished iteration joins the calendar to review its tasks, without capacity or allocation',()=>{
+ const withFinished=(name,id,finish)=>{const p=project(name,id,5);p.iterations.unshift({id:'done-'+name,name:'Done '+name,path:name+'\\Done',past:true,attributes:{startDate:'2026-08-31T00:00:00Z',finishDate:finish}});p.items.push({...p.items[0],id:id+100,iterationPath:name+'\\Done'});return p;};
+ const ws=mergeProjects(withFinished('A',1,'2026-09-11T00:00:00Z'),withFinished('B',2,'2026-09-10T00:00:00Z'));
+ const done=ws.iterations.filter(i=>i.past);
+ assert.equal(done.length,2,'different dates are kept apart without an overlap error');
+ assert.ok(done.every(i=>!ws.capacities[i.id]));
+ assert.ok(ws.items.filter(i=>i.id>100).every(i=>done.some(d=>d.path===i.iterationPath)));
+ assert.ok(projectCapacityPlans(ws).every(plan=>!done.some(d=>d.id===plan.iterationId)));
+});

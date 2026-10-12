@@ -30,6 +30,17 @@ export function remoteFields(workspace, item, fields) {
   if (!remote) throw new Error(`«${source.config.project}» no tiene una iteración con estas fechas. Elige otra iteración.`);
   return { ...fields, iterationPath: remote.path };
 }
+// The shared iteration of the calendar with the same dates as a project's one.
+// It counts as finished only while every project's iteration is finished.
+export function jointIteration(calendar, source, iteration) {
+  const dates = period(iteration), group = dates ?? `${source.id}/${iteration.id}`, id = `joint:${group}`;
+  let joint = calendar.find(j => j.id === id);
+  if (!joint) {
+    joint = { ...iteration, id, path: `Planificación\\${group}`, name: dates ? `${dates.split('/').join(' → ')}` : `${source.config.project} · ${iteration.name}`, sourceIterations: {} };
+    calendar.push(joint);
+  } else if (!iteration.past) delete joint.past;
+  return joint;
+}
 export function mergeProjects(previous, imported) {
   if (!previous) return imported;
   if (key(previous.config.organization) !== key(imported.config.organization)) throw new Error('Los proyectos de una planificación deben pertenecer a la misma organización.');
@@ -44,14 +55,10 @@ export function mergeProjects(previous, imported) {
   }
   sources.push(...incomingSources);
   const members = [...new Map(sources.flatMap(s => s.members).map(m => [m.id,m])).values()];
-  const iterations = [], periods = new Map();
-  for (const source of sources) for (const iteration of source.iterations.filter(i=>!i.past)) {
-    const dates = period(iteration), group = dates ?? `${source.id}/${iteration.id}`;
-    let joint = periods.get(group);
-    if (!joint) {
-      joint = { ...iteration, id: `joint:${group}`, path: `Planificación\\${group}`, name: dates ? `${dates.split('/').join(' → ')}` : `${source.config.project} · ${iteration.name}`, sourceIterations: {} };
-      periods.set(group,joint); iterations.push(joint);
-    }
+  // Each project's latest finished iteration joins too, only to decide its open tasks.
+  const iterations = [];
+  for (const source of sources) for (const iteration of source.iterations) {
+    const joint = jointIteration(iterations, source, iteration), dates = period(iteration);
     if (joint.sourceIterations[source.id]) {
       const first = source.iterations.find(i => i.id === joint.sourceIterations[source.id]);
       throw new Error(`«${source.config.project}» tiene dos iteraciones con las mismas fechas (${dates.replace('/',' → ')}): «${first?.name}» y «${iteration.name}». Corrige el calendario del equipo antes de unirlo.`);
@@ -64,8 +71,8 @@ export function mergeProjects(previous, imported) {
     const source = sources.find(s => s.id === id), iteration = source.iterations.find(i => i.id === iterationId);
     return `«${source.config.project}» · ${iteration.name} (${period(iteration).replace('/',' → ')})`;
   }).join(' y ');
-  const overlaps = [];
-  for (const [index, a] of iterations.entries()) for (const b of iterations.slice(index + 1)) {
+  const overlaps = [], planned = iterations.filter(i => !i.past);
+  for (const [index, a] of planned.entries()) for (const b of planned.slice(index + 1)) {
     if(!period(a) || !period(b)) continue;
     if(a.attributes.startDate.slice(0,10)<=b.attributes.finishDate.slice(0,10) && b.attributes.startDate.slice(0,10)<=a.attributes.finishDate.slice(0,10)) overlaps.push(`${describe(a)} se solapa con ${describe(b)}`);
   }
@@ -76,7 +83,9 @@ export function mergeProjects(previous, imported) {
   // from Azure, while the others come from the local copy: an item moved since then
   // stays only in the project where Azure has it now.
   const current = new Set(imported.items.map(item => item.id));
-  const retained = previous.items.filter(item=>!previous.iterations.some(i=>i.past && i.path===item.iterationPath)).filter(item => (item.sourceId ?? sourceId(previous.config)) !== incoming && !current.has(item.id)).map(item => {
+  // Tasks of a finished iteration that is no longer in the calendar are left out.
+  const stillThere = i => Object.entries(i.sourceIterations ?? { [sourceId(previous.config)]: i.id }).some(([source, id]) => iterations.some(j => j.sourceIterations[source] === id));
+  const retained = previous.items.filter(item=>!previous.iterations.some(i=>i.past && i.path===item.iterationPath && !stillThere(i))).filter(item => (item.sourceId ?? sourceId(previous.config)) !== incoming && !current.has(item.id)).map(item => {
     const source = sourcesOf(previous).find(s=>s.id===(item.sourceId ?? sourceId(previous.config)));
     return planningItem(workspace,{...item,...remoteFields(previous,item,{iterationPath:item.iterationPath})},source);
   });
@@ -84,7 +93,7 @@ export function mergeProjects(previous, imported) {
   const seen = new Map(), duplicates = [];
   for (const item of workspace.items) { if (seen.has(item.id)) duplicates.push([seen.get(item.id), item]); else seen.set(item.id, item); }
   if (duplicates.length) throw new Error(`Hay elementos duplicados entre los proyectos importados: ${duplicates.slice(0,5).map(([a,b]) => `#${a.id} «${a.title}» (${a.project ?? '?'} y ${b.project ?? '?'})`).join('; ')}${duplicates.length > 5 ? `; y ${duplicates.length - 5} más` : ''}.`);
-  for (const iteration of iterations) {
+  for (const iteration of planned) {
     const old = previous.iterations.find(i => period(i) && period(i) === period(iteration));
     const oldCapacity = old && previous.capacities?.[old.id];
     const teamMembers = members.map(member => {

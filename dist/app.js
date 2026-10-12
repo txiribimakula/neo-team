@@ -1183,6 +1183,7 @@ function render() {
   // so they are not mistaken for updating other sections (Jira has its own ⟳).
   const planning=isPlanningTab();
   $('#save-status').textContent=ws && planning ? savedStatus() : '';
+  $('#server-outdated').hidden=!state.outdated;
   const syncButton=$('#sync-button'), changes=pendingCount();
   syncButton.hidden=!planning;
   // Each new pending change restarts the spin straight away.

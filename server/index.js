@@ -3,6 +3,7 @@ import {refreshSection,downloadCapacity} from './refresh.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { readdirSync, statSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, resolve, sep } from 'node:path';
@@ -174,12 +175,24 @@ function requireSession(req) {
   if (req.headers['x-neo-csrf'] !== csrf) throw Object.assign(fail('La sesión local ha caducado. Recarga la aplicación para renovarla.', 403), { reason: 'session' });
 }
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
+// The server keeps running the code it started with, while the interface is read
+// from disk on every request: after an update, it asks to be restarted.
+const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
+const startedCode = serverCode();
+let codeCheckedAt = 0, outdated = false;
+function serverOutdated() {
+  if (!outdated && Date.now() - codeCheckedAt > 5000) {
+    codeCheckedAt = Date.now();
+    try { outdated = serverCode() > startedCode; } catch { /* Checked again later. */ }
+  }
+  return outdated;
+}
 function publicState({ operationComplete = false } = {}) {
   // Successful POST snapshots describe the state after this operation ends.
   // GET snapshots still expose running operations for progress and recovery.
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
-  return { csrf, version: store.data.version, config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
+  return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
     workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;

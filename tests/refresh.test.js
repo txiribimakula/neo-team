@@ -94,3 +94,14 @@ test('joint iteration refresh preserves the capacity budget and tasks while rema
  const next=await refreshSection(ws,'iterations',azure,[]);
  assert.deepEqual(next.capacities,ws.capacities);assert.deepEqual(next.items,ws.items);assert.deepEqual(next.members,ws.members);
 });
+test('in a joint plan the task download brings each project\'s finished iteration, with its open tasks',async()=>{
+ const ws=joint(),dates={startDate:'2026-01-05T00:00:00Z',finishDate:'2026-01-16T00:00:00Z',timeFrame:0};
+ const finished=source=>({id:'done'+source.config.project,name:'Done',path:`${source.config.project}\\Done`,attributes:dates,past:true});
+ const azure={import:async(config,report,rules,{snapshot})=>({...snapshot,iterations:[finished(snapshot),...snapshot.iterations],items:snapshot.config.project==='Other' ? [] : [{id:900,type:'Task',title:'Pendiente',state:'Active',iterationPath:finished(snapshot).path,assignedTo:'',tags:[],parent:null}],warnings:[]})};
+ const next=await refreshSection(ws,'tasks',azure,[]);
+ const done=next.iterations.find(i=>i.past);
+ assert.equal(next.iterations[0],done);assert.equal(next.iterations.filter(i=>i.past).length,1);
+ assert.deepEqual(Object.keys(done.sourceIterations).length,2);
+ assert.equal(next.items.find(i=>i.id===900).iterationPath,done.path);
+ assert.ok(!next.capacities[done.id]);
+});
