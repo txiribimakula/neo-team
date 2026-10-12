@@ -127,6 +127,14 @@ test('import accepts the documented empty root backlog path and qualifies relati
     assert.equal(imported.settings.backlogIteration.path,expected);
   }
 });
+test('import brings the latest finished iteration to review it, without its capacity',async()=>{
+  const it=(id,start,finish,timeFrame)=>({id,name:id,path:`\\${id}`,attributes:{startDate:`${start}T00:00:00Z`,finishDate:`${finish}T00:00:00Z`,timeFrame}});
+  const gateway=backlogGateway({iterations:[it('s1','2026-01-05','2026-01-16','past'),it('s2','2026-01-19','2026-01-30','past'),it('s3','2099-02-02','2099-02-13','future')]}), base=gateway.call, asked=[];
+  gateway.call=async(name,args)=>{ if(name==='work' && args.action==='get_team_capacity') asked.push(args.iterationId); return base(name,args); };
+  const result=await gateway.import({organization:'org',project:'Project',team:'Team'});
+  assert.deepEqual(result.iterations.map(i=>[i.id,!!i.past]),[['s2',true],['s3',false]]);
+  assert.deepEqual(asked,['s3']);
+});
 test('import distinguishes a missing backlog from malformed iterations, members and backlog levels',async()=>{
   const config = {organization:'org',project:'Project',team:'Team'};
   for (const backlog of [null, {}, {path:null}, {path:42}]) {

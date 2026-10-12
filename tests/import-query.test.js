@@ -8,7 +8,7 @@ function gatewayFor({unknown=false,page=false}={}) {
  gateway.call=async(name,args)=>{
   calls.push({name,args});
   if(name==='work' && args.action==='get_team_settings')return {backlogIteration:{path:''},areaPaths:[{value:'Project\\Team',includeChildren:true}],workingDays:[1,2,3,4,5]};
-  if(name==='work' && args.action==='list_team_iterations')return [{id:'old',name:'Old',path:'Project\\Old',attributes:{timeFrame:'past'}},{id:'now',name:'Now',path:'Project\\Now',attributes:{timeFrame:'current'}}];
+  if(name==='work' && args.action==='list_team_iterations')return [{id:'older',name:'Older',path:'Project\\Older',attributes:{timeFrame:'past',finishDate:'2026-01-02T00:00:00Z'}},{id:'old',name:'Old',path:'Project\\Old',attributes:{timeFrame:'past',finishDate:'2026-01-16T00:00:00Z'}},{id:'now',name:'Now',path:'Project\\Now',attributes:{timeFrame:'current'}}];
   if(name==='neo_team_members')return [{id:'ana',displayName:'Ana'}];
   if(name==='wit_backlog' && args.action==='list')return [{workItemTypes:[{name:'User Story'}]}];
   if(name==='neo_work_item_types')return [{name:'Task'},{name:'User Story'}];
@@ -29,7 +29,7 @@ test('only leaf types are selected; closed parents are fetched by ID as hierarch
  const {gateway,calls,progress}=gatewayFor();
  const ws=await gateway.import(config,p=>progress.push(p));
  assert.deepEqual(ws.items.map(i=>[i.id,i.contextOnly ?? false]),[[1,false],[10,true]]);
- assert.deepEqual(ws.iterations.map(i=>i.id),['now']);assert.deepEqual(Object.keys(ws.capacities),['now']);
+ assert.deepEqual(ws.iterations.map(i=>[i.id,!!i.past]),[['old',true],['now',false]]);assert.deepEqual(Object.keys(ws.capacities),['now']);
  assert.equal(ws.settings.backlogIteration.path,'Project');assert.equal(ws.members[0].id,'ana');assert.deepEqual(ws.completedStates,{Task:'Closed','User Story':'Closed'});
  const queries=calls.filter(c=>c.name==='neo_query_work_items');
  assert.ok(queries.length);
@@ -39,7 +39,7 @@ test('only leaf types are selected; closed parents are fetched by ID as hierarch
   } else {
     assert.match(args.wiql,/WorkItemType\] = 'Task'/);
     assert.match(args.wiql,/\[System.State\] IN \('Active'\)/);assert.doesNotMatch(args.wiql,/Closed|Discarded|Delivered/);
-    assert.match(args.wiql,/NOT UNDER 'Project\\Old'/);
+    assert.match(args.wiql,/NOT UNDER 'Project\\Older'/);assert.match(args.wiql,/OR \[System.IterationPath\] UNDER 'Project\\Old'/);assert.doesNotMatch(args.wiql,/NOT UNDER 'Project\\Old'/);
   }
   assert.ok(args.fields.includes('System.Parent'));
  }

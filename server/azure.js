@@ -263,8 +263,12 @@ export class AzureGateway {
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
     const today = localDay();
-    const pastPaths=rawIterations.filter(i=>isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
-    const iterations=rawIterations.filter(i=>!isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración del equipo'));
+    // The latest finished iteration comes too, to decide its open work before
+    // planning; it is never planned. Older ones are left out.
+    const past=rawIterations.filter(i=>isPastIteration(i,today)), finish=i=>String(i.attributes?.finishDate ?? '').slice(0,10);
+    const latest=past.reduce((last,i)=>!last || finish(i)>=finish(last) ? i : last,null);
+    const pastPaths=past.filter(i=>i!==latest).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
+    const iterations=rawIterations.filter(i=>i===latest || !isPastIteration(i,today)).map(i=>({...normalizeIteration(i,config.project,'una iteración del equipo'),...(i===latest ? {past:true} : {})}));
     if(section==='iterations') return {...snapshot,iterations};
     const added=section==='tasks' ? iterations.filter(i=>!snapshot.iterations.some(known=>known.id===i.id)) : [];
     const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
@@ -328,7 +332,7 @@ export class AzureGateway {
         for(const item of found) if(!included.has(item.id)) {items.push({...item,contextOnly:true});included.add(item.id);}
       }
     }
-    for(const iteration of section==='tasks' ? [] : iterations) {
+    for(const iteration of section==='tasks' ? [] : iterations.filter(i=>!i.past)) {
       report('capacity',`Consultando capacidad de «${iteration.name}»…`,{imported:items.length});
       try {capacities[iteration.id]=await this.capacity(config,iteration.id);}
       catch(error) {warnings.push(`No se pudo consultar la capacidad de «${iteration.name}» en ${config.project}: ${String(error?.message ?? error).slice(0,500)}`);}

@@ -801,7 +801,7 @@ function previousView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration) return '<div class="empty-result">Elige primero la iteración que vas a planificar.</div>';
   const {previous,tasks}=previousTasks(iteration);
-  if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza los datos para traer la última iteración terminada.' : ''}</p></div>`;
+  if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza las iteraciones y después las tareas para traer la última iteración terminada.' : ''}</p></div>`;
   const owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
   const groups=[
     ...ws.members.map((member,index)=>({id:key(member),name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
