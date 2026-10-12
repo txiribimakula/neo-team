@@ -753,3 +753,4 @@ body.jira-fit .jira-side.is-closed{display:block}
 .server-outdated[hidden]{display:none}
 .capacity-grid thead th.cg-cross{background:#e9f1e3;color:var(--ink)}.capacity-grid thead .cg-day.cg-cross span{color:#5d7a4c}.capacity-grid tbody .cg-person.cg-cross{background:#f4f8f0}
 .person-note{display:block;width:calc(100% - 36px);margin:0 18px 14px;resize:none;field-sizing:content;min-height:34px;max-height:180px;border:1px solid transparent;border-radius:7px;background:#f6f8f5;padding:7px 10px;font:inherit;font-size:13px;line-height:1.45;color:var(--ink)}.person-note:hover{border-color:var(--line)}.person-note:focus{background:white;border-color:#c5d3c0}.person-note::placeholder{color:#a3ada5}
+.card-move{margin-top:10px;display:flex;justify-content:flex-end}

@@ -1112,7 +1112,12 @@ function taskEstimates(item) {
   const html=input('originalEstimate',fields.originalEstimate)+input('remainingWork',fields.remainingWork);
   return html ? `<div class="task-estimates">${html}</div>` : '';
 }
-function taskCard(item, inBacklog = false) {
+// The plannable iteration that starts right after the given one.
+function nextIteration(iteration=selected()) {
+  const start=dayValue(iteration?.attributes?.startDate);
+  return start ? planningIterations().filter(i=>dayValue(i.attributes?.startDate)>start).sort((a,b)=>dayValue(a.attributes.startDate).localeCompare(dayValue(b.attributes.startDate)))[0] ?? null : null;
+}
+function taskCard(item, inBacklog = false, next = null) {
   const estimates = taskEstimates(item);
   const effort = estimates ? '' : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
   return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="${commentsOpen.has(item.id) ? 'false' : 'true'}" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
@@ -1122,6 +1127,7 @@ function taskCard(item, inBacklog = false) {
     ${estimates}
     ${taskComments(item)}
     ${inBacklog && item.iterationPath !== state.workspace.settings.backlogIteration.path ? `<div class="local-note">${escape(iterationName(item.iterationPath))}</div>` : ''}
+    ${next ? `<div class="card-move"><button type="button" class="button small" data-action="to-next-iteration" data-task="${item.id}">Pasar a ${escape(next.name)} →</button></div>` : ''}
   </article>`;
 }
 function lane(member, allItems, index, iteration) {
@@ -1165,7 +1171,8 @@ function unassignedTasks(iteration=selected()) {
 function leftPanelContent() {
   if (leftPanel==='unassigned') {
     const tasks=unassignedTasks().filter(i=>matchesTask(i,backlogQuery)).sort((a,b)=>(a.priority ?? 5)-(b.priority ?? 5) || a.id-b.id);
-    return tasks.map(i=>taskCard(i)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
+    const next=nextIteration();
+    return tasks.map(i=>taskCard(i,false,next)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
   }
   return treeView({availableOnly:true,search:backlogQuery});
 }
@@ -2005,6 +2012,13 @@ const actions = {
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
+  'to-next-iteration': async el=>{
+    const id=Number(el.dataset.task), next=nextIteration();
+    if (!next) return;
+    await request('/api/stage',{edits:[{id,changes:{iterationPath:next.path}}]});review=null;render();
+    ($('.unassigned-list [data-action="to-next-iteration"]') ?? $('[data-action="left-panel"][data-panel="unassigned"]'))?.focus({preventScroll:true});
+    toast(`#${id} pasa a ${next.name}. Pendiente de sincronizar.`);
+  },
   'refresh-task-states': el => editTask(Number(el.dataset.task), true),
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
   'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
