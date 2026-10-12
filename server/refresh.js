@@ -24,6 +24,12 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
       if(!Object.keys(draft).length) delete next.drafts[id];
     }
     next.conflicts={};
+    // The latest finished iteration, whose open tasks were just downloaded, joins
+    // the calendar so they can be decided. It is never planned.
+    if(!next.sources) {
+      const past=refreshed[0].iterations.filter(i=>i.past);
+      if(past.some(i=>!next.iterations.some(known=>known.id===i.id))) next.iterations=[...past,...next.iterations.filter(i=>!i.past && !past.some(p=>p.id===i.id))];
+    }
     if(next.sources) next.sources.forEach((source,index)=>{source.backlogLevels=refreshed[index].backlogLevels;source.workItemStates=refreshed[index].workItemStates ?? source.workItemStates;source.completedStates={...refreshed[index].completedStates,...source.completedStates};source.estimateFields=refreshed[index].estimateFields ?? source.estimateFields;});
     else {next.backlogLevels=refreshed[0].backlogLevels;next.workItemStates=refreshed[0].workItemStates ?? next.workItemStates;next.completedStates={...refreshed[0].completedStates,...next.completedStates};next.estimateFields=refreshed[0].estimateFields ?? next.estimateFields;}
     next.warnings=[...new Set([...(next.warnings ?? []),...refreshed.flatMap(data=>data.warnings ?? [])])];

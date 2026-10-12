@@ -270,7 +270,7 @@ export class AzureGateway {
     const pastPaths=past.filter(i=>i!==latest).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
     const iterations=rawIterations.filter(i=>i===latest || !isPastIteration(i,today)).map(i=>({...normalizeIteration(i,config.project,'una iteración del equipo'),...(i===latest ? {past:true} : {})}));
     if(section==='iterations') return {...snapshot,iterations};
-    const added=section==='tasks' ? iterations.filter(i=>!snapshot.iterations.some(known=>known.id===i.id)) : [];
+    const added=section==='tasks' ? iterations.filter(i=>!i.past && !snapshot.iterations.some(known=>known.id===i.id)) : [];
     const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
     if(!snapshot) report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
     const members = snapshot ? snapshot.members : await this.call('neo_team_members', context);

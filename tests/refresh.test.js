@@ -40,6 +40,13 @@ test('task download asks with the team current sprints and areas but keeps the l
  assert.ok(calls.every(([name])=>['work','neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)),'no members or capacities are read');
  assert.ok(!calls.some(([name,args])=>name==='work' && args.action==='get_team_capacity'));
 });
+test('the task download brings the latest finished iteration to decide its open tasks',async()=>{
+ const ws=fixture(),{azure}=gateway(ws),finished={id:'sprint-23',name:'Sprint 23',path:'Neo Platform\\Sprint 23',attributes:{startDate:'2026-01-05T00:00:00Z',finishDate:'2026-01-16T00:00:00Z',timeFrame:0}};
+ const base=azure.call;azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [finished,...ws.iterations] : base(name,args);
+ const next=await refreshSection(ws,'tasks',azure,[]);
+ assert.deepEqual(next.iterations.map(i=>[i.id,!!i.past]),[['sprint-23',true],...ws.iterations.map(i=>[i.id,false])]);
+ assert.ok(!next.warnings.some(w=>/iteraciones nuevas/.test(w)));
+});
 test('a sprint added to the team after the import is included in the task download, with a notice',async()=>{
  const ws=fixture(),{azure,calls}=gateway(ws),added={id:'sprint-new',name:'Sprint nuevo',path:'Neo Platform\\Sprint nuevo',attributes:{timeFrame:2}};
  const base=azure.call;azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [...ws.iterations,added] : base(name,args);
