@@ -1117,7 +1117,12 @@ function nextIteration(iteration=selected()) {
   const start=dayValue(iteration?.attributes?.startDate);
   return start ? planningIterations().filter(i=>dayValue(i.attributes?.startDate)>start).sort((a,b)=>dayValue(a.attributes.startDate).localeCompare(dayValue(b.attributes.startDate)))[0] ?? null : null;
 }
-function taskCard(item, inBacklog = false, next = null) {
+// The assignee can be changed on the card itself, as an alternative to dragging it.
+function assigneeSelect(item) {
+  const ws=state.workspace, outside=item.assignedTo && !ws.members.some(m=>key(m)===item.assignedTo);
+  return `<select class="card-assignee" data-assign-task="${item.id}" aria-label="Responsable de #${item.id}"><option value="">Sin asignar</option>${ws.members.map(m=>`<option value="${escape(key(m))}" ${key(m)===item.assignedTo ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${outside ? `<option value="${escape(item.assignedTo)}" selected>${escape(item.assigneeName || item.assignedTo)}</option>` : ''}</select>`;
+}
+function taskCard(item, inBacklog = false, next = null, assign = false) {
   const estimates = taskEstimates(item);
   const effort = estimates ? '' : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
   return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="${commentsOpen.has(item.id) ? 'false' : 'true'}" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
@@ -1127,7 +1132,7 @@ function taskCard(item, inBacklog = false, next = null) {
     ${estimates}
     ${taskComments(item)}
     ${inBacklog && item.iterationPath !== state.workspace.settings.backlogIteration.path ? `<div class="local-note">${escape(iterationName(item.iterationPath))}</div>` : ''}
-    ${next ? `<div class="card-move"><button type="button" class="button small" data-action="to-next-iteration" data-task="${item.id}">Pasar a ${escape(next.name)} →</button></div>` : ''}
+    ${next || assign ? `<div class="card-move">${assign ? assigneeSelect(item) : ''}${next ? `<button type="button" class="button small" data-action="to-next-iteration" data-task="${item.id}">Pasar a ${escape(next.name)} →</button>` : ''}</div>` : ''}
   </article>`;
 }
 function lane(member, allItems, index, iteration) {
@@ -1138,7 +1143,7 @@ function lane(member, allItems, index, iteration) {
   const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
   const open=expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
   const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
-  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i,false,nextIteration(iteration))).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
+  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i,false,nextIteration(iteration),true)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
 }
 // What is typed in a note survives a redraw (such as opening the lane) until it is saved.
 const noteDrafts={};
@@ -1172,7 +1177,7 @@ function leftPanelContent() {
   if (leftPanel==='unassigned') {
     const tasks=unassignedTasks().filter(i=>matchesTask(i,backlogQuery)).sort((a,b)=>(a.priority ?? 5)-(b.priority ?? 5) || a.id-b.id);
     const next=nextIteration();
-    return tasks.map(i=>taskCard(i,false,next)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
+    return tasks.map(i=>taskCard(i,false,next,true)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
   }
   return treeView({availableOnly:true,search:backlogQuery});
 }
@@ -1197,7 +1202,7 @@ function board(iteration, planned) {
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
   const widen=`<button type="button" class="icon-button backlog-width" data-action="toggle-backlog-width" aria-pressed="${backlogWide}" title="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}" aria-label="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}">${backlogWide ? shrinkIcon : expandIcon}</button>`;
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off"><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
-  const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i,false,nextIteration())).join('')}</div></section>` : '';
+  const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';
   return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
 
@@ -2065,7 +2070,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('a[href]')) return;
   const target = event.target.closest('[data-action]');
   // Fields and comments inside a card are edited in place; they do not open it.
-  if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments')) return;
+  if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments, .card-assignee')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
   if (event.target.closest('[data-assistant-cancel]')) { cancelAssistant(); return; }
   // The answer field of a stuck ticket is written in place, without opening it.
@@ -2177,6 +2182,14 @@ document.addEventListener('change',async event=>{
     if(el.dataset.prBody){await saveFinding(el,{body:el.value});return;}
     if(el.dataset.prSuggestion){await saveFinding(el,{suggestion:el.value});return;}
     if(el.dataset.capacityHours!==undefined){await saveCapacityHours(el);return;}
+    if(el.dataset.assignTask!==undefined){
+      const id=Number(el.dataset.assignTask), iteration=selected();
+      await stage(id,{assignedTo:el.value});
+      $(`[data-assign-task="${id}"]`)?.focus({preventScroll:true});
+      const warning=el.value && capacityWarning(el.value,iteration);
+      toast(warning ? `Asignada en local. ${warning}` : 'Planificación guardada en local.', warning ? 'warning' : 'info');
+      return;
+    }
     // The note is already on screen: it is saved without redrawing, so focus stays.
     if(el.dataset.personNote!==undefined){const id=el.dataset.personNote,text=el.value;await request('/api/person-note',{memberId:id,text});if(noteDrafts[id]===text)delete noteDrafts[id];return;}
     if(el.dataset.taskField){
