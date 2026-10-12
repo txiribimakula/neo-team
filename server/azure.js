@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
 import { normalizeItem, descriptionHtml } from './planner.js';
-import { isExecutable } from '../dist/hierarchy.js';
+import { isExecutable, localDay } from '../dist/hierarchy.js';
 import { activityReader, describeCall, seconds } from './activity.js';
 import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceIssue, maintenanceWiql } from './maintenance.js';
 import { MY_ITERATION_FIELDS, MY_ITERATION_LIMIT, boardItem, currentIteration, myIterationBoard, myIterationWiql, parentsWiql } from './my-iteration.js';
@@ -255,7 +255,7 @@ export class AzureGateway {
     if(section!=='tasks') report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     const pastPaths=rawIterations.filter(i=>isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
     const iterations=rawIterations.filter(i=>!isPastIteration(i,today)).map(i=>normalizeIteration(i,config.project,'una iteración del equipo'));
     if(section==='iterations') return {...snapshot,iterations};

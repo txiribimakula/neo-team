@@ -7,11 +7,14 @@ import { myIterationView, workDaysLeft } from '../dist/my-iteration.js';
 const states = [{ name: 'To Do', category: 'proposed' }, { name: 'In Progress', category: 'inprogress' }, { name: 'Done', category: 'completed' }, { name: 'Removed', category: 'removed' }];
 const raw = (id, type, state, parent = null, extra = {}) => ({ id, fields: { 'System.Title': `Item ${id}`, 'System.WorkItemType': type, 'System.State': state, 'System.Parent': parent, 'System.AssignedTo': { displayName: 'Ana García' }, ...extra } });
 
-test('the current iteration is the one Azure marks or the one whose dates contain today', () => {
-  const iterations = [{ id: 'a', attributes: { startDate: '2026-09-21T00:00:00Z', finishDate: '2026-10-02T00:00:00Z' } }, { id: 'b', attributes: { startDate: '2026-10-05T00:00:00Z', finishDate: '2026-10-16T00:00:00Z' } }];
+test('the current iteration is the one whose dates contain today or, between two, the next one', () => {
+  const iterations = [{ id: 'b', attributes: { startDate: '2026-10-05T00:00:00Z', finishDate: '2026-10-16T00:00:00Z', timeFrame: 'future' } }, { id: 'a', attributes: { startDate: '2026-09-21T00:00:00Z', finishDate: '2026-10-02T00:00:00Z', timeFrame: 'current' } }];
+  assert.equal(currentIteration(iterations, '2026-09-21').id, 'a', 'the start date is included');
   assert.equal(currentIteration(iterations, '2026-10-16').id, 'b', 'the end date is included');
-  assert.equal(currentIteration(iterations, '2026-10-03'), null);
-  assert.equal(currentIteration([...iterations, { id: 'c', attributes: { timeFrame: 'current' } }], '2026-10-06').id, 'c');
+  assert.equal(currentIteration(iterations, '2026-10-03').id, 'b', 'between two, the next one');
+  assert.equal(currentIteration(iterations, '2026-10-12').id, 'b', 'dates prevail over an outdated mark');
+  assert.equal(currentIteration(iterations, '2026-10-17'), null);
+  assert.equal(currentIteration([{ id: 'c', attributes: { timeFrame: 'current' } }], '2026-10-06').id, 'c', 'undated, the mark decides');
   assert.match(myIterationWiql("P\\Sprint 'A'"), /\[System\.IterationPath\] = 'P\\Sprint ''A''' AND \[System\.AssignedTo\] = @Me/);
 });
 

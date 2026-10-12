@@ -6,15 +6,9 @@ const CARD_TYPES = new Set(['task', 'bug', 'tarea']);
 const key = value => String(value ?? '').trim().toLowerCase();
 const quoteWiql = value => `'${String(value).replace(/'/g, "''")}'`;
 
-// The iteration Azure marks as current or, without that mark, the one whose
-// dates (inclusive) contain today.
-export function currentIteration(iterations, today = new Date().toISOString().slice(0, 10)) {
-  const marked = iterations.find(i => [1, 'current'].includes(typeof i.attributes?.timeFrame === 'string' ? i.attributes.timeFrame.toLowerCase() : i.attributes?.timeFrame));
-  return marked ?? iterations.find(i => {
-    const start = i.attributes?.startDate?.slice(0, 10), finish = i.attributes?.finishDate?.slice(0, 10);
-    return start && finish && start <= today && today <= finish;
-  }) ?? null;
-}
+// The current iteration follows the same rule as planning: dates first, and
+// between two iterations the next one.
+export { currentIteration } from '../dist/hierarchy.js';
 
 export const myIterationWiql = path => `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.IterationPath] = ${quoteWiql(path)} AND [System.AssignedTo] = @Me ORDER BY [System.Id] ASC`;
 export const parentsWiql = ids => `SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN (${ids.join(',')})`;

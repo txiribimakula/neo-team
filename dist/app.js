@@ -4,7 +4,7 @@ import { maintenanceView, filterMaintenance, resetMaintenanceFilters } from './m
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, desktopRun, COLUMNS as JIRA_COLUMNS } from './jira.js';
-import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, completedState, isCompleted, markSnapshot } from './hierarchy.js';
+import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -27,7 +27,7 @@ const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
 const expandedLanes = new Set(), expandedPrevious = new Set();
 let previousGroupOrder = null;
-// Tareas works on the previous iteration (decide what is left) or the current one.
+// Tareas works on the previous iteration (decide what is left) or the one being planned.
 let planningPeriod = null;
 const modal = $('#modal');
 const syncPanel = $('#sync-panel');
@@ -562,14 +562,22 @@ async function saveConfig(importNow) {
   await importWithProgress($('#connection-progress'));
   modal.close(); selectedIteration = ''; tab = 'configuration'; render(); toast('Equipo importado. Ya puedes preparar la iteración.');
 }
+// The iteration being planned is remembered per mode and team, whichever it is.
+const planningKey = () => `neo-team:planning-iteration:${JSON.stringify([state?.mode ?? '', state?.workspace?.config?.organization ?? '', state?.workspace?.config?.project ?? '', state?.workspace?.config?.team ?? ''])}`;
+function chooseIteration(id) {
+  selectedIteration = id;
+  try { localStorage.setItem(planningKey(), id); } catch { /* Kept for this visit only. */ }
+}
 function selected() {
   const ws = state.workspace;
   if (!ws) return null;
   const options = planningIterations();
-  // By default the next iteration is planned: the current one is already under way.
   if (!options.some(i => i.id === selectedIteration)) {
+    let remembered = '';
+    try { remembered = localStorage.getItem(planningKey()) ?? ''; } catch { /* Without storage the default applies. */ }
+    // By default the next iteration is planned: the current one is already under way.
     const kinds=iterationKinds(options), pick=kind=>options.find(i=>kinds.get(i.id)===kind);
-    selectedIteration=(pick('next') || pick('future') || pick('current') || options[0])?.id || '';
+    selectedIteration=(options.find(i => i.id === remembered) || pick('next') || pick('future') || pick('current') || options[0])?.id || '';
   }
   return options.find(i => i.id === selectedIteration);
 }
@@ -710,7 +718,7 @@ async function askAssistant(form) {
   try {
     const {assistant}=await request('/api/assistant',{tab:which,prompt,history:ui.history,iterationId:selectedIteration,operationId});
     Object.assign(ui,{draft:'',reply:assistant.reply,changes:assistant.changes,history:[...ui.history,{prompt,reply:assistant.reply}].slice(-4)});
-    if (assistant.select) { selectedIteration=assistant.select; planningPeriod=null; laneOrder=null; previousGroupOrder=null; }
+    if (assistant.select) { chooseIteration(assistant.select); planningPeriod=null; laneOrder=null; previousGroupOrder=null; }
     if (assistant.changes.length) review=null;
   } catch (error) { ui.error=error.message; }
   finally { stop(); ui.running=false; render(); }
@@ -737,15 +745,13 @@ function stepTabs() {
   return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}</nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
-// Current, the one right after it, and later ones, each with its own colour.
+// Finished, current, the one right after it, and later ones, each with its own colour.
 function iterationKinds(iterations) {
-  const today=new Date().toISOString().slice(0,10), day=value=>String(value ?? '').slice(0,10);
-  const isCurrent=i=>['1','current'].includes(String(i.attributes?.timeFrame ?? '').toLowerCase()) || (day(i.attributes?.startDate) && day(i.attributes.startDate)<=today && today<=day(i.attributes?.finishDate));
-  const ordered=[...iterations].sort((a,b)=>day(a.attributes?.startDate).localeCompare(day(b.attributes?.startDate)));
-  const current=ordered.find(isCurrent), after=current ? ordered.slice(ordered.indexOf(current)+1) : ordered.filter(i=>day(i.attributes?.startDate)>today);
-  return new Map(iterations.map(i=>[i.id,i===current ? 'current' : i===after[0] ? 'next' : after.includes(i) ? 'future' : 'other']));
+  const day=value=>String(value ?? '').slice(0,10), current=currentIteration(state.workspace?.iterations ?? iterations), start=day(current?.attributes?.startDate);
+  const after=start ? [...iterations].filter(i=>day(i.attributes?.startDate)>start).sort((a,b)=>day(a.attributes.startDate).localeCompare(day(b.attributes.startDate))) : [];
+  return new Map(iterations.map(i=>[i.id,i.id===current?.id ? 'current' : i===after[0] ? 'next' : after.includes(i) ? 'future' : hasEnded(i) ? 'past' : 'other']));
 }
-const iterationKindLabel={current:'En curso',next:'Siguiente',future:'Futura',other:'Iteración'};
+const iterationKindLabel={past:'Anterior',current:'En curso',next:'Siguiente',future:'Futura',other:'Iteración'};
 function iterationView() {
   const ws=state.workspace, selectedOne=selected();
   if (!selectedOne) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
@@ -1012,7 +1018,7 @@ function plannerView() {
   // The previous iteration comes first while something there is still undecided.
   if (!previous) planningPeriod='current';
   else planningPeriod ??= open ? 'previous' : 'current';
-  const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>Iteración anterior</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>Iteración actual</small><span>${escape(iteration.name)}</span></button></div>` : '';
+  const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>${hasEnded(previous) ? 'Iteración anterior' : 'En curso'}</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : '';
   if (planningPeriod==='previous') return periods+previousView();
   return periods+board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
 }
@@ -1943,7 +1949,7 @@ const actions = {
   import: importData,
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
-  'choose-iteration': el=>{selectedIteration=el.dataset.iteration;planningPeriod=null;render();$(`[data-action="choose-iteration"][data-iteration="${CSS.escape(selectedIteration)}"]`)?.focus({preventScroll:true});},
+  'choose-iteration': el=>{chooseIteration(el.dataset.iteration);planningPeriod=null;render();$(`[data-action="choose-iteration"][data-iteration="${CSS.escape(selectedIteration)}"]`)?.focus({preventScroll:true});},
   'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
   'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);previousGroupOrder=null;updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),

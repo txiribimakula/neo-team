@@ -13,6 +13,18 @@ export function estimateFields(workspace, item) {
   if (known) return known;
   return {originalEstimate:item.originalEstimate!=null || item.type==='Task' ? 'Original Estimate' : null, remainingWork:item.canEstimateHours ? 'Remaining Work' : null};
 }
+// Today as a calendar day on this computer: iteration dates are calendar days.
+export const localDay = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+const dayOf = value => String(value ?? '').slice(0,10);
+export const hasEnded = (iteration, today = localDay()) => !!dayOf(iteration.attributes?.finishDate) && dayOf(iteration.attributes.finishDate) < today;
+// The current iteration is the one whose dates (end included) contain today.
+// Between two iterations the next one already counts as current. Only without
+// dates is Azure's mark used.
+export function currentIteration(iterations, today = localDay()) {
+  const dated = iterations.filter(i => dayOf(i.attributes?.startDate) && dayOf(i.attributes?.finishDate)).sort((a,b) => dayOf(a.attributes.startDate).localeCompare(dayOf(b.attributes.startDate)));
+  if (dated.length) return dated.find(i => !hasEnded(i, today)) ?? null;
+  return iterations.find(i => ['1','current'].includes(String(i.attributes?.timeFrame ?? '').toLowerCase())) ?? null;
+}
 // The iteration that starts right before the given one. Dates decide when they
 // exist; undated iterations keep the order in which Azure DevOps listed them.
 export function previousIteration(iterations, iterationId) {
