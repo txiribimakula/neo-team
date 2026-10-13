@@ -312,7 +312,7 @@ export const WINAPP_GUIDE = `Drive the application only through the winapp CLI (
 - Act: prefer \`winapp ui invoke <selector> -a <app>\` and \`winapp ui set-value <selector> <value> -a <app>\`; use \`winapp ui click\`, \`winapp ui send-keys\` or \`winapp ui scroll\` only when those cannot do it.
 - Prove: \`winapp ui screenshot -a <app>\` and \`winapp ui record\`. Add \`--json\` to read results. Run \`winapp ui <command> --help\` when unsure of an option.
 - Give the same WINAPP_UI_WORKFLOW_ID to every command of one sequence and run \`winapp ui yield\` when the sequence ends.
-- Immediately after launching or selecting the application, obtain its actual process ID (PID) from window inspection or Get-Process and call neo_desktop. Register again after every restart or when switching application processes. Neo Team continuously keeps its browser at minimum width on the left and that application on the right; do not maximize or rearrange either window.
+- Immediately after launching or selecting the application, obtain its actual process ID (PID) from window inspection or Get-Process and call neo_desktop. Register again after every restart or when switching application processes. Neo Team continuously keeps its browser maximized on one monitor and that application maximized on the application monitor; do not move, resize or rearrange either window.
 - Before each meaningful UI step, explain in Spanish what you are trying and what you expect; after it, describe what actually happened, any wait or failure, and the evidence file. Never include credentials or personal data in progress messages.
 - Save screenshots and recordings that prove what you saw in the evidencias/ folder of the ticket. Close the application when you finish.`;
 
@@ -946,6 +946,8 @@ Read what you need from them and the ticket files before answering.`;
     const missing = this.demo ? {} : { ...(await this.missing()), ...(this.needsCopilot ? { copilot: true } : {}) };
     return (NEEDS[stage] ?? []).filter(need => missing[need]);
   }
+  // A new choice of monitors reaches the stage that drives the application right away.
+  async setScreens(screens) { await this.desktopGuard?.screens?.(screens); }
   async modeOf(stage) { if (stage === 'collect') return 'auto'; if (stage === 'build') stage = 'verify'; return COLUMN_MODES.includes((await this.settings()).modes?.[stage]) ? (await this.settings()).modes[stage] : 'auto'; }
   // ▶ on a ticket works on that ticket alone: the others wait (Empezar is paused)
   // and it goes on through the next columns while their light is on autopilot.
@@ -1186,7 +1188,8 @@ Read what you need from them and the ticket files before answering.`;
       if (idle >= 20 && this.running.conversation !== 'waiting') this.activity({ kind: 'note', message: `${stage.name} sigue en curso · ${Math.floor((Date.now() - startedAt) / 1000)} s transcurridos. Esperando novedades del agente o de sus herramientas.` });
     }, 20000);
     try {
-      if (desktop) await desktop.start(this.running, entry => this.activity(entry)).catch(error => this.activity({ kind: 'warning', message: `No se pudo preparar la distribución: ${error.message}` }));
+      this.desktopGuard = desktop;
+      if (desktop) await desktop.start(this.running, entry => this.activity(entry), settings.screens).catch(error => this.activity({ kind: 'warning', message: `No se pudo preparar el control de monitores: ${error.message}` }));
       // Fixing, building and reviewing need the code; the example has none.
       const worktree = !this.demo && (['fix', 'build', 'review'].includes(stage.id) || (stage.id === 'verify' && settings.repository)) ? await this.worktree(settings, ticket, folder) : null;
       // What the review asks of this step, and for Revisar the code it reviews.
@@ -1238,6 +1241,7 @@ Read what you need from them and the ticket files before answering.`;
     } finally {
       clearInterval(heartbeat);
       this.building = null;
+      this.desktopGuard = null;
       await desktop?.stop().catch(error => this.activity({ kind: 'warning', message: `No se pudo cerrar el control de ventanas: ${error.message}` }));
     }
     this.activity({ kind: 'note', message: `${stage.name} finalizado: ${OUTCOME_LABELS[outcome] ?? outcome}${report ? ` · informe ${report}` : ''}.` });

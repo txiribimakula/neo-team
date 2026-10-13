@@ -633,10 +633,6 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .assistant-reply{margin:4px 0 0;white-space:pre-line;overflow-wrap:anywhere}.assistant-answer .inline-error{margin:4px 0 0;white-space:pre-line}
 .assistant-changes{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:13px;color:#47772f}.assistant-changes li:before{content:'✓ ';font-weight:700}
 
-/* A narrow browser remains useful while the application occupies the right. */
-.jira-desktop-focus{display:flex;flex-direction:column;gap:12px;min-width:0}
-.jira-desktop-focus>h2{font-size:17px;margin:0}
-.jira-desktop-focus>.jira-card{cursor:pointer}
 .jira-activity{border:1px solid var(--line);border-radius:8px;background:#fff;min-width:0;overflow:hidden}
 .jira-activity>header,.jira-activity>summary{display:flex;flex-wrap:wrap;gap:6px 12px;padding:10px;font-size:13px;border-bottom:1px solid var(--line)}
 .jira-activity>summary{cursor:pointer}
@@ -672,20 +668,6 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 @media (max-width:1100px){.jira-main,.jira-main.side-closed{grid-template-columns:minmax(0,1fr)}.jira-side{position:static;order:-1}.jira-side .jira-general{max-height:50vh}}
 .jira-activity>header code,.jira-activity>summary code{font-size:11px;color:var(--muted)}
 .jira-activity .log-result{border-left:3px solid #5d9440}
-.jira-other-tickets>summary{cursor:pointer;font-size:13px;margin:8px 0}
-.jira-desktop .jira-page,.jira-desktop .jira-detail{min-width:0;max-width:100%}
-.jira-desktop .jira-board{grid-template-columns:minmax(0,1fr);min-width:0;overflow:visible}
-@media(max-width:650px){
-  body.jira-desktop .topbar{height:auto;min-height:44px;padding:8px;flex-wrap:wrap;gap:8px}
-  body.jira-desktop .workspace-label,body.jira-desktop .divider,body.jira-desktop #sync-button{display:none}
-  body.jira-desktop main{padding:10px 8px}
-  body.jira-desktop .mode-banner{padding:6px 8px;font-size:11px}
-  body.jira-desktop dialog#modal{width:calc(100vw - 8px);max-width:calc(100vw - 8px);max-height:calc(100dvh - 8px);margin:4px;padding:0}
-  body.jira-desktop .modal-body,body.jira-desktop .modal-head,body.jira-desktop .modal-footer{padding:10px}
-  body.jira-desktop #modal-title{overflow-wrap:anywhere;font-size:16px}
-  body.jira-desktop .jira-tab{padding:6px;font-size:12px}
-  body.jira-desktop .jira-live{white-space:normal;overflow-wrap:anywhere}
-}
 
 .jira-column-name{display:inline-flex;align-items:center;gap:6px;min-width:0}
 .jira-warn{position:relative;display:inline-flex}
@@ -719,6 +701,8 @@ body.jira-fit .jira-side{position:static;min-height:0;display:flex}
 body.jira-fit .jira-side .jira-general{flex:1;max-height:none;min-height:0}
 body.jira-fit .jira-side.is-closed{display:block}
 @media (max-width:1100px){body.jira-fit .jira-main{grid-template-rows:auto minmax(0,1fr)}body.jira-fit .jira-side .jira-general{max-height:34vh}}
+.jira-screens{display:flex;align-items:center;gap:8px}.jira-screen{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}.jira-screen select{height:36px;width:auto;font-size:14px}
+.jira-gear[aria-pressed="true"]{border-color:#d5dfce;background:#f1f5ee}
 .jira-collect{display:flex;align-items:center;gap:6px}.jira-collect select{height:36px;width:auto;font-size:14px}.jira-collect input{height:36px;width:130px;padding:0 10px;font-size:14px;text-transform:uppercase}
 .jira-tool.jira-resume{color:var(--green);border-color:#bfe0c7;background:#eef8f0}
 .jira-board-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}.jira-board-foot .jira-archived{align-self:center}

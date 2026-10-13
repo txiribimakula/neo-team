@@ -203,12 +203,12 @@ export function matchesTicket(ticket, search = '') {
 }
 // The search, right above the board: every word has to be in the key or the title.
 // Right above the board: updating from Jira and what it brings and, at the end, starting and the settings.
-const boardControls = (board, search, collectKey) => `<div class="jira-board-controls">
+const boardControls = (board, search, collectKey, screens) => `<div class="jira-board-controls">
     <button class="button jira-square" data-action="jira-refresh" title="${escape(board.settings.collect?.mode === 'single' ? `Actualizar: descarga solo ${board.settings.collect.key || 'el ticket indicado'}; el resto no se toca` : board.settings.collect?.mode === 'mine' ? `Actualizar: descarga solo los tickets del filtro asignados a ti (nuevos o con cambios); quita del tablero los terminados en Jira · ${board.settings.filter ?? ''}` : `Actualizar: pone al día los tickets del tablero (quita los terminados en Jira y descarga los cambios) y trae los nuevos del filtro · ${board.settings.filter ?? ''}`)}" aria-label="Actualizar">${SYNC}</button>
     ${collectView(board.settings, collectKey)}
     <span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.pipeline?.auto
       ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para" aria-label="Pausar">❚❚</button>`
-      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
+      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}${screensView(board, screens)}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
 // What updating brings: the whole filter, only your tickets or one ticket by its key.
 const COLLECT = [['filter', 'Todo el filtro'], ['mine', 'Asignados a mí'], ['single', 'Un ticket']];
 function collectView(settings, draft) {
@@ -218,7 +218,21 @@ function collectView(settings, draft) {
 }
 const searchView = search => `<label class="jira-search">${FUNNEL}<input type="search" data-jira-search data-focus="jira-search" value="${escape(search)}" placeholder="Buscar ticket" aria-label="Buscar ticket por clave o título" autocomplete="off" spellcheck="false"></label>`;
 
-export const desktopRun = board => ['reproduce', 'verify'].includes(board?.pipeline?.running?.stage) ? board.pipeline.running : null;
+// Which monitor holds the web and which the application while reproducing and verifying
+// (each one maximized on its own); empty, the main one for the web and another for the application.
+const MONITOR = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>';
+const monitor = id => `Monitor ${id.match(/DISPLAY(\d+)$/)?.[1] ?? id}`;
+const screenName = s => `${monitor(s.id)} · ${s.width}×${s.height}${s.primary ? ' · principal' : ''}`;
+function screensView(board, open) {
+  if (!board.tools?.screens) return '';
+  const chosen = board.settings.screens ?? {};
+  const select = (role, label) => {
+    const list = open?.list ?? [], value = chosen[role] ?? '';
+    const options = [['', 'Automático'], ...list.map(s => [s.id, screenName(s)]), ...(value && !list.some(s => s.id === value) ? [[value, monitor(value)]] : [])];
+    return `<label class="jira-screen">${label}<select data-jira-screen="${role}"${open?.list ? '' : ' disabled'}>${options.map(([id, name]) => `<option value="${escape(id)}" ${id === value ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select></label>`;
+  };
+  return `${open ? `<span class="jira-screens">${select('web', 'Web')}${select('app', 'Reproducir')}</span>` : ''}<button class="icon-button jira-gear" data-action="jira-screens" aria-pressed="${!!open}" title="Monitores: dónde se maximizan la web y la aplicación al reproducir y verificar" aria-label="Monitores">${MONITOR}</button>`;
+}
 // Over each log, a chat. On the live step a message interrupts what the agent is
 // doing and it answers; Pausar interrupts it and Continuar lets it go on; Detener
 // ends the step. On a step that ended, the person talks to its agent about it (its
@@ -297,7 +311,7 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
   return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null, unread = 0) {
+function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null, unread = 0, screens = null) {
   const missing = missingOf(board, copilot);
   const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
   const columns = COLUMNS.map(column => {
@@ -315,11 +329,9 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   const archivedButton = archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : '';
   // Below the board: the search and the tickets taken off it.
   const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
-  const run = desktopRun(board), ticket = run && board.tickets.find(t => t.key === run.key);
-  // The assistant and the activity, beside the board (and under the ticket while the app is driven).
+  // The assistant and the activity, beside the board.
   const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to }, unread);
-  if (ticket) return `<div class="jira-desktop-focus"><h2>${escape(stageName(run.stage))} · ${escape(run.key)}</h2>${card(ticket, run, board.settings.modes?.[run.stage], drafts, board.settings.demo)}${assistant(false)}<details class="jira-other-tickets"><summary>Tablero y controles</summary>${error}${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</details></div>`;
-  return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
+  return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey, screens)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
 }
 
 export const SETTINGS_SUBMIT = '<button class="button primary" type="submit" form="jira-settings-form" title="Guarda y comprueba la conexión con Jira">Conectar</button>';
@@ -520,7 +532,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(settingsView(state.jira));
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to, ui.unread));
+  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to, ui.unread, ui.screens));
 }
 
 export function settingsFrom(form) {

@@ -107,6 +107,11 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.equal((await post('/api/jira-mode', { stage: 'fix', mode: 'off' })).status, 200);
   assert.equal(state.jira.modes.fix, 'off');
   assert.equal((await post('/api/jira-mode', { stage: 'fix', mode: 'rojo' })).status, 400);
+  // Monitors: only Windows device names are kept; the rest is automatic.
+  const screens = await post('/api/jira-screens', { web: '\\\\.\\DISPLAY2', app: 'otro' });
+  assert.equal(screens.status, 200);
+  assert.deepEqual(screens.data.jira.settings.screens, { web: '\\\\.\\DISPLAY2', app: null });
+  if (process.platform !== 'win32') assert.deepEqual((await get('/api/jira-screens')).screens, []);
   assert.equal((await post('/api/jira-auto', { on: true })).status, 200);
   let board;
   const idle = async () => {

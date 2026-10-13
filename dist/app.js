@@ -3,7 +3,7 @@ import { permissionsView, filterPermissions, filterGroups, resetPermissionFilter
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, setMaintenanceView, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
-import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, desktopRun, COLUMNS as JIRA_COLUMNS } from './jira.js';
+import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -1162,8 +1162,7 @@ function jiraUnread() {
   const feed = jiraUi.board?.pipeline?.feed ?? [], latest = Number(feed.at(-1)?.id ?? 0);
   let seen = 0;
   try { seen = Number(localStorage.getItem(jiraSeenKey()) ?? 0) || 0; } catch { /* Counted for this visit only. */ }
-  // While the app is driven the assistant is always on view, folded or not.
-  if (!jiraAssistantClosed || desktopRun(jiraUi.board) || seen > latest) {
+  if (!jiraAssistantClosed || seen > latest) {
     if (seen !== latest) try { localStorage.setItem(jiraSeenKey(), String(latest)); } catch { /* idem */ }
     return 0;
   }
@@ -1609,29 +1608,21 @@ async function saveFinding(el, change) {
 // field of the section has the focus, so nothing jumps under the cursor.
 function syncJiraDesktop() {
   const run = tab === 'jira' && ['reproduce', 'verify'].includes(jiraUi.board?.pipeline?.running?.stage) ? jiraUi.board.pipeline.running : null;
-  document.body.classList.toggle('jira-desktop', !!run);
   // The board fits the window: each column, the assistant and the live log scroll on their own.
-  document.body.classList.toggle('jira-fit', tab === 'jira' && !!state?.jira && !run);
+  document.body.classList.toggle('jira-fit', tab === 'jira' && !!state?.jira);
+  // The title lets Neo Team find this browser window to keep it on the web monitor.
   if (run?.desktopTitle) document.title = run.desktopTitle;
   else if (tab === 'jira') document.title = 'Tickets de Jira · Neo Team';
 }
-let jiraFocusedRun = null;
 function renderJira() {
   syncJiraDesktop();
-  const run = document.body.classList.contains('jira-desktop') ? jiraUi.board?.pipeline?.running : null;
-  const focusRun = run ? `${run.key}:${run.startedAt}` : null;
-  const newRun = focusRun && focusRun !== jiraFocusedRun;
-  jiraFocusedRun = focusRun;
   const log = $('#app .jira-activity ol'), logScroll = log?.scrollTop ?? 0, logHeight = log?.scrollHeight ?? 0;
-  const controlsOpen = $('#app .jira-other-tickets')?.open;
   const focus = document.activeElement?.dataset?.focus;
   // Who the prompt speaks to: chosen for the step at work; a new step starts with its agent.
   const to = jiraUi.to?.run === String(jiraUi.board?.pipeline?.running?.startedAt) ? jiraUi.to.value : null;
   $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread() }, prUi.copilot);
   const nextLog = $('#app .jira-activity ol');
-  if (nextLog && logScroll > 0 && !newRun) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
-  if (controlsOpen && $('#app .jira-other-tickets')) $('#app .jira-other-tickets').open = true;
-  if (newRun) window.scrollTo({ top: 0 });
+  if (nextLog && logScroll > 0) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
   restoreJiraForm();
   if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
   askJiraComment();
@@ -1846,6 +1837,15 @@ const actions = {
   },
   'jira-run': el => jiraAction('/api/jira-run', { key: el.dataset.key }),
   'jira-mode': el => jiraAction('/api/jira-mode', { stage: el.dataset.stage, mode: el.dataset.mode }),
+  'jira-screens': async () => {
+    if (jiraUi.screens) { jiraUi.screens = null; render(); return; }
+    jiraUi.screens = {};
+    render();
+    const response = await fetch('/api/jira-screens', { headers: { 'X-Neo-CSRF': state.csrf } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { jiraUi.screens = null; render(); throw new Error(data.error || 'No se pudieron leer los monitores.'); }
+    if (jiraUi.screens) { jiraUi.screens = { list: data.screens ?? [] }; render(); }
+  },
   'jira-answer': async el => {
     const key = el.dataset.key, answer = (jiraUi.answers[key] ?? '').trim();
     if (!answer) { $(`[data-jira-answer="${CSS.escape(key)}"]`)?.focus(); throw new Error('Escribe la respuesta para el agente.'); }
@@ -2173,6 +2173,7 @@ document.addEventListener('change',async event=>{
     // The key is saved when updating (button or Enter), so leaving the field for the button does not race it.
     if('jiraCollect' in el.dataset){await saveJiraCollect();if(el.value==='single')$('[data-jira-collect-key]')?.focus();return;}
     if('jiraTo' in el.dataset){jiraUi.to={value:el.value,run:String(jiraUi.board?.pipeline?.running?.startedAt)};render();$(`#app [data-focus="${el.value==='general'?'jira-tell:general':'jira-tell'}"]`)?.focus();return;}
+    if(el.dataset.jiraScreen){await jiraAction('/api/jira-screens',{web:$('[data-jira-screen="web"]')?.value||null,app:$('[data-jira-screen="app"]')?.value||null});return;}
     if(el.dataset.jiraModel){await request('/api/jira-model',{stage:el.dataset.jiraModel,model:el.value});await loadJira().catch(()=>{});render();return;}
     if('copilotModel' in el.dataset){await request('/api/copilot-model',{model:el.value});render();toast(el.value ? `Las revisiones se harán con ${el.selectedOptions[0]?.textContent ?? el.value}.` : 'Las revisiones usarán el modelo predeterminado.');return;}
     if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}

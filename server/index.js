@@ -17,6 +17,7 @@ import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
 import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
+import { listScreens, screensFrom } from './jira-desktop.js';
 import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
@@ -65,7 +66,7 @@ const refreshJiraToken = async () => { jiraHasToken = !!(await jiraToken()); };
 await refreshJiraToken();
 function jiraSettings() {
   const base = store.data.mode === 'demo' ? DEMO_JIRA_SETTINGS : store.data.jira;
-  return base ? { ...base, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, collect: collectScopeFrom(store.data.jiraCollect) } : null;
+  return base ? { ...base, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, collect: collectScopeFrom(store.data.jiraCollect), screens: screensFrom(store.data.jiraScreens) } : null;
 }
 const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 'jira-ejemplo') : resolve(settings?.ticketsDir || join(store.directory, 'jira'));
 function publicJira() {
@@ -112,7 +113,7 @@ async function jiraBoard() {
   await pipeline.recovered;
   await pipeline.generalState();
   const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
-  return { settings, tickets, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization } };
+  return { settings, tickets, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization, screens: process.platform === 'win32' } };
 }
 const currentReviews = () => (store.data.prReviews ?? []).filter(review => review.mode === store.data.mode);
 function findReview(data, id) {
@@ -214,7 +215,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -256,6 +257,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/jira') {
       requireSession(req);
       return json(res, { jira: await jiraBoard() });
+    }
+    if (req.method === 'GET' && path === '/api/jira-screens') {
+      requireSession(req);
+      return json(res, { screens: await listScreens() });
     }
     if (req.method === 'GET' && path === '/api/jira-ticket') {
       requireSession(req);
@@ -640,6 +645,14 @@ const server = http.createServer(async (req, res) => {
           await store.save(data);
           // Back on autopilot, the waiting tickets of that column go on.
           if (input.mode === 'auto') jiraPipeline().setAuto(jiraPipeline().auto);
+          return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
+        }
+        if (path === '/api/jira-screens') {
+          // Which monitor holds the web and which the application being reproduced.
+          const data = structuredClone(store.data);
+          data.jiraScreens = screensFrom(input);
+          await store.save(data);
+          await jiraPipeline().setScreens(data.jiraScreens);
           return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
         }
         if (path === '/api/jira-model') {

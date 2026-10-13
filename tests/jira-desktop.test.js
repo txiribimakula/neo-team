@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { JiraDesktop, desktopStage, desktopTitle } from '../server/jira-desktop.js';
+import { JiraDesktop, desktopStage, desktopTitle, listScreens, screensFrom } from '../server/jira-desktop.js';
 import { JiraPipeline, TicketStore, newTicket, CopilotAgent } from '../server/jira-agents.js';
 import { jiraView, activityView } from '../dist/jira.js';
 
@@ -16,10 +16,14 @@ test('desktop guard identifies one run, validates PID, streams events and stops'
   let args;
   const guard = new JiraDesktop({ platform: 'win32', launch: (command, input) => { assert.equal(command, 'powershell.exe'); args = input; return child; } });
   const run = { key: 'NEO-1', startedAt: 123 };
-  await guard.start(run, e => events.push(e));
+  await guard.start(run, e => events.push(e), { web: '\\\\.\\DISPLAY2', app: 'C:\\evil' });
   try {
     assert.equal(args.at(-1), guard.file);
-    assert.equal(JSON.parse(await readFile(guard.file)).title, desktopTitle(run));
+    const config = JSON.parse(await readFile(guard.file));
+    assert.equal(config.title, desktopTitle(run));
+    assert.deepEqual([config.web, config.app], ['\\\\.\\DISPLAY2', null]);
+    await guard.screens({ web: '\\\\.\\DISPLAY1', app: '\\\\.\\DISPLAY2' });
+    assert.deepEqual(Object.values(screensFrom(JSON.parse(await readFile(guard.file)))), ['\\\\.\\DISPLAY1', '\\\\.\\DISPLAY2']);
     await assert.rejects(guard.select('42'));
     await guard.select(42);
     assert.equal(JSON.parse(await readFile(guard.file)).application, 42);
@@ -97,18 +101,40 @@ test('Copilot live activity includes tool progress, duration, results and assist
   assert.ok(activity.some(e => e.kind === 'warning' && /Falló powershell.* · \d+\.\d s\nVentana no encontrada/.test(e.message)));
 });
 
-test('the active ticket and escaped live logs precede the board in desktop phases', () => {
+test('desktop phases keep the whole board, with escaped live logs', () => {
   const running = { key: 'NEO-1', stage: 'verify', startedAt: Date.now(), activity: [{ at: Date.now(), kind: 'warning', message: '<script>bad()</script>\nResultado' }] };
   const state = { mode: 'demo', jira: {} };
   const board = { settings: { demo: true }, tickets: [{ key: 'NEO-1', summary: 'Comprobar', stage: 'verify', status: 'running' }], pipeline: { running } };
   const html = jiraView(state, { board }, null);
-  assert.ok(html.indexOf('jira-desktop-focus') < html.indexOf('jira-board'));
-  assert.ok(html.indexOf('Logs en vivo') < html.indexOf('jira-board'));
-  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /jira-main/);
+  assert.doesNotMatch(html, /jira-desktop-focus|jira-other-tickets/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(activityView(running, false), /Registro de la fase/);
-  board.pipeline.running = null;
-  assert.doesNotMatch(jiraView(state, { board }, null), /jira-desktop-focus/);
+  assert.match(activityView(running, false), /&lt;script&gt;/);
+});
+
+test('the monitors button chooses where the web and the application are maximized', () => {
+  const state = { mode: 'real', jira: {} };
+  const board = { settings: { screens: { web: '\\\\.\\DISPLAY2', app: null } }, tickets: [], pipeline: {}, tools: { screens: true } };
+  assert.match(jiraView(state, { board }, null), /data-action="jira-screens" aria-pressed="false"/);
+  assert.doesNotMatch(jiraView(state, { board }, null), /data-jira-screen/);
+  // Open while the list is read: the saved choice shows, the selects wait.
+  assert.match(jiraView(state, { board, screens: {} }, null), /data-jira-screen="web" disabled><option value="" >Automático<\/option><option value="[^"]+DISPLAY2" selected>Monitor 2</);
+  const list = [{ id: '\\\\.\\DISPLAY1', primary: true, width: 1920, height: 1080 }, { id: '\\\\.\\DISPLAY2', primary: false, width: 2560, height: 1440 }];
+  const html = jiraView(state, { board, screens: { list } }, null);
+  assert.match(html, /Monitor 1 · 1920×1080 · principal/);
+  assert.match(html, /DISPLAY2" selected>Monitor 2 · 2560×1440</);
+  assert.match(html, /data-jira-screen="app"><option value="" selected>Automático/);
+  assert.doesNotMatch(jiraView(state, { board: { ...board, tools: {} } }, null), /jira-screens/);
+});
+
+test('monitors are read from Windows and only device names are kept', async () => {
+  assert.deepEqual(await listScreens({ platform: 'darwin', run: () => assert.fail('must not run') }), []);
+  const run = (command, args, options, done) => { assert.equal(command, 'powershell.exe'); done(null, JSON.stringify({ id: '\\\\.\\DISPLAY3', primary: true, x: 0, y: 0, width: 1920, height: 1080 })); };
+  assert.deepEqual(await listScreens({ platform: 'win32', run }), [{ id: '\\\\.\\DISPLAY3', primary: true, x: 0, y: 0, width: 1920, height: 1080 }]);
+  await assert.rejects(listScreens({ platform: 'win32', run: (c, a, o, done) => done(new Error('sin permiso')) }), /monitores/);
+  assert.deepEqual(screensFrom({ web: '\\\\.\\DISPLAY12', app: '../DISPLAY1' }), { web: '\\\\.\\DISPLAY12', app: null });
+  assert.deepEqual(screensFrom(null), { web: null, app: null });
 });
 
 

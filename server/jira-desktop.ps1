@@ -11,40 +11,73 @@ public class NeoLayout {
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
-  [StructLayout(LayoutKind.Sequential)] public struct MinMax { public Point Reserved, MaxSize, MaxPosition, MinTrack, MaxTrack; }
+  [StructLayout(LayoutKind.Sequential)] public struct Placement { public int Length, Flags, ShowCmd; public Point MinPosition, MaxPosition; public Rect Normal; }
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int height, uint flags);
-  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, ref MinMax m, uint flags, uint timeout, out IntPtr result);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref Placement p);
+  [DllImport("user32.dll")] public static extern bool SetWindowPlacement(IntPtr h, ref Placement p);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
   public static string Title(IntPtr h) { var s = new StringBuilder(2048); GetWindowText(h,s,s.Capacity); return s.ToString(); }
   public static uint Pid(IntPtr h) { uint p; GetWindowThreadProcessId(h,out p); return p; }
   public static IntPtr[] Windows() { var list = new List<IntPtr>(); EnumWindows((h,p) => { if(IsWindowVisible(h) && Title(h).Length > 0) list.Add(h); return true; }, IntPtr.Zero); return list.ToArray(); }
-  public static int Minimum(IntPtr h) { var m = new MinMax(); IntPtr result; SendMessageTimeout(h,0x24,IntPtr.Zero,ref m,2,250,out result); return Math.Max(320,m.MinTrack.X); }
-  public static bool Place(IntPtr h, int x, int y, int w, int height) {
-    bool restore = IsIconic(h) || IsZoomed(h);
-    if(restore) ShowWindowAsync(h,9);
-    Rect r; GetWindowRect(h,out r);
-    if(!restore && r.Left==x && r.Top==y && r.Right-r.Left==w && r.Bottom-r.Top==height) return false;
-    if(!SetWindowPos(h,IntPtr.Zero,x,y,w,height,0x0014)) throw new Exception("Windows no permite mover la ventana (comprueba permisos/elevacion).");
-    return true;
+  static Placement Get(IntPtr h) {
+    var p = new Placement(); p.Length = Marshal.SizeOf(typeof(Placement));
+    if(!GetWindowPlacement(h,ref p)) throw new Exception("Windows no da la posicion de la ventana.");
+    p.Flags = 0; return p;
+  }
+  static void Set(IntPtr h, Placement p, int show) { p.ShowCmd = show; if(!SetWindowPlacement(h,ref p)) throw new Exception("Windows no permite mover la ventana (comprueba permisos/elevacion)."); }
+  // Restored inside the monitor's working area and then maximized, so Windows maximizes
+  // it there (the restored position is in workspace coordinates; the margin absorbs that).
+  public static void Maximize(IntPtr h, int x, int y, int w, int height) {
+    var p = Get(h);
+    p.Normal.Left = x + w/8; p.Normal.Top = y + height/8; p.Normal.Right = x + w*7/8; p.Normal.Bottom = y + height*7/8;
+    Set(h,p,4); Set(h,p,3);
+  }
+  // Fixed-size dialogs keep their size, centered on the monitor.
+  public static void Center(IntPtr h, int x, int y, int w, int height) {
+    var p = Get(h);
+    int width = p.Normal.Right-p.Normal.Left, tall = p.Normal.Bottom-p.Normal.Top;
+    p.Normal.Left = x+Math.Max(0,(w-width)/2); p.Normal.Top = y+Math.Max(0,(height-tall)/2); p.Normal.Right = p.Normal.Left+width; p.Normal.Bottom = p.Normal.Top+tall;
+    Set(h,p,4);
   }
 }
 '@
 [void][NeoLayout]::SetProcessDPIAware()
 $last = ''; $browser = [IntPtr]::Zero; $lastPlacement = [DateTime]::MinValue
 function Log($message, $kind = 'info') { @{kind=$kind;message=$message} | ConvertTo-Json -Compress | Write-Output }
+function Label($screen) { if ($screen.DeviceName -match 'DISPLAY(\d+)$') { "monitor $($Matches[1])" } else { $screen.DeviceName } }
+# Keeps one window maximized (or a fixed dialog centered) on its monitor; true when it had to act.
+function Keep($handle, $screen) {
+  $area = $screen.WorkingArea
+  $here = [System.Windows.Forms.Screen]::FromHandle($handle).DeviceName -eq $screen.DeviceName
+  $resizable = ([NeoLayout]::GetWindowLong($handle,-16) -band 0x40000) -ne 0
+  if ($resizable) {
+    if ($here -and [NeoLayout]::IsZoomed($handle)) { return $false }
+    [NeoLayout]::Maximize($handle,$area.Left,$area.Top,$area.Width,$area.Height)
+  } else {
+    if ($here -and ![NeoLayout]::IsIconic($handle)) { return $false }
+    [NeoLayout]::Center($handle,$area.Left,$area.Top,$area.Width,$area.Height)
+  }
+  return $true
+}
 while (Test-Path -LiteralPath $ConfigFile) {
   try {
     $config = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
     if ($config.stop -or !(Get-Process -Id $config.owner -ErrorAction SilentlyContinue)) { break }
+    $screens = @([System.Windows.Forms.Screen]::AllScreens)
+    # The chosen monitors; without a choice (or if it is gone) the web goes to the main
+    # one and the application to another, if there is one.
+    $web = $screens | Where-Object { $_.DeviceName -eq $config.web } | Select-Object -First 1
+    if (!$web) { $web = $screens | Where-Object { $_.Primary } | Select-Object -First 1 }
+    $app = $screens | Where-Object { $_.DeviceName -eq $config.app } | Select-Object -First 1
+    if (!$app) { $app = $screens | Where-Object { $_.DeviceName -ne $web.DeviceName } | Select-Object -First 1 }
+    if (!$app) { $app = $web }
     $windows = @([NeoLayout]::Windows())
     # Retain the handle across browser tab switches, but never select an unrelated window.
     if ($browser -eq [IntPtr]::Zero -or $windows -notcontains $browser) {
@@ -56,39 +89,24 @@ while (Test-Path -LiteralPath $ConfigFile) {
         }
       }
     }
-    $status = ''; $kind = 'info'
-    if ($browser -eq [IntPtr]::Zero) { $status = 'Esperando el navegador: abre la pestana de Neo Team en este escritorio.' }
+    $changed = $false; $parts = @()
+    if ($browser -eq [IntPtr]::Zero) { $parts += 'Esperando el navegador: abre la pestana de Neo Team en este escritorio.' }
     else {
-      $area = [System.Windows.Forms.Screen]::FromHandle($browser).WorkingArea
-      $width = [NeoLayout]::Minimum($browser)
-      if ($width -ge $area.Width) { $status = 'El monitor no tiene ancho suficiente para mostrar las dos ventanas.'; $kind = 'warning' }
-      else {
-        $changed = [NeoLayout]::Place($browser,$area.Left,$area.Top,$width,$area.Height)
-        $apps = @($windows | Where-Object { $config.application -gt 0 -and [NeoLayout]::Pid($_) -eq $config.application -and [NeoLayout]::Pid($_) -ne [NeoLayout]::Pid($browser) })
-        if (!$apps.Count) { $status = 'Navegador a la izquierda. Esperando la ventana de la aplicacion registrada con neo_desktop.' }
-        else {
-          $limited = $false
-          foreach ($handle in $apps) {
-            $rect = New-Object NeoLayout+Rect
-            [void][NeoLayout]::GetWindowRect($handle,[ref]$rect)
-            $appWidth = $area.Width-$width; $appHeight = $area.Height
-            # Fixed-size dialogs keep their size and are placed within the right pane.
-            if (([NeoLayout]::GetWindowLong($handle,-16) -band 0x40000) -eq 0) {
-              $appWidth = $rect.Right-$rect.Left; $appHeight = $rect.Bottom-$rect.Top
-            } else { $appWidth = [Math]::Max($appWidth,[NeoLayout]::Minimum($handle)) }
-            if ($appWidth -gt ($area.Width-$width) -or $appHeight -gt $area.Height) { $limited = $true }
-            $changed = [NeoLayout]::Place($handle,($area.Left+$width),$area.Top,$appWidth,$appHeight) -or $changed
-            [void][NeoLayout]::GetWindowRect($handle,[ref]$rect)
-            if ($rect.Left -lt ($area.Left+$width) -or $rect.Right -gt $area.Right) { $limited = $true }
-          }
-          $status = "Distribucion mantenida: navegador ${width}px a la izquierda; aplicacion PID $($config.application), $($area.Width-$width)px a la derecha ($($apps.Count) ventanas)."
-          if ($limited) { $status = 'La aplicacion tiene un tamano minimo mayor que el espacio disponible o Windows no acepta el ajuste completo.'; $kind = 'warning' }
-          if ($changed -and ([DateTime]::UtcNow-$lastPlacement).TotalSeconds -ge 5) {
-            Log "Reajuste de ventanas. $status"
-            $lastPlacement = [DateTime]::UtcNow
-          }
-        }
-      }
+      $changed = Keep $browser $web
+      $parts += "Web maximizada en el $(Label $web)."
+    }
+    $apps = @($windows | Where-Object { $config.application -gt 0 -and [NeoLayout]::Pid($_) -eq $config.application -and $_ -ne $browser })
+    if (!$apps.Count) { $parts += 'Esperando la ventana de la aplicacion registrada con neo_desktop.' }
+    else {
+      foreach ($handle in $apps) { $changed = (Keep $handle $app) -or $changed }
+      $parts += "Aplicacion PID $($config.application) maximizada en el $(Label $app) ($($apps.Count) ventanas)."
+    }
+    $kind = 'info'
+    if ($app.DeviceName -eq $web.DeviceName) { $parts += 'Web y aplicacion comparten monitor.'; if ($screens.Count -gt 1) { $kind = 'warning' } }
+    $status = $parts -join ' '
+    if ($changed -and ([DateTime]::UtcNow-$lastPlacement).TotalSeconds -ge 5) {
+      Log "Reajuste de ventanas. $status"
+      $lastPlacement = [DateTime]::UtcNow; $last = $status
     }
     if ($status -ne $last) { Log $status $kind; $last = $status }
   } catch {
