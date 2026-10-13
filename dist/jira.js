@@ -247,7 +247,10 @@ export function activityView(run, live = true, tell = '', chat = null) {
   const talking = chat?.state === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ['starting', 'working'].includes(chat?.state) ? ' · <span class="spinner" aria-hidden="true"></span>' : '';
   const about = live ? `<span>${escape(stageName(run.stage))} · ${minutes(Date.now() - run.startedAt)}${run.conversation === 'waiting' ? ' · <strong class="jira-waiting">Esperando tu respuesta</strong>' : ''}</span>`
     : `<span>${run.log ? `<code title="Registro completo en la carpeta del ticket">${escape(run.log)}</code>` : ''}${talking}</span>`;
-  return `<section class="jira-activity" aria-label="${live ? 'Logs en vivo' : 'Registro de la fase'}"><header><strong>${live ? 'Logs en vivo' : 'Registro de la fase'}</strong>${about}</header>${live ? tellView(run, tell) : chat ? tellView(run, tell, chat) : ''}${entries.length ? logList(entries) : live ? '<ol><li>Preparando el agente…</li></ol>' : ''}</section>`;
+  const list = entries.length ? logList(entries) : live ? '<ol><li>Preparando el agente…</li></ol>' : '';
+  if (live) return `<section class="jira-activity" aria-label="Logs en vivo"><header><strong>Logs en vivo</strong>${about}</header>${tellView(run, tell)}${list}</section>`;
+  // A step that ended folds its log; the popup keeps it folded or open as it refreshes.
+  return `<details class="jira-activity" data-part="log" aria-label="Registro de la fase" open><summary><strong>Registro de la fase</strong>${about}</summary>${chat ? tellView(run, tell, chat) : ''}${list}</details>`;
 }
 // The general prompt of the board: an assistant for anything about it, such as
 // changing the learnings of the agents. Its conversation stays until started anew.

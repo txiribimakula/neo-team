@@ -638,8 +638,10 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-desktop-focus>h2{font-size:17px;margin:0}
 .jira-desktop-focus>.jira-card{cursor:pointer}
 .jira-activity{border:1px solid var(--line);border-radius:8px;background:#fff;min-width:0;overflow:hidden}
-.jira-activity>header{display:flex;flex-wrap:wrap;gap:6px 12px;padding:10px;font-size:13px;border-bottom:1px solid var(--line)}
-.jira-activity>header>span{color:var(--muted)}
+.jira-activity>header,.jira-activity>summary{display:flex;flex-wrap:wrap;gap:6px 12px;padding:10px;font-size:13px;border-bottom:1px solid var(--line)}
+.jira-activity>summary{cursor:pointer}
+.jira-activity:not([open])>summary{border-bottom:0}
+.jira-activity>header>span,.jira-activity>summary>span{color:var(--muted)}
 .jira-activity ol{list-style:none;margin:0;padding:0;max-height:52vh;overflow:auto;overflow-anchor:none}
 .jira-activity li{padding:8px 10px;border-bottom:1px solid #edf0ed;font-size:12px}
 .jira-activity time{color:var(--muted);font-variant-numeric:tabular-nums}
@@ -668,7 +670,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-side-count{position:absolute;top:-7px;right:-7px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#c94545;color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px #fff}
 .jira-side-dot{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;background:#f0b429;box-shadow:0 0 0 2px #fff}
 @media (max-width:1100px){.jira-main,.jira-main.side-closed{grid-template-columns:minmax(0,1fr)}.jira-side{position:static;order:-1}.jira-side .jira-general{max-height:50vh}}
-.jira-activity>header code{font-size:11px;color:var(--muted)}
+.jira-activity>header code,.jira-activity>summary code{font-size:11px;color:var(--muted)}
 .jira-activity .log-result{border-left:3px solid #5d9440}
 .jira-other-tickets>summary{cursor:pointer;font-size:13px;margin:8px 0}
 .jira-desktop .jira-page,.jira-desktop .jira-detail{min-width:0;max-width:100%}
