@@ -1,5 +1,6 @@
 // Pull request review: choose a pull request, let GitHub Copilot review its diff,
 // adjust the comments and, only after confirming, publish them to Azure DevOps.
+import { aiChoice, effortName } from './ai-choice.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const when = value => value ? new Date(value).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const branch = ref => String(ref ?? '').replace(/^refs\/heads\//, '');
@@ -12,14 +13,11 @@ function copilotLine(ui, demo, state) {
   if (demo) return '<span class="text-muted">La revisión de Copilot se simula y nada se publica en Azure DevOps.</span>';
   const status = ui.copilot;
   const text = !status ? 'GitHub Copilot' : status.isAuthenticated ? `GitHub Copilot · ${escape(status.login || 'cuenta de GitHub')}` : 'GitHub Copilot sin sesión';
-  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span>${status?.isAuthenticated ? modelSelect(status, state.copilotModel ?? '') : ''} <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
+  return `<span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span>${status?.isAuthenticated ? ` · ${modelSelect(status, state)}` : ''} <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
 }
-// The model that reviews, among those the account may use (× is its cost multiplier).
-function modelSelect(status, current) {
-  const models = [...(current && !status.models?.some(m => m.id === current) ? [{ id: current, name: current }] : []), ...(status.models ?? [])];
-  const label = model => `${model.name}${model.multiplier != null ? ` · ×${model.multiplier}` : ''}`;
-  return ` · <select class="pr-model" data-copilot-model aria-label="Modelo de IA para la revisión" title="Modelo con el que Copilot hace la revisión"><option value="">${status.defaultModel ? `Predeterminado (${escape(status.defaultModel)})` : 'Modelo predeterminado'}</option>${models.map(m => `<option value="${escape(m.id)}" ${m.id === current ? 'selected' : ''}>${escape(label(m))}</option>`).join('')}</select>`;
-}
+// The model and the effort that review, among those the account may use.
+const modelSelect = (status, state) => aiChoice({ attrs: 'data-ai-choice="copilot"', models: status.models, model: state.copilotModel ?? '', effort: state.copilotEffort ?? '', automatic: status.defaultModel,
+  auto: status.defaultModel ? `Predeterminado (${status.defaultModel})` : 'Modelo predeterminado', name: 'de la revisión', modelClass: 'pr-model' });
 
 // Copilot runs in the local server, not in the browser: it uses the GitHub session
 // saved on this computer (Copilot CLI, GitHub CLI or COPILOT_GITHUB_TOKEN), never the
@@ -173,7 +171,7 @@ function detailView(review, ui, state) {
     review.notes.tooLargeFiles && `${review.notes.tooLargeFiles} archivos demasiado grandes no revisados.`,
     review.pullRequest.status !== 'active' && 'El pull request ya no está activo: no se podrán publicar comentarios.',
   ].filter(Boolean);
-  const usage = [review.diffSource?.kind === 'local' && `diff local en ${escape(review.diffSource.path)}`, review.copilot?.login && `cuenta ${escape(review.copilot.login)}`, review.copilot?.model && `modelo ${escape(review.copilot.model)}`, review.copilot?.inputTokens && `${review.copilot.inputTokens + (review.copilot.outputTokens ?? 0)} tokens`].filter(Boolean).join(' · ');
+  const usage = [review.diffSource?.kind === 'local' && `diff local en ${escape(review.diffSource.path)}`, review.copilot?.login && `cuenta ${escape(review.copilot.login)}`, review.copilot?.model && `modelo ${escape(review.copilot.model)}${review.copilot.effort ? ` · esfuerzo ${escape(effortName(review.copilot.effort).toLowerCase())}` : ''}`, review.copilot?.inputTokens && `${review.copilot.inputTokens + (review.copilot.outputTokens ?? 0)} tokens`].filter(Boolean).join(' · ');
   return `<section class="pr-detail">
     <button class="link-button" data-action="pr-back">← Todas las revisiones</button>
     <header class="pr-detail-heading"><div><p class="eyebrow">${escape(review.repository.name)} · !${review.pullRequest.id}</p><h2>${demo ? escape(review.pullRequest.title) : `<a href="${escape(review.pullRequest.url)}" target="_blank" rel="noopener noreferrer">${escape(review.pullRequest.title)} ↗</a>`}</h2>

@@ -25,7 +25,10 @@ test('HTTP pull request review in the example: list, review, edit, publish once 
   assert.equal((await post('/api/pr-repositories')).status, 400, 'without a project there is nothing to review');
   assert.equal((await post('/api/copilot-model', { model: 'claude-sonnet-4.5' })).status, 200);assert.equal(state.copilotModel, 'claude-sonnet-4.5');
   assert.equal((await post('/api/copilot-model', { model: 'x; rm -rf /' })).status, 400);
-  assert.equal((await post('/api/copilot-model', { model: '' })).status, 200);assert.equal(state.copilotModel, null);
+  assert.equal((await post('/api/copilot-model', { model: 'claude-sonnet-4.5', effort: 'high' })).status, 200);assert.deepEqual([state.copilotModel, state.copilotEffort], ['claude-sonnet-4.5', 'high'], 'the models are not checked yet: the choice is kept');
+  assert.equal((await post('/api/copilot-model', { model: 'claude-sonnet-4.5', effort: 'turbo' })).status, 400);
+  assert.equal((await post('/api/copilot-model', { use: 'assistant', model: 'gpt-5', effort: 'low' })).status, 200);assert.deepEqual([state.assistantModel, state.assistantEffort, state.copilotModel], ['gpt-5', 'low', 'claude-sonnet-4.5'], 'the tabs\' prompts have their own');
+  assert.equal((await post('/api/copilot-model', { model: '' })).status, 200);assert.deepEqual([state.copilotModel, state.copilotEffort], [null, null], 'without a model there is no effort to choose');
   await post('/api/mode', { mode: 'demo' });
   const repositories = (await post('/api/pr-repositories')).data.repositories;
   assert.deepEqual(repositories.map(r => r.name), ['neo-platform-web']);

@@ -744,7 +744,7 @@ body.jira-fit .jira-side.is-closed{display:block}
 /* The model and the effort of each place that asks Copilot: the effort beside its model. */
 .ai-choice{display:inline-flex;gap:4px;align-items:center;min-width:0;vertical-align:baseline}.ai-choice select.ai-effort{width:auto;flex:none}
 .maintenance-heading .ai-choice select.ai-effort{padding:3px 8px;font-size:13px}
-.jira-column-tools .ai-choice{flex:1;display:flex}.jira-column select.ai-effort{font-size:12px;padding:6px 4px}
+.jira-column-tools{flex-wrap:wrap}.jira-column-tools .ai-choice{flex:1 1 170px;display:flex}.jira-column select.ai-effort{font-size:12px;padding:6px 4px}
 .jira-general>header .ai-choice select{width:auto;max-width:150px;font-size:12px;padding:3px 6px}
 .assistant-form .ai-choice select{width:auto;max-width:170px;border:0;background:transparent;color:var(--muted);font-size:12px;padding:6px 4px}
 .backlog-quick{display:flex;flex-wrap:wrap;gap:6px;margin:-6px 0 12px}.backlog-quick button{display:inline-flex;align-items:center;gap:6px;border:1px solid #d5dfce;background:white;border-radius:7px;padding:4px 6px 4px 10px;font-size:12px;font-weight:600;color:var(--muted)}.backlog-quick button:hover{background:#eef3ed;color:var(--ink)}.backlog-quick button[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:white}.backlog-quick button[aria-pressed="true"] .count{background:#ffffff26;color:white}.backlog-quick .count{padding:1px 6px}

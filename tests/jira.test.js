@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter, syncTickets } from '../server/jira-agents.js';
+import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, CopilotAgent, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter, syncTickets } from '../server/jira-agents.js';
 import { jiraView, ticketDetail, ticketHead, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView, pendingComments, commentPrompt } from '../dist/jira.js';
 import { loginSteps } from '../dist/reviews.js';
 
@@ -212,6 +212,10 @@ test('each column gets a model fit for its difficulty unless one is chosen', () 
   assert.equal(modelFor('fix', { fix: 'gpt-5' }, models), 'gpt-5');
   assert.equal(modelFor('collect', {}, models), null, 'collecting uses no model');
   assert.equal(modelFor('collect', {}, []), null, 'without a list, the plan default');
+  assert.deepEqual([modelFor('general', {}, models), modelFor('general', { analyze: 'gpt-5' }, models), modelFor('general', { analyze: 'gpt-5', general: 'x' }, models)], [modelFor('analyze', {}, models), 'gpt-5', 'x'], 'the board\'s assistant uses Analizar\'s model unless it has its own');
+  const config = new CopilotAgent().sessionConfig({ stage: 'fix', system: 'S', model: 'gpt-5', effort: 'high', workingDirectory: '/t', writable: [], tools: [], onActivity: () => {} });
+  assert.deepEqual([config.model, config.reasoningEffort], ['gpt-5', 'high'], 'the agent asks with the effort of its column');
+  assert.equal('reasoningEffort' in new CopilotAgent().sessionConfig({ stage: 'fix', system: 'S', model: null, effort: 'high', workingDirectory: '/t', writable: [], tools: [], onActivity: () => {} }), false);
 });
 
 test('agents write only in their folders and never commit or push', () => {
@@ -382,11 +386,11 @@ test('each ticket is fixed in its own worktree and branch', async t => {
 });
 
 test('the board shows a column per agent with its model and the live step', () => {
-  const state = { mode: 'azure', jira: { url: 'https://e', filter: '1', models: { fix: 'claude-opus-4.5' }, hasToken: true } };
-  const board = { settings: state.jira, defaults: { collect: 'claude-haiku-4.5' }, tools: { winapp: false, ffmpeg: true },
+  const state = { mode: 'azure', jira: { url: 'https://e', filter: '1', models: { fix: 'claude-opus-4.5' }, efforts: { fix: 'high', verify: 'max' }, hasToken: true } };
+  const board = { settings: state.jira, defaults: { collect: 'claude-haiku-4.5', verify: 'gpt-4.1' }, tools: { winapp: false, ffmpeg: true },
     pipeline: { auto: true, running: { key: 'NEO-1', stage: 'reproduce', model: 'claude-sonnet-4.5', startedAt: Date.now(), activity: [{ at: Date.now(), kind: 'tool', message: 'winapp ui inspect -a App' }] } },
     tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }, { key: 'NEO-3', summary: 'Tres', stage: 'done', status: 'done', archived: true }] };
-  const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3 }] });
+  const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3, efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }, { id: 'gpt-4.1', name: 'GPT-4.1', multiplier: 0, efforts: [] }] });
   assert.deepEqual([...html.matchAll(/<section class="jira-column[^"]*" aria-label="([^"]+)">/g)].map(m => m[1]), ['Analizar', 'Reproducir', 'Solucionar', 'Verificar', 'Revisar'], 'a column per agent: collecting, building and the solved ones have none');
   const flow = jiraView(state, { view: 'board', board: { ...board, pipeline: {}, tickets: [{ key: 'NEO-7', summary: 'Hecho', stage: 'done', status: 'done' }, { key: 'NEO-8', summary: 'Por compilar', stage: 'build', status: 'pending' }, { key: 'NEO-9', summary: 'Nuevo', stage: 'collect', status: 'pending' }] } }, { isAuthenticated: true, models: [] });
   const column = name => flow.match(new RegExp(`aria-label="${name}">([\\s\\S]*?)</section>`))[1];
@@ -405,15 +409,21 @@ test('the board shows a column per agent with its model and the live step', () =
   assert.doesNotMatch(html, /data-stage="analyze" aria-expanded/, 'and one that has everything does not');
   const tip = jiraView(state, { view: 'board', board, warn: 'reproduce' }, { isAuthenticated: true, models: [] });
   assert.match(tip, /<span class="jira-warn-tip" role="tooltip"><strong>Falta<\/strong><ul><li>winapp: instálalo<\/li><\/ul>/, 'clicking it lists what to install');
-  assert.doesNotMatch(html, /data-jira-model="collect"/);
+  assert.doesNotMatch(html, /data-ai-choice="jira" data-stage="collect"/);
   assert.match(html, /<option value="claude-opus-4\.5" selected>Claude Opus 4\.5 · ×3/);
   assert.match(html, /data-action="jira-auto" data-on="false"[^>]*aria-label="Pausar">❚❚<\/button>/, 'started: the button pauses');
   assert.match(html, /data-action="jira-learnings" data-stage="fix"/, 'each column opens its own lessons');
   // The header: the stage with its count (and ⚠) and its lessons, then the traffic light and the model.
   const header = html.match(/aria-label="Reproducir"><header>([\s\S]*?)<\/header>/)[1];
-  assert.match(header, /^<h2><span class="jira-column-name">Reproducir<span class="count"[^>]*>1<\/span><span class="jira-warn">[\s\S]*<\/span><button class="icon-button jira-learn"[^>]*><svg[\s\S]*?<\/svg><\/button><\/h2><div class="jira-column-tools"><span class="jira-light[\s\S]*<select class="jira-model"/);
-  assert.match(html, /data-jira-model="analyze"[^>]*title="Modelo del agente · Auto: nivel Medio"[^>]*><option value="" title="Nivel Medio">Auto<\/option>/, 'the automatic model is just «Auto», with the model in its tooltip');
-  assert.match(html, /data-jira-model="fix"[^>]*title="Modelo del agente · claude-opus-4\.5"/);
+  assert.match(header, /^<h2><span class="jira-column-name">Reproducir<span class="count"[^>]*>1<\/span><span class="jira-warn">[\s\S]*<\/span><button class="icon-button jira-learn"[^>]*><svg[\s\S]*?<\/svg><\/button><\/h2><div class="jira-column-tools"><span class="jira-light[\s\S]*<span class="ai-choice" data-ai-choice="jira" data-stage="reproduce"><select class="ai-model jira-model"/);
+  assert.match(html, /data-stage="analyze"><select[^>]*title="Modelo · Auto: nivel Medio"[^>]*><option value="">Auto<\/option>/, 'the automatic model is just «Auto», with the model in its tooltip');
+  assert.match(html, /data-stage="fix"><select[^>]*title="Modelo · claude-opus-4\.5"/);
+  // Beside the model, its effort: only the levels that model supports.
+  const effort = stage => html.match(new RegExp(`data-stage="${stage}">[\\s\\S]*?(<select class="ai-effort"[\\s\\S]*?</select>)`))[1];
+  assert.match(effort('fix'), /title="Esfuerzo · Alto"[^>]*><option value="">Auto<\/option><option value="low" >Bajo<\/option><option value="medium" >Medio<\/option><option value="high" selected>Alto<\/option><\/select>/);
+  assert.match(effort('verify'), /title="Esfuerzo · GPT-4\.1 no permite elegirlo" disabled><option value="">Auto<\/option><\/select>/, 'a model without efforts: only automatic, whatever was chosen');
+  assert.match(effort('analyze'), /disabled/, 'nor without knowing the model');
+  assert.match(html, /<strong>Asistente<\/strong><span class="ai-choice" data-ai-choice="jira" data-stage="general"><select[^>]*title="Modelo · Auto: el de Analizar"/, 'the board\'s assistant has its own, Analizar\'s by default');
   assert.match(html, /data-stage="fix" data-mode="auto" class="light-auto" aria-pressed="true"/, 'every column starts on autopilot');
   assert.match(html, /winapp ui inspect -a App/, 'the card in progress shows what its agent is doing');
   assert.match(html, /<section class="jira-column is-active mode-auto" aria-label="Reproducir">/, 'and its column is highlighted');
@@ -820,7 +830,7 @@ test('an agent that lacks what it needs does not run, by hand or in the automati
   const news = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board: { ...board, tickets: [{ key: 'NEO-4', summary: 'Cuatro', stage: 'fix', status: 'pending', news: { comments: 2, attachments: 1 } }] } }, { isAuthenticated: true });
   assert.match(news, /<span class="pill jira-news" title="Desde Jira: 2 comentarios y 1 adjunto nuevos\. Ábrelo para verlo">Novedades<\/span>/, 'a ticket with news from Jira shows it');
   assert.match(html, /<textarea data-jira-tell data-general="true"[^>]*placeholder="Pide algo al asistente[^>]*><\/textarea><button[^>]*>Enviar/, 'with a Copilot session the assistant can be asked');
-  assert.doesNotMatch(html, /data-stage="general"/);
+  assert.doesNotMatch(html, /data-action="jira-warn" data-stage="general"/);
   const signedOut = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }, { isAuthenticated: false });
   assert.match(signedOut, /<strong>Asistente<\/strong><span class="jira-warn"><button class="jira-warn-icon" data-action="jira-warn" data-stage="general"/, 'without it, the assistant warns');
   assert.match(signedOut, /placeholder="Inicia sesión en Copilot para usar el asistente" aria-label="Mensaje para el asistente general" disabled><\/textarea><button class="button small primary" data-action="jira-tell" data-general="true"[^>]*disabled>Enviar/, 'and cannot be asked');

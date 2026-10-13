@@ -103,6 +103,9 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
 
   assert.equal((await post('/api/jira-model', { stage: 'fix', model: 'claude-opus-4.5' })).status, 200);
   assert.equal(state.jiraModels ?? state.jira.models.fix, 'claude-opus-4.5');
+  const general = await post('/api/jira-model', { stage: 'general', model: 'claude-opus-4.5', effort: 'max' });
+  assert.deepEqual([general.status, state.jira.models.general, state.jira.efforts.general], [200, 'claude-opus-4.5', 'max'], 'the board\'s assistant has its own model and effort');
+  assert.equal((await post('/api/jira-model', { stage: 'otra', model: '' })).status, 400);
   // Traffic lights: «off» does nothing, «ask» waits for approval, «auto» runs alone.
   assert.equal((await post('/api/jira-mode', { stage: 'fix', mode: 'off' })).status, 200);
   assert.equal(state.jira.modes.fix, 'off');

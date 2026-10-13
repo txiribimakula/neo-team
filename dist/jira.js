@@ -1,6 +1,7 @@
 // Jira tickets: a board whose columns are agents (analyze, reproduce, fix, verify
 // and review), each with its model. Tickets move between them as the agents report,
 // back to fix while the verification fails or the review leaves comments.
+import { aiChoice, effortName } from './ai-choice.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const when = value => value ? new Date(value).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const clock = at => new Date(at).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -48,13 +49,12 @@ function doneButton(ticket) {
   return `<button class="icon-button jira-done" data-action="jira-done" data-key="${escape(ticket.key)}" title="${escape(title)}" aria-label="${escape(`${title} · ${ticket.key}`)}">${FORWARD}</button>`;
 }
 
+// The model and the effort of a column's agent, or of the board's assistant ('general'),
+// which without its own uses Analizar's. «Auto» alone: the model it chooses is in the tooltip.
 function modelSelect(column, settings, defaults, copilot) {
-  const current = settings.models?.[column.id] ?? '';
-  const models = [...(current && !copilot?.models?.some(m => m.id === current) ? [{ id: current, name: current }] : []), ...(copilot?.models ?? [])];
-  const automatic = defaults?.[column.id];
-  // «Auto» alone: the model it chooses is in the tooltip.
-  const title = `Modelo del agente · ${current ? current : `Auto: ${automatic ?? `nivel ${column.tier}`}`}`;
-  return `<select class="jira-model" data-jira-model="${column.id}" aria-label="Modelo del agente ${escape(column.name)}" title="${escape(title)}" ${settings.demo ? 'disabled' : ''}><option value="" title="${escape(automatic ?? `Nivel ${column.tier}`)}">${settings.demo ? 'Simulado' : 'Auto'}</option>${models.map(m => `<option value="${escape(m.id)}" ${m.id === current ? 'selected' : ''}>${escape(m.name)}${m.multiplier != null ? ` · ×${m.multiplier}` : ''}</option>`).join('')}</select>`;
+  const automatic = column.id === 'general' ? settings.models?.analyze || defaults?.analyze : defaults?.[column.id];
+  return aiChoice({ attrs: `data-ai-choice="jira" data-stage="${column.id}"`, models: copilot?.models ?? [], model: settings.models?.[column.id] ?? '', effort: settings.efforts?.[column.id] ?? '',
+    automatic, hint: column.tier ? `nivel ${column.tier}` : 'el de Analizar', auto: settings.demo ? 'Simulado' : 'Auto', name: column.id === 'general' ? 'del asistente' : `del agente ${column.name}`, modelClass: 'jira-model', disabled: settings.demo });
 }
 
 // Issue type and priority icons drawn like Jira's (its own images need the Jira
@@ -170,7 +170,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
     ticket.closedInJira && `<span class="pill" title="Terminado en Jira: se quitó del tablero al sincronizar">${escape(ticket.closedInJira.status || 'Cerrado')} en Jira</span>`,
     ticket.inFilter === false && '<span class="pill demo" title="Ya no está en el filtro de Jira">Fuera del filtro</span>',
   ].filter(Boolean).join('');
-  const run = live ? `<button class="icon-button jira-run" data-action="jira-stop" title="${escape(live.stopping ? 'Deteniendo…' : `Detener · ${live.model ?? ''}`)}" aria-label="Detener ${escape(ticket.key)}" ${live.stopping ? 'disabled' : ''}>■</button>`
+  const run = live ? `<button class="icon-button jira-run" data-action="jira-stop" title="${escape(live.stopping ? 'Deteniendo…' : `Detener · ${live.model ?? ''}${live.effort ? ` · ${effortName(live.effort)}` : ''}`)}" aria-label="Detener ${escape(ticket.key)}" ${live.stopping ? 'disabled' : ''}>■</button>`
     : mode !== 'off' && lacking.length && ['pending', 'blocked'].includes(ticket.status) ? `<button class="icon-button jira-run" disabled title="${escape(`No se puede ejecutar: falta ${lacking.map(need => NEED_FIX[need].split(':')[0]).join(' y ')}`)}" aria-label="Ejecutar ${escape(ticket.key)}">▶</button>`
     : mode !== 'off' && ['pending', 'blocked'].includes(ticket.status) ? `<button class="icon-button jira-run" data-action="jira-run" data-key="${escape(ticket.key)}" title="${mode === 'ask' && ticket.status === 'pending' ? 'Aprobar: ' : ''}Ejecutar el agente de ${escape(stageName(ticket.stage))}" aria-label="Ejecutar ${escape(ticket.key)}">▶</button>` : '';
   // Its folder, right after its key.
@@ -293,7 +293,7 @@ function liveField(run, draft = '') {
     ? `<button class="button small" data-action="jira-pause" data-on="false" title="El agente sigue con su tarea" ${off}>Continuar</button>`
     : `<button class="button small" data-action="jira-pause" data-on="true" title="Interrumpe al agente donde está, sin perder lo que lleva, y espera" ${off}>Pausar</button>`}</div>`;
 }
-export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set(), live = {}, unread = 0) {
+export function generalView(general, draft = '', signedOut = false, warn = null, closed = false, feed = [], feedOpen = new Set(), live = {}, unread = 0, choice = '') {
   const state = general?.conversation, run = live.run ?? null, agent = !!run && !stepOf(run.stage)?.byCode;
   const target = agent && live.to !== 'general' ? 'live' : 'general';
   // Folded: how many new lines arrived, whether something works, whether someone waits for you.
@@ -308,7 +308,7 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
   const picker = agent ? `<label class="jira-to">Para<select data-jira-to aria-label="A quién va el mensaje"><option value="live"${target === 'live' ? ' selected' : ''}>Agente · ${escape(run.key)} · ${escape(stageName(run.stage))}</option><option value="general"${target === 'general' ? ' selected' : ''}>Asistente del tablero</option></select></label>` : '';
   const field = target === 'live' ? liveField(run, live.draft) : tellView(null, draft, { id: 'general', general: true, state, ...(signedOut ? { offline: 'Inicia sesión en Copilot para usar el asistente' } : {}) });
   const reset = target === 'general' && (general?.activity?.length || feed.length) ? '<button class="link-button jira-general-reset" data-action="jira-general-reset" title="Vacía el panel y empieza una conversación nueva con el asistente, sin el contexto de la anterior">Nueva conversación</button>' : '';
-  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
+  return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}${choice}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
 function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null, unread = 0, screens = null) {
@@ -330,7 +330,7 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   // Below the board: the search and the tickets taken off it.
   const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
   // The assistant and the activity, beside the board.
-  const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to }, unread);
+  const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to }, unread, modelSelect({ id: 'general' }, board.settings, board.defaults, copilot));
   return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey, screens)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
 }
 
@@ -474,7 +474,7 @@ function stepPanel(entry, detail, demo, options, log = '', key = '', index = 0) 
   const posted = entry.posted ? `<span class="pill" title="Publicado como comentario en el ticket de Jira">${demo ? 'Publicado (simulado)' : 'En Jira'}</span>` : entry.posted === false ? `<span class="pill outcome-error" title="${escape(entry.postError ?? '')}">No publicado en Jira</span>` : '';
   const files = stepFiles(entry, detail.files ?? []);
   const decide = entry.pendingComment ? `<span class="jira-comment-decide">${commentButtons(key, index)}</span>` : '';
-  return `<p class="jira-step-meta"><span class="pill outcome-${escape(entry.outcome)}">${escape(OUTCOMES[entry.outcome] ?? entry.outcome)}</span><small>${when(entry.finishedAt)}${entry.model ? ` · ${escape(entry.model)}` : ''}${tokens ? ` · ${tokens} tokens` : ''}</small>${entry.ease ? easeView(entry.ease, true) : ''}${person}${posted}${decide}</p>
+  return `<p class="jira-step-meta"><span class="pill outcome-${escape(entry.outcome)}">${escape(OUTCOMES[entry.outcome] ?? entry.outcome)}</span><small>${when(entry.finishedAt)}${entry.model ? ` · ${escape(entry.model)}` : ''}${entry.effort ? ` · ${escape(effortName(entry.effort))}` : ''}${tokens ? ` · ${tokens} tokens` : ''}</small>${entry.ease ? easeView(entry.ease, true) : ''}${person}${posted}${decide}</p>
     ${entry.question ? `<dl class="jira-answers"><dt>Pregunta</dt><dd>${escape(entry.question)}</dd>${answer ? `<dt>Tu respuesta · ${when(answer.at)}</dt><dd>${escape(answer.answer)}</dd>` : ''}</dl>` : ''}
     ${entry.error ? `<p class="inline-error">${escape(entry.error)}</p>` : ''}
     ${log}

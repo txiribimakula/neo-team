@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
 import { IMAGE, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
 import { ActivityFeed } from './jira-feed.js';
+import { effortFor } from './ai-choice.js';
 import { DemoReviewHub, changedFiles, commentState, commentsBlock, commentsIn, diffText, azureRemote, publishCode, publishPending, pullRequestLink, reviewComments, severityOf, snapshot, treeOf, answerText, ANSWERS, SEVERITIES } from './jira-review.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -71,7 +72,8 @@ export function defaultModel(tier, models = []) {
   }
   return null;
 }
-export const modelFor = (stage, chosen = {}, models = []) => chosen[stage] || defaultModel(stageOf(stage)?.tier, models) || null;
+// The board's assistant ('general') uses Analizar's model unless it has its own.
+export const modelFor = (stage, chosen = {}, models = []) => chosen[stage] || (stage === 'general' ? modelFor('analyze', chosen, models) : defaultModel(stageOf(stage)?.tier, models)) || null;
 
 // --- Transitions -------------------------------------------------------------
 // The fixes of the current round: those since the latest review that sent the
@@ -692,9 +694,9 @@ export class CopilotAgent {
   // `guard`: what the agent may not read or run (see permissionFor).
   constructor({ load = () => import('@github/copilot-sdk'), guard = {} } = {}) { this.load = load; this.guard = guard; }
   // The session of a step: its tools, its permissions and what it shows in the log.
-  sessionConfig({ stage, system, model, workingDirectory, writable, customInstructions = false, tools, onActivity }) {
+  sessionConfig({ stage, system, model, effort = null, workingDirectory, writable, customInstructions = false, tools, onActivity }) {
     return {
-      ...(model ? { model } : {}), clientName: 'neo-team', workingDirectory, streaming: true,
+      ...(model ? { model } : {}), ...(model && effort ? { reasoningEffort: effort } : {}), clientName: 'neo-team', workingDirectory, streaming: true,
       systemMessage: { mode: 'append', content: system }, tools, excludedTools: ['mcp:*'],
       onPermissionRequest: request => {
         const decision = permissionFor(request, { writable, cwd: workingDirectory, ...this.guard });
@@ -760,17 +762,17 @@ export class CopilotAgent {
     if (/No GitHub OAuth token|Not authenticated|\b401\b/i.test(String(error?.message)) && !error.reason) return Object.assign(fail('GitHub Copilot no tiene sesión en este equipo. Inicia sesión desde Revisión de PRs.', 401), { reason: 'copilot-auth' });
     return error;
   }
-  async run({ stage, system, prompt, model, workingDirectory, writable, attachments = [], customInstructions = false, desktop = null, duties = {}, onLearn, onActivity = () => {}, onState = () => {}, onSession = () => {} }) {
+  async run({ stage, system, prompt, model, effort = null, workingDirectory, writable, attachments = [], customInstructions = false, desktop = null, duties = {}, onLearn, onActivity = () => {}, onState = () => {}, onSession = () => {} }) {
     let client, session, result = null;
     const usage = { inputTokens: 0, outputTokens: 0, model };
     try {
       let auth;
       ({ client, auth } = await this.connect(workingDirectory));
-      session = await client.createSession(this.sessionConfig({ stage, system, model, workingDirectory, writable, customInstructions, onActivity,
+      session = await client.createSession(this.sessionConfig({ stage, system, model, effort, workingDirectory, writable, customInstructions, onActivity,
         tools: [reportTool(stage, value => { result = value; }, duties), learnTool(stage, onLearn), ...(desktop ? [desktopTool(desktop)] : [])] }));
       onSession(session.sessionId);
       this.listen(session, onActivity, usage);
-      onActivity({ kind: 'note', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'} · cuenta ${auth.login ?? 'de GitHub'}` });
+      onActivity({ kind: 'note', message: `Agente iniciado con ${model ?? 'el modelo predeterminado'}${model && effort ? ` · esfuerzo ${effort}` : ''} · cuenta ${auth.login ?? 'de GitHub'}` });
       // One reminder at the end: the step only counts with its report.
       await this.conversationOf(session, onState).run({ prompt, attachments, timeoutMs: stageOf(stage).timeoutMs, finished: () => !!result });
       if (this.aborted) throw Object.assign(fail('Detenido.'), { stopped: true });
@@ -786,11 +788,11 @@ export class CopilotAgent {
   // context; without one (a step done by code or by hand, or one from before), a
   // new session gets the context of the step. The person leads: the agent answers
   // and waits, and the chat closes after PERSON_WAIT_MS without a message.
-  async chat({ sessionId = null, stage, system, model, workingDirectory, writable, resumed, fresh, onLearn, onActivity = () => {}, onState = () => {}, onSession = () => {}, waitMs }) {
+  async chat({ sessionId = null, stage, system, model, effort = null, workingDirectory, writable, resumed, fresh, onLearn, onActivity = () => {}, onState = () => {}, onSession = () => {}, waitMs }) {
     let client, session;
     try {
       ({ client } = await this.connect(workingDirectory));
-      const config = this.sessionConfig({ stage, system, model, workingDirectory, writable, onActivity, tools: stageOf(stage) ? [learnTool(stage, onLearn)] : [] });
+      const config = this.sessionConfig({ stage, system, model, effort, workingDirectory, writable, onActivity, tools: stageOf(stage) ? [learnTool(stage, onLearn)] : [] });
       session = sessionId ? await client.resumeSession(sessionId, config).catch(() => null) : null;
       const prompt = session ? resumed : fresh;
       if (!session) { session = await client.createSession(config); onSession(session.sessionId); }
@@ -871,14 +873,15 @@ export class JiraPipeline {
     if (open) { await open.agent.tell(text); return; }
     const stage = stageOf(entry.stage) ?? stageOf('analyze'), folder = this.tickets.folder(key), settings = await this.settings();
     const code = join(folder, 'codigo'), withCode = ['fix', 'build', 'verify', 'review'].includes(stage.id) && !!(await stat(join(code, '.git')).catch(() => null));
-    const model = entry.model && entry.model !== 'simulado' ? entry.model : modelFor(stage.tier ? stage.id : 'analyze', settings.models, await this.models().catch(() => []));
+    const models = await this.models().catch(() => []), chosen = stage.tier ? stage.id : 'analyze';
+    const model = entry.model && entry.model !== 'simulado' ? entry.model : modelFor(chosen, settings.models, models), effort = effortFor(model, settings.efforts?.[chosen], models);
     const about = `You are talking with the person about the step «${stage.name}» #${entry.number} of ticket ${key}: ${ticket.summary}. It ended: ${OUTCOME_LABELS[entry.outcome] ?? entry.outcome}${entry.by === 'person' ? ', done by the person by hand' : ''}.
 Ticket folder: ${folder}${entry.report ? `\nReport of the step: ${join(folder, entry.report)}` : ''}${entry.log ? `\nFull log of the step: ${join(folder, entry.log)}` : ''}${withCode ? `\nCode of the ticket: ${code}` : ''}
 Read what you need from them and the ticket files before answering.`;
     const chat = { agent: this.chatAgent(), conversation: 'starting' };
     this.chats.set(id, chat);
     void chat.agent.chat({
-      sessionId: entry.sessionId ?? null, stage: stage.id, model, message: text, system: `${systemMessage(stage.id)}${CHAT_NOTE}`,
+      sessionId: entry.sessionId ?? null, stage: stage.id, model, effort, message: text, system: `${systemMessage(stage.id)}${CHAT_NOTE}`,
       workingDirectory: withCode ? code : folder, writable: [folder],
       resumed: `(The step has ended; the person now talks to you about it.)\n\n${text}`, fresh: `${about}\n\n${text}`,
       onLearn: (scope, lesson) => this.tickets.learn(scope, key, lesson),
@@ -926,8 +929,9 @@ Read what you need from them and the ticket files before answering.`;
     const learnings = await this.tickets.learningsFolder();
     await mkdir(learnings, { recursive: true, mode: 0o700 });
     general.agent = this.chatAgent(); general.conversation = 'starting';
+    const models = await this.models().catch(() => []), model = modelFor('general', settings.models, models);
     void general.agent.chat({
-      sessionId: general.sessionId, stage: 'general', model: modelFor('analyze', settings.models, await this.models().catch(() => [])), message: text,
+      sessionId: general.sessionId, stage: 'general', model, effort: effortFor(model, settings.efforts?.general, models), message: text,
       system: generalSystem(root, learnings), workingDirectory: root, writable: [learnings], resumed: text, fresh: text,
       onActivity: item => this.generalActivity(item),
       onState: state => { general.conversation = state; },
@@ -1202,10 +1206,11 @@ Read what you need from them and the ticket files before answering.`;
     if (!stage) return null;
     const folder = this.tickets.folder(key), startedAt = Date.now();
     const number = (ticket.history ?? []).filter(h => h.stage === stage.id).length + 1;
-    const model = stage.programmatic ? null : modelFor(stage.id, settings.models, await this.models().catch(() => []));
+    const models = stage.programmatic ? [] : await this.models().catch(() => []);
+    const model = stage.programmatic ? null : modelFor(stage.id, settings.models, models), effort = effortFor(model, settings.efforts?.[stage.id], models);
     const log = logName(stage.id, number);
     let sessionId = null;
-    this.running = { key, stage: stage.id, model, startedAt, updatedAt: startedAt, activity: [], log };
+    this.running = { key, stage: stage.id, model, effort, startedAt, updatedAt: startedAt, activity: [], log };
     ticket = await this.tickets.update(key, t => ({ ...t, status: 'running', note: null, ...(stage.id === 'fix' ? { iterations: (t.iterations ?? 0) + 1 } : {}), ...(stage.id === 'reproduce' ? { reproduceAttempts: (t.reproduceAttempts ?? 0) + 1 } : {}) }));
     let outcome, report = null, result = {}, failure = null, reportText = null, unchanged = false;
     const desktop = !this.demo && desktopStage(stage.id) ? this.desktop() : null;
@@ -1235,7 +1240,7 @@ Read what you need from them and the ticket files before answering.`;
         : stage.id === 'build' ? await buildTicket({ settings, ticket, worktree, folder, number, build: this.build, signal: this.building.signal, demo: this.demo, onActivity: entry => this.activity(entry) })
         : code?.empty ? { outcome: 'blocked', report: `# Revisar · ${key}\n\nLa copia del código no tiene cambios respecto a su base: no hay nada que revisar.\n`, question: `No hay cambios en ${worktree.path}. ¿Dónde está la corrección?`, model: null, usage: null }
         : await this.agent.run({
-        stage: stage.id, ticket, folder, model, settings, desktop, duties,
+        stage: stage.id, ticket, folder, model, effort, settings, desktop, duties,
         system: systemMessage(stage.id),
         prompt: stagePrompt({ stage: stage.id, ticket, folder, files, settings, worktree, lessons: { general, [stage.id]: own, ...(pair ? { [pair]: paired } : {}) }, previous, diff }),
         workingDirectory: worktree?.path ?? folder,
@@ -1277,7 +1282,7 @@ Read what you need from them and the ticket files before answering.`;
     if (started) this.feed.update(started, { status: undefined });
     this.feedOutcome(key, stage, outcome, { seconds: (Date.now() - startedAt) / 1000, report: reportText, error: failure?.message, question: result.question });
     const finishedAt = Date.now();
-    const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null, ...(result.ease ? { ease: result.ease } : {}), log, ...(sessionId ? { sessionId } : {}), activity: this.running.activity };
+    const entry = { stage: stage.id, number, outcome, report, question: result.question ?? null, model: result.model ?? model, ...(effort ? { effort } : {}), usage: result.usage ?? null, startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(finishedAt).toISOString(), error: failure?.message ?? null, ...(result.ease ? { ease: result.ease } : {}), log, ...(sessionId ? { sessionId } : {}), activity: this.running.activity };
     // What the agent achieved is left ready as a Jira comment: it is published only when the person confirms it.
     if (this.comment && outcome !== 'stopped' && !stage.programmatic) entry.pendingComment = logComment({ stage: stage.id, outcome, report: reportText, question: result.question, error: failure?.message });
     entry.activity = this.running.activity;

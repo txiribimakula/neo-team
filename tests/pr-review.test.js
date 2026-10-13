@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePullRequestUrl, buildDiff, parseReviewOutput, publishReview, commentText, summaryText, runReview, CopilotReviewer } from '../server/pr-review.js';
 import { demoPullRequest, DemoReviewer, DemoPullRequestGateway } from '../server/demo.js';
+import { choiceFrom, effortFor } from '../server/ai-choice.js';
 import { location, lineChanges, markChanged } from '../dist/reviews.js';
 
 const file = (path, before, after, changeType = 'edit') => ({ path, changeType, before: { text: before }, after: { text: after } });
@@ -95,7 +96,7 @@ function fakeSdk({ authenticated = true, reply = demoReply() } = {}) {
     async start() {}
     async stop() { log.stopped++; return []; }
     async getAuthStatus() { return authenticated ? { isAuthenticated: true, login: 'dev-empresa', authType: 'gh-cli' } : { isAuthenticated: false }; }
-    async listModels() { return [{ id: 'gpt-5', name: 'GPT-5', billing: { multiplier: 1 }, policy: { state: 'enabled' } }, { id: 'claude-opus', name: 'Claude Opus', billing: { multiplier: 10 } }, { id: 'blocked', name: 'Blocked', policy: { state: 'disabled' } }]; }
+    async listModels() { return [{ id: 'gpt-5', name: 'GPT-5', billing: { multiplier: 1 }, policy: { state: 'enabled' }, capabilities: { supports: { reasoningEffort: true } }, supportedReasoningEfforts: ['low', 'medium', 'high', 'turbo'], defaultReasoningEffort: 'medium' }, { id: 'claude-opus', name: 'Claude Opus', billing: { multiplier: 10 } }, { id: 'blocked', name: 'Blocked', policy: { state: 'disabled' } }]; }
     async createSession(config) {
       const handlers = {};
       const session = { sessionId: 's1', config, on: (type, handler) => { handlers[type] = handler; }, disconnect: async () => {}, abort: async () => {},
@@ -208,7 +209,7 @@ test('a finding can carry an Azure DevOps suggested change over whole lines of t
 test('the review model can be chosen among those the account may use', async () => {
   const { log, load } = fakeSdk();
   const status = await new CopilotReviewer({ load }).status();
-  assert.deepEqual(status.models, [{ id: 'gpt-5', name: 'GPT-5', multiplier: 1 }, { id: 'claude-opus', name: 'Claude Opus', multiplier: 10 }], 'models disabled by the organization are not offered');
+  assert.deepEqual(status.models, [{ id: 'gpt-5', name: 'GPT-5', multiplier: 1, efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }, { id: 'claude-opus', name: 'Claude Opus', multiplier: 10, efforts: [], defaultEffort: null }], 'models disabled by the organization are not offered');
   const reviewer = new CopilotReviewer({ load, model: 'gpt-5' });
   await reviewer.review({ prompt: 'diff', model: 'claude-opus' });
   assert.equal(log.sessions[0].config.model, 'claude-opus', 'the chosen model wins over NEO_TEAM_COPILOT_MODEL');
@@ -216,6 +217,20 @@ test('the review model can be chosen among those the account may use', async () 
   assert.equal(log.sessions[1].config.model, 'gpt-5');
   await new CopilotReviewer({ load, model: undefined }).review({ prompt: 'diff' });
   assert.equal('model' in log.sessions[2].config, false, 'without a choice, the default of the plan');
+});
+
+test('the reasoning effort goes with its model, only among those the model supports', async () => {
+  const { log, load } = fakeSdk();
+  const reviewer = new CopilotReviewer({ load, model: undefined });
+  const result = await reviewer.review({ prompt: 'diff', model: 'gpt-5', effort: 'high' });
+  assert.deepEqual([log.sessions[0].config.model, log.sessions[0].config.reasoningEffort, result.effort], ['gpt-5', 'high', 'high']);
+  await reviewer.ask({ system: 'S', prompt: 'P', tools: [], effort: 'high' });
+  assert.equal('reasoningEffort' in log.sessions[1].config, false, 'without a known model, the effort of the default one');
+  const models = (await reviewer.status()).models;
+  assert.deepEqual([effortFor('gpt-5', 'high', models), effortFor('gpt-5', 'max', models), effortFor('claude-opus', 'low', models), effortFor(null, 'low', models), effortFor('gpt-5', '', models)],
+    ['high', null, null, null, null], 'an effort the model does not support is not asked for');
+  assert.equal(effortFor('gpt-5', 'max', []), 'max', 'before checking the models the choice goes as it is');
+  assert.deepEqual([choiceFrom({ model: ' gpt-5 ', effort: 'xhigh' }), choiceFrom({ model: 'gpt-5', effort: 'turbo' }), choiceFrom({ model: 'x; rm -rf /' })], [{ model: 'gpt-5', effort: 'xhigh' }, null, null]);
 });
 
 test('every anchored comment keeps the code it talks about, and a suggestion marks only what changes', () => {

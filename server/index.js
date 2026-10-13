@@ -14,11 +14,12 @@ import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, demoTestPlans, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
 import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
 import { listScreens, screensFrom } from './jira-desktop.js';
-import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
+import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
+import { choiceFrom, effortFor } from './ai-choice.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
 import { AzureReviewHub } from './jira-review.js';
@@ -66,7 +67,7 @@ const refreshJiraToken = async () => { jiraHasToken = !!(await jiraToken()); };
 await refreshJiraToken();
 function jiraSettings() {
   const base = store.data.mode === 'demo' ? DEMO_JIRA_SETTINGS : store.data.jira;
-  return base ? { ...base, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {}, collect: collectScopeFrom(store.data.jiraCollect), screens: screensFrom(store.data.jiraScreens) } : null;
+  return base ? { ...base, models: store.data.jiraModels ?? {}, efforts: store.data.jiraEfforts ?? {}, modes: store.data.jiraModes ?? {}, collect: collectScopeFrom(store.data.jiraCollect), screens: screensFrom(store.data.jiraScreens) } : null;
 }
 const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 'jira-ejemplo') : resolve(settings?.ticketsDir || join(store.directory, 'jira'));
 function publicJira() {
@@ -75,6 +76,8 @@ function publicJira() {
 }
 // Models the Copilot account may use, remembered from the last check.
 let copilotModels = [];
+// The effort chosen for reviews ('copilot') or for the tabs' prompts ('assistant'), if its model supports it.
+const copilotEffort = use => effortFor(store.data[`${use}Model`] || copilot.model, store.data[`${use}Effort`], copilotModels);
 const jiraPipelines = new Map();
 function jiraPipeline() {
   const settings = jiraSettings();
@@ -86,7 +89,7 @@ function jiraPipeline() {
     // tickets, nor run anything that names the Jira site.
     const host = (() => { try { return new URL(settings.url).host; } catch { return ''; } })();
     const guard = { hidden: [store.directory], visible: [root], blocked: [host] };
-    jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent({ guard }), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, modes: store.data.jiraModes ?? {} } : jiraSettings()),
+    jiraPipelines.set(root, new JiraPipeline({ tickets, demo, agent: demo ? new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : new CopilotAgent({ guard }), settings: async () => (demo ? { ...DEMO_JIRA_SETTINGS, models: store.data.jiraModels ?? {}, efforts: store.data.jiraEfforts ?? {}, modes: store.data.jiraModes ?? {} } : jiraSettings()),
       chatAgent: demo ? () => new DemoAgent({ delayMs: Number(process.env.NEO_TEAM_DEMO_AGENT_MS ?? 700) }) : () => new CopilotAgent({ guard }),
       comment: async (key, body) => (demo ? new DemoJiraClient() : new JiraClient(jiraSettings(), await jiraToken())).addComment(key, body),
       // Revisar publishes the draft pull request through the connected Azure DevOps.
@@ -148,6 +151,9 @@ const currentMaintenance = () => maintenance?.scope === maintenanceScope() ? mai
 let myIteration = null;
 const myIterationScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project, store.data.config?.team]);
 const currentMyIteration = () => myIteration?.scope === myIterationScope() ? myIteration : null;
+// The last test plan query, kept only in memory like maintenance.
+let testPlans = null;
+const currentTestPlans = () => testPlans?.scope === maintenanceScope() ? testPlans : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 // Local steps after the Azure queries join the activity, so a failure shows
 // where it stopped instead of the last request sent to Azure.
@@ -194,7 +200,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -254,6 +260,10 @@ const server = http.createServer(async (req, res) => {
       requireSession(req);
       return json(res, { myIteration: currentMyIteration() });
     }
+    if (req.method === 'GET' && path === '/api/test-plans') {
+      requireSession(req);
+      return json(res, { testPlans: currentTestPlans() });
+    }
     if (req.method === 'GET' && path === '/api/jira') {
       requireSession(req);
       return json(res, { jira: await jiraBoard() });
@@ -304,8 +314,8 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/assistant', '/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/assistant', '/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -367,6 +377,24 @@ const server = http.createServer(async (req, res) => {
             myIteration = { scope: myIterationScope(), fetchedAt: new Date().toISOString(), demo: false, boards };
           }
           return json(res, { myIteration: currentMyIteration() });
+        }
+        // The plans of the project and the points of the chosen plan (or the current one).
+        if (path === '/api/test-plans') {
+          const reportProgress = progress => {
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            operation = { ...operation, ...progress, updatedAt: Date.now() };
+          };
+          const planId = Number.isInteger(input.planId) && input.planId > 0 ? input.planId : null;
+          if (store.data.mode === 'demo') testPlans = { scope: maintenanceScope(), ...demoTestPlans(planId) };
+          else {
+            if (!store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps para consultar sus planes de prueba.');
+            const config = configFrom(store.data.config, false);
+            reportProgress({ message: 'Conectando con Azure DevOps…' });
+            await azure.open(config);
+            if (operation.cancelRequested) throw fail('Consulta cancelada.');
+            testPlans = { scope: maintenanceScope(), ...(await azure.testPlans(config, planId, reportProgress)) };
+          }
+          return json(res, { testPlans: currentTestPlans() });
         }
         // The possible states of a type, so the person can choose which are closed.
         if (path === '/api/maintenance-states') {
@@ -455,7 +483,7 @@ const server = http.createServer(async (req, res) => {
             // A repository with a local folder is compared there; the folder is checked again each time.
             const folder = store.data.mode === 'demo' ? null : store.data.localRepositories?.[repositoryKey(config.organization, target.project, target.repository)];
             const local = folder ? await checkRepository(folder, target.repository) : null;
-            const review = await runReview({ azure: gateway, reviewer, config, target, mode: store.data.mode, local, model: store.data.mode === 'demo' ? null : store.data.copilotModel, onProgress: progress });
+            const review = await runReview({ azure: gateway, reviewer, config, target, mode: store.data.mode, local, model: store.data.mode === 'demo' ? null : store.data.copilotModel, effort: store.data.mode === 'demo' ? null : copilotEffort('copilot'), onProgress: progress });
             progress({ cancellable: false });
             const data = structuredClone(store.data);
             data.prReviews = [review, ...(data.prReviews ?? [])].slice(0, REVIEW_LIMITS.reviews);
@@ -485,16 +513,18 @@ const server = http.createServer(async (req, res) => {
         }
         // The AI prompt of a planning tab: only the local copy of that tab changes.
         if (path === '/api/assistant') {
-          const answer = await runAssistant({ request: assistantRequest(input), store, agent: copilot, model: store.data.copilotModel ?? null,
+          const answer = await runAssistant({ request: assistantRequest(input), store, agent: copilot, model: store.data.assistantModel ?? null, effort: copilotEffort('assistant'),
             onActivity: message => { if (!operation.cancelRequested) step(message); }, onChange: () => { planner.review = null; } });
           return json(res, { assistant: answer, state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/copilot-model') {
-          // The model that reviews; empty: the default of the plan (or NEO_TEAM_COPILOT_MODEL).
-          const model = typeof input.model === 'string' ? input.model.trim() : '';
-          if (model.length > 100 || (model && !/^[\w.:/-]+$/.test(model))) throw fail('Modelo no válido.');
-          const data = structuredClone(store.data);
-          if (model) data.copilotModel = model; else delete data.copilotModel;
+          // The model and the effort that review (or that answer the tabs' prompts);
+          // empty: the default of the plan (or NEO_TEAM_COPILOT_MODEL) and of the model.
+          const choice = choiceFrom(input), use = input.use === 'assistant' ? 'assistant' : 'copilot';
+          if (!choice) throw fail('Modelo o esfuerzo no válido.');
+          const data = structuredClone(store.data), effort = effortFor(choice.model || copilot.model, choice.effort, copilotModels);
+          if (choice.model) data[`${use}Model`] = choice.model; else delete data[`${use}Model`];
+          if (effort) data[`${use}Effort`] = effort; else delete data[`${use}Effort`];
           await store.save(data);
           return json(res, publicState());
         }
@@ -656,12 +686,15 @@ const server = http.createServer(async (req, res) => {
           return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
         }
         if (path === '/api/jira-model') {
-          if (!stageOf(input.stage)) throw fail('Columna no válida.');
-          const model = typeof input.model === 'string' ? input.model.trim() : '';
-          if (model.length > 100 || (model && !/^[\w.:/-]+$/.test(model))) throw fail('Modelo no válido.');
-          const data = structuredClone(store.data);
-          data.jiraModels = { ...data.jiraModels };
+          // The model and the effort of a column's agent, or of the board's assistant ('general').
+          if (!stageOf(input.stage) && input.stage !== 'general') throw fail('Columna no válida.');
+          const choice = choiceFrom(input);
+          if (!choice) throw fail('Modelo o esfuerzo no válido.');
+          const data = structuredClone(store.data), { model } = choice;
+          data.jiraModels = { ...data.jiraModels }; data.jiraEfforts = { ...data.jiraEfforts };
           if (model) data.jiraModels[input.stage] = model; else delete data.jiraModels[input.stage];
+          const effort = effortFor(modelFor(input.stage, data.jiraModels, copilotModels), choice.effort, copilotModels);
+          if (effort) data.jiraEfforts[input.stage] = effort; else delete data.jiraEfforts[input.stage];
           await store.save(data);
           return json(res, publicState());
         }
@@ -974,7 +1007,7 @@ const server = http.createServer(async (req, res) => {
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
     const route = /^\/(planificacion|mi-iteracion|mantenimiento|revision-prs|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'reviews.js', 'jira.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

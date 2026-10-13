@@ -3,6 +3,7 @@ import { permissionsView, filterPermissions, filterGroups, resetPermissionFilter
 import { maintenanceView, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, setMaintenanceView, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
+import { aiChoice } from './ai-choice.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
@@ -715,10 +716,17 @@ function assistantOutput(ui) {
   const changes=ui.changes?.length ? `<ul class="assistant-changes" aria-label="Cambios guardados en local">${ui.changes.map(line=>`<li>${escape(line)}</li>`).join('')}</ul>` : '';
   return `<div class="assistant-answer ${ui.error ? 'failed' : ''}"><div class="assistant-answer-head"><span class="assistant-asked">${escape(ui.asked)}</span><button type="button" class="close" data-action="assistant-clear" aria-label="Cerrar la respuesta">×</button></div>${ui.error ? `<p class="inline-error">${escape(ui.error)}</p>` : `<p class="assistant-reply">${escape(ui.reply)}</p>`}${changes}</div>`;
 }
+// The model and the effort that answer the tabs' prompts; the account's models are checked once, in the background.
+let assistantModels=null;
+function assistantChoice() {
+  // Only the selectors are redrawn, so whoever is typing the prompt keeps writing.
+  if (state.mode!=='demo' && !prUi.copilot && !assistantModels && !state.busy) assistantModels=send('/api/copilot-status',{}).then(({response,data})=>{ if (response?.ok && data.copilot && !prUi.copilot) { prUi.copilot=data.copilot; const box=$('[data-ai-choice="assistant"]'); if (box) box.outerHTML=assistantChoice(); } }).catch(()=>{});
+  return aiChoice({ attrs:'data-ai-choice="assistant"', models:prUi.copilot?.models ?? [], model:state.assistantModel ?? '', effort:state.assistantEffort ?? '', automatic:prUi.copilot?.defaultModel ?? null, name:'de la IA de esta pestaña', disabled:state.mode==='demo' });
+}
 function assistantView() {
   if (!ASSISTANT_HINTS[tab]) return '';
   const ui=assistantOf(tab);
-  return `<section class="assistant" aria-label="IA de esta pestaña"><form id="assistant-form" class="assistant-form" data-tab="${tab}"><span class="assistant-mark" aria-hidden="true">✦</span><input id="assistant-prompt" name="prompt" maxlength="2000" autocomplete="off" placeholder="${escape(ASSISTANT_HINTS[tab])}" aria-label="Petición a la IA, solo sobre esta pestaña" value="${escape(ui.draft)}" ${ui.running ? 'disabled' : ''}><button type="submit" class="button small primary" ${ui.running ? 'disabled' : ''} title="Solo cambia esta pestaña y en local: los cambios quedan pendientes de sincronizar">Pedir</button></form><div id="assistant-output">${assistantOutput(ui)}</div></section>`;
+  return `<section class="assistant" aria-label="IA de esta pestaña"><form id="assistant-form" class="assistant-form" data-tab="${tab}"><span class="assistant-mark" aria-hidden="true">✦</span><input id="assistant-prompt" name="prompt" maxlength="2000" autocomplete="off" placeholder="${escape(ASSISTANT_HINTS[tab])}" aria-label="Petición a la IA, solo sobre esta pestaña" value="${escape(ui.draft)}" ${ui.running ? 'disabled' : ''}>${assistantChoice()}<button type="submit" class="button small primary" ${ui.running ? 'disabled' : ''} title="Solo cambia esta pestaña y en local: los cambios quedan pendientes de sincronizar">Pedir</button></form><div id="assistant-output">${assistantOutput(ui)}</div></section>`;
 }
 function updateAssistant(which) {
   if (tab===which && $('#assistant-output')) $('#assistant-output').innerHTML=assistantOutput(assistantOf(which));
@@ -2196,8 +2204,11 @@ document.addEventListener('change',async event=>{
     if('jiraCollect' in el.dataset){await saveJiraCollect();if(el.value==='single')$('[data-jira-collect-key]')?.focus();return;}
     if('jiraTo' in el.dataset){jiraUi.to={value:el.value,run:String(jiraUi.board?.pipeline?.running?.startedAt)};render();$(`#app [data-focus="${el.value==='general'?'jira-tell:general':'jira-tell'}"]`)?.focus();return;}
     if(el.dataset.jiraScreen){await jiraAction('/api/jira-screens',{web:$('[data-jira-screen="web"]')?.value||null,app:$('[data-jira-screen="app"]')?.value||null});return;}
-    if(el.dataset.jiraModel){await request('/api/jira-model',{stage:el.dataset.jiraModel,model:el.value});await loadJira().catch(()=>{});render();return;}
-    if('copilotModel' in el.dataset){await request('/api/copilot-model',{model:el.value});render();toast(el.value ? `Las revisiones se harán con ${el.selectedOptions[0]?.textContent ?? el.value}.` : 'Las revisiones usarán el modelo predeterminado.');return;}
+    // The model or the effort of a place that asks Copilot: both are saved together.
+    if(el.dataset.ai){const box=el.closest('[data-ai-choice]'),choice={model:box.querySelector('[data-ai="model"]').value,effort:box.querySelector('[data-ai="effort"]').value};
+      if(box.dataset.aiChoice==='jira'){await request('/api/jira-model',{stage:box.dataset.stage,...choice});await loadJira().catch(()=>{});}
+      else await request('/api/copilot-model',{use:box.dataset.aiChoice,...choice});
+      render();return;}
     if('prLocal' in el.dataset){await request('/api/pr-local-repo',{project:el.dataset.project,repository:el.dataset.repository,path:el.value});render();toast(el.value.trim() ? `Los pull requests de «${el.dataset.repository}» se compararán en ${localFolderOf(el)}.` : `Los pull requests de «${el.dataset.repository}» se leerán de Azure DevOps.`);return;}
     if(el.dataset.description){const data=await request('/api/description',{id:Number(el.dataset.description),field:el.dataset.field,description:el.value});review=data.review;render();return;}
     if(el.id==='pr-include-summary'){prUi.includeSummary=el.checked;render();$('#pr-include-summary')?.focus();return;}

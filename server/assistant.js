@@ -232,7 +232,7 @@ const TABS = {
 
 // One request: Copilot with the context and tools of the tab. Changes are saved
 // as they are made, so a cancelled request keeps what it already did.
-export async function runAssistant({ request, store, agent, model = null, today = new Date().toISOString().slice(0, 10), onActivity = () => {}, onChange = () => {} }) {
+export async function runAssistant({ request, store, agent, model = null, effort = null, today = new Date().toISOString().slice(0, 10), onActivity = () => {}, onChange = () => {} }) {
   const { tab, prompt, history, iterationId } = request, definition = TABS[tab];
   const read = () => { const ws = store.data[store.data.mode]; if (!ws) throw fail('Importa una planificación primero.'); return planningWorkspace(ws); };
   const changes = [];
@@ -254,6 +254,6 @@ export async function runAssistant({ request, store, agent, model = null, today 
   const context = definition.context({ data: store.data, ws: read(), iterationId });
   const conversation = history.map(turn => `Person: ${turn.prompt}\nYou: ${turn.reply}`).join('\n\n');
   const text = `Today is ${today}.\n\nContext of the tab (local data, JSON):\n${JSON.stringify(context)}\n\n${conversation ? `Earlier in this tab:\n${conversation}\n\n` : ''}Request:\n${prompt}`;
-  const answer = await agent.ask({ system: SYSTEM(tab, definition.scope), prompt: text, tools, model, onProgress: progress => onActivity(progress.message) });
+  const answer = await agent.ask({ system: SYSTEM(tab, definition.scope), prompt: text, tools, model, effort, onProgress: progress => onActivity(progress.message) });
   return { reply: String(answer.text ?? '').trim().slice(0, ASSISTANT_LIMITS.reply), changes, select: selected, model: answer.model ?? null };
 }

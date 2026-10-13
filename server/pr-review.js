@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { structuredPatch } from 'diff';
 import { localPullRequestFiles } from './local-repo.js';
+import { modelInfo } from './ai-choice.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 export const SEVERITIES = { blocker: 'Bloqueante', major: 'Importante', minor: 'Menor', suggestion: 'Sugerencia' };
@@ -200,7 +201,7 @@ export function noChangesMessage(files) {
 // Reads the pull request, asks Copilot and returns the review to store locally.
 // With a local clone (`local`: its folder and the remote of the repository) the diff
 // is made there with git; Azure DevOps only gives the pull request and its comments.
-export async function runReview({ azure, reviewer, config, target, mode, local = null, model = null, onProgress = () => {} }) {
+export async function runReview({ azure, reviewer, config, target, mode, local = null, model = null, effort = null, onProgress = () => {} }) {
   const scoped = { ...config, project: target.project };
   // Without a GitHub session the review would read the whole pull request for nothing.
   onProgress({ phase: 'copilot', message: 'Comprobando la sesión de GitHub Copilot…' });
@@ -214,10 +215,10 @@ export async function runReview({ azure, reviewer, config, target, mode, local =
   const diff = buildDiff(data.files);
   if (!diff.files.some(f => f.status === 'included' && f.lines.length)) throw fail(noChangesMessage(diff.files), 422);
   onProgress({ phase: 'copilot', message: `Enviando ${diff.files.filter(f => f.status === 'included').length} archivos a GitHub Copilot…` });
-  const result = await reviewer.review({ model, prompt: reviewPrompt({ pullRequest: data.pullRequest, repository: data.pullRequest.repository?.name ?? target.repository, diff, threads: data.threads, omittedFiles: data.omittedFiles }), onProgress });
+  const result = await reviewer.review({ model, effort, prompt: reviewPrompt({ pullRequest: data.pullRequest, repository: data.pullRequest.repository?.name ?? target.repository, diff, threads: data.threads, omittedFiles: data.omittedFiles }), onProgress });
   onProgress({ phase: 'saving', message: 'Comprobando la respuesta y guardando la revisión…' });
   const parsed = parseReviewOutput(result.text, diff);
-  return { ...reviewRecord({ mode, organization: config.organization, project: target.project, target, data, diff, parsed, copilot: { login: result.login ?? null, model: result.model ?? null, inputTokens: result.usage?.inputTokens ?? null, outputTokens: result.usage?.outputTokens ?? null } }), diffSource: local ? { kind: 'local', path: local.path } : { kind: 'azure' } };
+  return { ...reviewRecord({ mode, organization: config.organization, project: target.project, target, data, diff, parsed, copilot: { login: result.login ?? null, model: result.model ?? null, effort: result.effort ?? null, inputTokens: result.usage?.inputTokens ?? null, outputTokens: result.usage?.outputTokens ?? null } }), diffSource: local ? { kind: 'local', path: local.path } : { kind: 'azure' } };
 }
 
 // Publishes the selected comments as new threads. The pull request must still be
@@ -287,23 +288,22 @@ export class CopilotReviewer {
       const auth = await client.getAuthStatus();
       // The models this account may use, to choose the one that reviews.
       const models = auth.isAuthenticated ? (await client.listModels().catch(() => []))
-        .filter(m => m?.id && m.policy?.state !== 'disabled')
-        .map(m => ({ id: m.id, name: m.name || m.id, multiplier: m.billing?.multiplier ?? null })) : [];
+        .filter(m => m?.id && m.policy?.state !== 'disabled').map(modelInfo) : [];
       return { isAuthenticated: !!auth.isAuthenticated, login: auth.login ?? null, host: auth.host ?? null, authType: auth.authType ?? null, models, defaultModel: this.model ?? null, message: auth.isAuthenticated ? null : AUTH_HELP };
     });
   }
-  async review({ prompt, model = null, onProgress = () => {} }) {
-    return this.converse({ prompt, model, onProgress, words: REVIEW_WORDS,
+  async review({ prompt, model = null, effort = null, onProgress = () => {} }) {
+    return this.converse({ prompt, model, effort, onProgress, words: REVIEW_WORDS,
       systemMessage: { mode: 'customize', sections: { code_change_rules: { action: 'remove' } }, content: SYSTEM_INSTRUCTIONS },
       tools: { availableTools: [], excludedTools: ['builtin:*', 'mcp:*', 'custom:*'] } });
   }
   // A question answered with the given tools only: no shell, files, MCP or web.
-  async ask({ system, prompt, tools, model = null, onProgress = () => {} }) {
-    return this.converse({ prompt, model, onProgress, words: ASK_WORDS,
+  async ask({ system, prompt, tools, model = null, effort = null, onProgress = () => {} }) {
+    return this.converse({ prompt, model, effort, onProgress, words: ASK_WORDS,
       systemMessage: { mode: 'replace', content: system },
       tools: { tools, availableTools: ['custom:*'], excludedTools: ['builtin:*', 'mcp:*'] } });
   }
-  async converse({ prompt, model, onProgress, words, systemMessage, tools }) {
+  async converse({ prompt, model, effort, onProgress, words, systemMessage, tools }) {
     const chosen = model || this.model;
     this.aborted = false;
     return this.withClient(async (client, directory) => {
@@ -312,7 +312,7 @@ export class CopilotReviewer {
       if (!auth.isAuthenticated) throw authError();
       if (this.aborted) throw fail(words.cancelled);
       const session = await client.createSession({
-        ...(chosen ? { model: chosen } : {}),
+        ...(chosen ? { model: chosen } : {}), ...(chosen && effort ? { reasoningEffort: effort } : {}),
         clientName: 'neo-team', workingDirectory: directory, streaming: true, systemMessage, ...tools,
         onPermissionRequest: () => ({ kind: 'reject', feedback: words.rejected }),
         enableConfigDiscovery: false, skipCustomInstructions: true, enableSkills: false, enableSessionStore: false, enableHostGitOperations: false,
@@ -335,7 +335,7 @@ export class CopilotReviewer {
         if (this.aborted) throw fail(words.cancelled);
         const content = reply?.data?.content;
         if (!content) throw new Error(sessionError ? `${words.incomplete}: ${sessionError}` : 'GitHub Copilot no devolvió ninguna respuesta.');
-        return { text: content, login: auth.login ?? null, model: usage.model ?? chosen ?? null, usage };
+        return { text: content, login: auth.login ?? null, model: usage.model ?? chosen ?? null, effort: chosen && effort ? effort : null, usage };
       } finally {
         const id = session.sessionId;
         await session.disconnect().catch(() => {});
