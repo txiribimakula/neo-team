@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
@@ -847,4 +847,26 @@ test('who a ticket is assigned to is visible, and tickets of others stay out of 
   await pipeline.enqueue('NEO-1');
   for (let i = 0; i < 50 && pipeline.looping; i++) await new Promise(done => setTimeout(done, 10));
   assert.deepEqual(ran, ['NEO-2', 'NEO-1'], 'with ▶ on it, it runs');
+});
+
+test('the learnings live in the repository of the application, to share them with a commit', async t => {
+  const dir = await temp(t), repo = join(dir, 'app'), root = join(dir, 'tickets'), git = (...args) => execFileSync('git', args, { cwd: repo }).toString().trim();
+  await mkdir(join(repo, 'src'), { recursive: true });
+  git('init', '-q', '-b', 'main');
+  await mkdir(join(root, 'aprendizajes'), { recursive: true });
+  await writeFile(join(root, 'aprendizajes', 'general.md'), '- Compilar con dotnet build _(NEO-1, 2026-01-01)_\n- Arrancar con\n  winapp run _(NEO-2, 2026-01-02)_\n');
+  let repository = '';
+  const tickets = new TicketStore(root, { repository: async () => repository });
+  assert.equal(await tickets.learningsFolder(), join(root, 'aprendizajes'), 'without a repository they stay in the tickets folder');
+  repository = join(repo, 'src');
+  const shared = join(await realpath(repo), '.github', 'neo-team', 'aprendizajes');
+  await mkdir(shared, { recursive: true });
+  await writeFile(join(shared, 'general.md'), '- Compilar con dotnet build _(NEO-1, 2026-01-01)_\n- Del equipo _(NEO-9, 2026-02-01)_\n');
+  assert.equal(await tickets.learningsFolder(), shared, 'the folder of the repository, from any folder inside it');
+  assert.equal(await tickets.learnings('general'), '- Compilar con dotnet build _(NEO-1, 2026-01-01)_\n- Del equipo _(NEO-9, 2026-02-01)_\n- Arrancar con\n  winapp run _(NEO-2, 2026-01-02)_\n', 'the lessons learned before join those of the team once');
+  assert.equal(await readFile(join(shared, '.gitattributes'), 'utf8'), '*.md merge=union\n');
+  assert.ok(!(await stat(join(root, 'aprendizajes')).catch(() => null)), 'the old folder is kept apart');
+  await tickets.learn('fix', 'NEO-3', 'Los tests están en tests/');
+  assert.match(await readFile(join(shared, 'solucionar.md'), 'utf8'), /^- Los tests están en tests\/ _\(NEO-3, /);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '?? .github/neo-team/aprendizajes/.gitattributes\n?? .github/neo-team/aprendizajes/general.md\n?? .github/neo-team/aprendizajes/solucionar.md', 'Neo Team writes them; the person commits them');
 });

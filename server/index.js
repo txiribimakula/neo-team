@@ -81,7 +81,7 @@ function jiraPipeline() {
   if (!settings) throw fail('Configura Jira primero.');
   const root = jiraRoot(settings), demo = store.data.mode === 'demo';
   if (!jiraPipelines.has(root)) {
-    const tickets = new TicketStore(root);
+    const tickets = new TicketStore(root, { repository: async () => (demo ? null : jiraSettings()?.repository) });
     // The agents cannot read Neo Team's data (the Jira token among it) apart from the
     // tickets, nor run anything that names the Jira site.
     const host = (() => { try { return new URL(settings.url).host; } catch { return ''; } })();
@@ -731,7 +731,7 @@ const server = http.createServer(async (req, res) => {
             if (typeof input.text !== 'string' || input.text.length > 200000) throw fail('Texto no válido.');
             await pipeline.tickets.saveLearnings(input.scope, input.text);
           } else {
-            const folder = input.key ? pipeline.tickets.folder(checkKey(input.key)) : join(pipeline.tickets.root, 'aprendizajes');
+            const folder = input.key ? pipeline.tickets.folder(checkKey(input.key)) : await pipeline.tickets.learningsFolder();
             await mkdir(folder, { recursive: true, mode: 0o700 });
             await openPath(folder);
           }
