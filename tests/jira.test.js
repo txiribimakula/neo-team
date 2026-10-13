@@ -650,8 +650,10 @@ test('every step keeps its log in the ticket and its agent can be talked to afte
   await pipeline.stopGeneral();
   await pipeline.saveGeneral();
   assert.match(await readFile(join(root, 'asistente.json'), 'utf8'), /Quita los aprendizajes repetidos/);
+  assert.ok(pipeline.snapshot().feed.length);
   await pipeline.resetGeneral();
   assert.deepEqual(JSON.parse(await readFile(join(root, 'asistente.json'), 'utf8')), { sessionId: null, activity: [] });
+  assert.deepEqual(pipeline.snapshot().feed, [], 'Nueva conversación empties the panel');
 });
 
 test('nothing reaches Jira from the agents: no token, no Neo Team data and no web', () => {

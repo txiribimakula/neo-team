@@ -911,7 +911,7 @@ Read what you need from them and the ticket files before answering.`;
     const general = await this.generalState();
     await general.agent?.abort();
     Object.assign(general, { sessionId: null, activity: [], agent: null, conversation: null });
-    await this.saveGeneral();
+    await Promise.all([this.saveGeneral(), this.feed.clear()]);
   }
   // Recolectar is done by code at once, without waiting for the agent at work: ▶ on
   // a ticket in Recolectar collects it now and leaves it queued for Analizar.

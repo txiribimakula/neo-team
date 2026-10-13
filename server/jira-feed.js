@@ -90,5 +90,11 @@ export class ActivityFeed {
     }
     this.add({ ...context, ...event });
   }
+  // Nueva conversación empties the panel: only what is still at work stays.
+  async clear() {
+    await this.ready;
+    this.items = this.items.filter(item => item.status === 'running');
+    this.save();
+  }
   recent() { return this.items.slice(-SHOWN); }
 }
