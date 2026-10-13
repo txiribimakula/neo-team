@@ -23,6 +23,9 @@ let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
 let changesUi = { loading: false, syncing: false, error: '', notice: '', confirmAll: false };
 let backlogQuery='';
+// Quick backlog filters: open tasks left in finished iterations, or items that can
+// have children (epics, features, stories) and have none.
+let backlogFilter='';
 const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
 const expandedLanes = new Set(), expandedPrevious = new Set();
@@ -636,8 +639,19 @@ function inAvailableBacklog(item, iteration=selected()) {
   const base=state.workspace.items.find(i=>i.id===item.id);
   return !!state.workspace.drafts?.[item.id] && !!base && base.iterationPath!==iteration.path;
 }
-function treeView({ availableOnly = false, search = query } = {}) {
-  const ws=state.workspace, tree=planningTree(), iteration=selected();
+// Open tasks still in an iteration that has already finished.
+function overdueTest(ws=state.workspace) {
+  const past=new Set(ws.iterations.filter(i=>i.past || hasEnded(i)).map(i=>i.path));
+  return item=>isExecutable(item) && past.has(item.iterationPath) && !isCompleted(item,ws);
+}
+const childlessTest=tree=>item=>!isExecutable(item) && !item.contextOnly && typeRank(item)<=2 && !tree.nodes.get(item.id)?.children.length;
+function backlogFilterTest(filter, iteration=selected()) {
+  if (filter==='overdue') { const overdue=overdueTest(); return item=>inAvailableBacklog(item,iteration) && overdue(item); }
+  if (filter==='childless') return childlessTest(planningTree());
+  return null;
+}
+function treeView({ availableOnly = false, search = query, filter = '' } = {}) {
+  const ws=state.workspace, tree=planningTree(), iteration=selected(), quick=availableOnly && backlogFilterTest(filter,iteration);
   const matches=new Set();
   // The available backlog filters tasks by their own name (or #id); their parents
   // are still shown for context. Elsewhere, a matching branch shows its descendants.
@@ -648,6 +662,7 @@ function treeView({ availableOnly = false, search = query } = {}) {
     if (!matches.has(item.id)) return false;
     // Open branches are shown even without available tasks (a new story, say), so
     // the whole hierarchy is visible; while filtering, only branches with matches.
+    if (quick) return quick(item);
     if (availableOnly) return isExecutable(item) ? inAvailableBacklog(item,iteration) : !search.trim() && !item.contextOnly;
     return true;
   };
@@ -655,7 +670,7 @@ function treeView({ availableOnly = false, search = query } = {}) {
   function nodeHtml(node,depth) {
     const type=`<span class="node-type kind-${typeRank(node)}">${escape(node.type)}</span>`;
     if (!isExecutable(node)) {
-      return `<details class="hierarchy-branch" data-node="${node.id}" ${search || !collapsed.has(node.id) ? 'open' : ''}><summary><span class="branch-chevron">›</span>${type}<span class="branch-title">${node.project ? `<small class="pill">${escape(node.project)}</small> ` : ''}${escape(node.title)} <small>${taskId(node)}${node.contextOnly ? ' · contexto' : ''}</small>${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</span><button class="button small" data-action="create" data-parent="${node.id}" aria-label="Crear hijo de ${escape(node.title)}">+</button><button class="button small" data-action="edit" data-task="${node.id}">Editar</button></summary><div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('') || '<p class="branch-empty">Sin tareas o bugs disponibles en esta rama.</p>'}</div></details>`;
+      return `<details class="hierarchy-branch" data-node="${node.id}" ${search || quick || !collapsed.has(node.id) ? 'open' : ''}><summary><span class="branch-chevron">›</span>${type}<span class="branch-title">${node.project ? `<small class="pill">${escape(node.project)}</small> ` : ''}${escape(node.title)} <small>${taskId(node)}${node.contextOnly ? ' · contexto' : ''}</small>${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</span><button class="button small" data-action="create" data-parent="${node.id}" aria-label="Crear hijo de ${escape(node.title)}">+</button><button class="button small" data-action="edit" data-task="${node.id}">Editar</button></summary><div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('') || '<p class="branch-empty">Sin tareas o bugs disponibles en esta rama.</p>'}</div></details>`;
     }
     const effort=node.remainingWork !== null ? `${number(node.remainingWork)} h` : node.points !== null ? `${number(node.points)} pts` : 'Sin estimar';
     const planned=availableOnly && iteration && node.iterationPath===iteration.path;
@@ -664,13 +679,13 @@ function treeView({ availableOnly = false, search = query } = {}) {
     const leaf=`<div class="hierarchy-leaf ${planned ? 'planned-local' : ''}" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
-  const empty=search.trim() ? `<div class="empty-result" role="status"><p>No hay tareas que coincidan con «${escape(search)}».</p><button class="button small" data-action="clear-task-search" data-search="${availableOnly ? 'backlog' : 'hierarchy'}">Limpiar búsqueda</button></div>` : '<div class="empty-result">No hay tareas para esta selección.</div>';
+  const empty=quick && !search.trim() ? `<div class="empty-result" role="status"><p>${filter==='overdue' ? 'No hay tareas abiertas en iteraciones pasadas.' : 'No hay elementos sin hijos.'}</p><button class="button small" data-action="backlog-filter" data-filter="${filter}">Quitar filtro</button></div>` : search.trim() ? `<div class="empty-result" role="status"><p>No hay tareas que coincidan con «${escape(search)}».</p><button class="button small" data-action="clear-task-search" data-search="${availableOnly ? 'backlog' : 'hierarchy'}">Limpiar búsqueda</button></div>` : '<div class="empty-result">No hay tareas para esta selección.</div>';
   if (!ws.sources) return roots.map(node=>nodeHtml(node,0)).join('') || empty;
   // With several projects, each project is the top parent of its own backlog.
   const projects=ws.sources.map(source=>{
     const own=roots.filter(node=>node.sourceId===source.id);
     if (!own.length) return '';
-    return `<details class="hierarchy-branch project-branch" data-project="${escape(source.id)}" ${search || !collapsed.has(`project:${source.id}`) ? 'open' : ''}><summary><span class="branch-chevron">›</span><span class="node-type kind-project">Proyecto</span><span class="branch-title">${escape(source.config.project)} <small>${escape(source.config.team)}</small></span></summary><div class="hierarchy-children">${own.map(node=>nodeHtml(node,1)).join('')}</div></details>`;
+    return `<details class="hierarchy-branch project-branch" data-project="${escape(source.id)}" ${search || quick || !collapsed.has(`project:${source.id}`) ? 'open' : ''}><summary><span class="branch-chevron">›</span><span class="node-type kind-project">Proyecto</span><span class="branch-title">${escape(source.config.project)} <small>${escape(source.config.team)}</small></span></summary><div class="hierarchy-children">${own.map(node=>nodeHtml(node,1)).join('')}</div></details>`;
   }).join('');
   const unknown=roots.filter(node=>!ws.sources.some(source=>source.id===node.sourceId)).map(node=>nodeHtml(node,0)).join('');
   return projects+unknown || empty;
@@ -1084,7 +1099,7 @@ function updatePlanningView() {
   $('#planning-view').innerHTML=stepView();
   restoreScrolls(scrolls);
   fitBoardColumns();
-  if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
+  if((backlogQuery.trim() || backlogFilter) && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
 // Comments are written on the card; @ offers the people of the sprint. Mentions are
@@ -1179,12 +1194,13 @@ function leftPanelContent() {
     const next=nextIteration();
     return tasks.map(i=>taskCard(i,false,next,true)).join('') || (backlogQuery.trim() ? '<div class="empty-result" role="status"><p>No hay tareas que coincidan con la búsqueda.</p><button class="button small" data-action="clear-task-search" data-search="backlog">Limpiar búsqueda</button></div>' : '<div class="drop-hint">Arrastra aquí una tarea para dejarla en la iteración sin responsable.</div>');
   }
-  return treeView({availableOnly:true,search:backlogQuery});
+  return treeView({availableOnly:true,search:backlogQuery,filter:backlogFilter});
 }
 function leftPanelCount() {
   const iteration=selected(), total=leftPanel==='unassigned' ? unassignedTasks(iteration).length : state.workspace.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)).length;
-  if (!backlogQuery.trim()) return String(total);
-  const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
+  const quick=leftPanel==='backlog' && backlogFilterTest(backlogFilter,iteration);
+  if (!backlogQuery.trim() && !quick) return String(total);
+  const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : quick ? state.workspace.effectiveItems.filter(i=>quick(i) && matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
   return `${shown} de ${total}`;
 }
 function board(iteration, planned) {
@@ -1202,7 +1218,10 @@ function board(iteration, planned) {
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
   const widen=`<button type="button" class="icon-button backlog-width" data-action="toggle-backlog-width" aria-pressed="${backlogWide}" title="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}" aria-label="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}">${backlogWide ? shrinkIcon : expandIcon}</button>`;
   const fold=leftPanel==='backlog' ? `<button type="button" class="icon-button backlog-fold" data-action="expand-tree" title="Expandir todo" aria-label="Expandir todas las ramas del backlog">${expandAllIcon}</button><button type="button" class="icon-button backlog-fold" data-action="collapse-tree" title="Plegar todo" aria-label="Plegar todas las ramas del backlog">${collapseAllIcon}</button>` : '';
-  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div><div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
+  const overdue=overdueTest(ws), childless=childlessTest(planningTree());
+  const quickButton=(filter,label,title,count)=>`<button type="button" data-action="backlog-filter" data-filter="${filter}" aria-pressed="${backlogFilter===filter}" title="${title}">${label}<span class="count">${count}</span></button>`;
+  const quick=leftPanel==='backlog' ? `<div class="backlog-quick" role="group" aria-label="Filtros del backlog">${quickButton('overdue','Iteraciones pasadas','Tareas sin cerrar en iteraciones ya terminadas',backlog.filter(overdue).length)}${quickButton('childless','Sin hijos','Épicas, features e historias sin hijos',ws.effectiveItems.filter(childless).length)}</div>` : '';
+  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';
   return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
 }
@@ -1274,7 +1293,7 @@ function render() {
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
   restoreScrolls(scrolls);
   fitBoardColumns();
-  if(backlogQuery.trim() && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
+  if((backlogQuery.trim() || backlogFilter) && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 async function editTask(id, refreshStates = false) {
   const ws = state.workspace, item = ws.effectiveItems.find(i=>i.id === id);
@@ -1993,6 +2012,7 @@ const actions = {
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
   'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
+  'backlog-filter':el=>{backlogFilter=backlogFilter===el.dataset.filter ? '' : el.dataset.filter;updatePlanningView();$(`.backlog-quick [data-filter="${el.dataset.filter}"]`)?.focus({preventScroll:true});},
   'toggle-backlog-width':()=>{backlogWide=!backlogWide;try{localStorage.setItem('neo-team:backlog-wide',backlogWide ? '1' : '0');}catch{/* Kept for this visit only. */}updatePlanningView();$('[data-action="toggle-backlog-width"]')?.focus({preventScroll:true});},
   'assistant-clear':()=>{const ui=assistantOf(tab);Object.assign(ui,{asked:'',reply:'',changes:[],error:''});updateAssistant(tab);$('#assistant-prompt')?.focus({preventScroll:true});},
   'left-panel':el=>{leftPanel=el.dataset.panel;updatePlanningView();$(`[data-action="left-panel"][data-panel="${leftPanel}"]`)?.focus({preventScroll:true});},
