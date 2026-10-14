@@ -118,8 +118,6 @@ export function assigneeView(assignee) {
   return `<span class="jira-assignee${assignee.me ? ' me' : ''}" title="Asignado en Jira a ${escape(assignee.name)}${assignee.me ? ' (tu cuenta)' : ''}"><span class="jira-avatar" aria-hidden="true">${escape(initials(assignee.name))}</span><span class="jira-assignee-name">${escape(assignee.name)}${assignee.me ? ' · tú' : ''}</span></span>`;
 }
 const GEAR = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>';
-const FUNNEL = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18l-7 8.5V19l-4 2v-8.5L3 4Z"/></svg>';
-const SYNC = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/></svg>';
 const FOLDER = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>';
 const TRASH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/></svg>';
 const UPLOAD = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 8a4 4 0 0 1 0 8"/><path d="M12 12v9"/><path d="m8.5 15.5 3.5-3.5 3.5 3.5"/></svg>';
@@ -139,7 +137,6 @@ function shareButtons(ticket, live) {
   const share = ticket.history?.length ? `<button class="icon-button jira-tool" data-action="jira-share" data-key="${key}" title="${escape(`Subir su estado a Jira para seguir en otro equipo${shared?.id && shared.id === ticket.sharedSeen ? ` · subido ${when(shared.created)}` : ''}`)}" aria-label="Subir el estado de ${key} a Jira" ${off}>${UPLOAD}</button>` : '';
   return resume + share;
 }
-const RESTORE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>';
 const CHAT = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12Z"/></svg>';
 const LOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
 const UNLOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.7-1.5"/></svg>';
@@ -167,7 +164,6 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
     ticket.news && `<span class="pill jira-news" title="${escape(newsText(ticket.news))}">Novedades</span>`,
     pullRequestPill(ticket.review, demo),
     ticket.iterations > 1 && `<span class="pill" title="Correcciones intentadas">×${ticket.iterations}</span>`,
-    ticket.closedInJira && `<span class="pill" title="Terminado en Jira: se quitó del tablero al sincronizar">${escape(ticket.closedInJira.status || 'Cerrado')} en Jira</span>`,
     ticket.inFilter === false && '<span class="pill demo" title="Ya no está en el filtro de Jira">Fuera del filtro</span>',
   ].filter(Boolean).join('');
   const run = live ? `<button class="icon-button jira-run" data-action="jira-stop" title="${escape(live.stopping ? 'Deteniendo…' : `Detener · ${live.model ?? ''}${live.effort ? ` · ${effortName(live.effort)}` : ''}`)}" aria-label="Detener ${escape(ticket.key)}" ${live.stopping ? 'disabled' : ''}>■</button>`
@@ -184,7 +180,7 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
     <span class="jira-card-title">${escape(ticket.summary)}</span>
     <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${ticket.jiraStatus ? `<span class="tag jira-card-status" title="Estado en Jira: ${escape(ticket.jiraStatus)}">${escape(ticket.jiraStatus)}</span>` : ''}${easeView(ticket.ease)}</span></span>
     ${actions ? `<span class="jira-card-actions">${actions}</span>` : ''}
-    <span class="jira-card-meta">${pills}<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-archive" data-key="${escape(ticket.key)}" data-archived="${!ticket.archived}" title="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero (su carpeta se conserva)'}" aria-label="${ticket.archived ? 'Volver al tablero' : 'Quitar del tablero'} ${escape(ticket.key)}" ${live ? 'disabled' : ''}>${ticket.archived ? RESTORE : TRASH}</button></span></span>
+    <span class="jira-card-meta">${pills}<span class="jira-card-tools"><button class="icon-button jira-tool" data-action="jira-delete" data-key="${escape(ticket.key)}" title="Borrar (con su carpeta, su copia del código y su rama)" aria-label="Borrar ${escape(ticket.key)}" ${live ? 'disabled' : ''}>${TRASH}</button></span></span>
     ${live?.conversation === 'waiting' ? '<small class="jira-live jira-waiting">Esperando tu respuesta</small>'
       : live ? `<small class="jira-live" title="${escape(last?.message ?? '')}">${escape(last?.message ?? 'Iniciando…')}</small>`
       : status === 'blocked' ? `<p class="jira-question">${escape(ticket.question ?? ticket.note ?? STATUS.blocked)}</p>${answerField(ticket, drafts, true)}`
@@ -194,29 +190,13 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
   </article>`;
 }
 
-// The search of the board: every word typed has to appear in the key or the title,
-// without minding case or accents.
-const plain = text => String(text ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-export function matchesTicket(ticket, search = '') {
-  const text = plain(`${ticket.key} ${ticket.summary}`);
-  return plain(search).split(/\s+/).filter(Boolean).every(word => text.includes(word));
-}
-// The search, right above the board: every word has to be in the key or the title.
-// Right above the board: updating from Jira and what it brings and, at the end, starting and the settings.
-const boardControls = (board, search, collectKey, screens) => `<div class="jira-board-controls">
-    <button class="button jira-square" data-action="jira-refresh" title="${escape(board.settings.collect?.mode === 'single' ? `Actualizar: descarga solo ${board.settings.collect.key || 'el ticket indicado'}; el resto no se toca` : board.settings.collect?.mode === 'mine' ? `Actualizar: descarga solo los tickets del filtro asignados a ti (nuevos o con cambios); quita del tablero los terminados en Jira · ${board.settings.filter ?? ''}` : `Actualizar: pone al día los tickets del tablero (quita los terminados en Jira y descarga los cambios) y trae los nuevos del filtro · ${board.settings.filter ?? ''}`)}" aria-label="Actualizar">${SYNC}</button>
-    ${collectView(board.settings, collectKey)}
-    <span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.pipeline?.auto
-      ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para" aria-label="Pausar">❚❚</button>`
-      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente" aria-label="Empezar">▶</button>`}${screensView(board, screens)}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span></div>`;
-// What updating brings: the whole filter, only your tickets or one ticket by its key.
-const COLLECT = [['filter', 'Todo el filtro'], ['mine', 'Asignados a mí'], ['single', 'Un ticket']];
-function collectView(settings, draft) {
-  const scope = settings.collect ?? { mode: 'filter', key: '' };
-  return `<span class="jira-collect"><select data-jira-collect aria-label="Qué trae Actualizar" title="Qué trae Actualizar" >${COLLECT.map(([id, label]) => `<option value="${id}" ${id === scope.mode ? 'selected' : ''}>${label}</option>`).join('')}</select>${scope.mode === 'single'
-    ? `<input data-jira-collect-key data-focus="jira-collect-key" value="${escape(draft ?? scope.key)}" placeholder="NEO-123" aria-label="Clave del ticket" title="Clave o dirección de un ticket del filtro (Intro para traerlo)" autocomplete="off" spellcheck="false" maxlength="2000">` : ''}</span>`;
-}
-const searchView = search => `<label class="jira-search">${FUNNEL}<input type="search" data-jira-search data-focus="jira-search" value="${escape(search)}" placeholder="Buscar ticket" aria-label="Buscar ticket por clave o título" autocomplete="off" spellcheck="false"></label>`;
+// Above the board, at the end: starting, the monitors and the settings. Mantenimiento
+// puts them in its head, beside updating and the filters. Empezar works on the tickets
+// the filters leave (`filtered`, their number) or, with nothing filtered, on all of them.
+const boardTools = (board, screens, filtered = null) => `<span class="jira-links">${board.tools?.demo ? '<span class="pill demo">Ejemplo simulado</span>' : ''}${board.pipeline?.auto
+      ? `<button class="button jira-square" data-action="jira-auto" data-on="false" title="Pausar: termina el paso en curso y para${board.pipeline.scope ? ` · trabaja en ${board.pipeline.scope.length} filtrados` : ''}" aria-label="Pausar">❚❚</button>`
+      : `<button class="button jira-square" data-action="jira-auto" data-on="true" title="${filtered == null ? 'Empezar: procesa los tickets pendientes uno tras otro, terminando cada uno antes del siguiente' : `Empezar: procesa los pendientes de los ${filtered} tickets filtrados, uno tras otro`}" aria-label="Empezar">▶</button>`}${screensView(board, screens)}${board.settings.demo ? '' : `<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración" aria-label="Configuración">${GEAR}</button>`}</span>`;
+const boardControls = (board, screens, head = null, filtered = null) => head ? head(boardTools(board, screens, filtered)) : `<div class="jira-board-controls">${boardTools(board, screens, filtered)}</div>`;
 
 // Which monitor holds the web and which the application while reproducing and verifying
 // (each one maximized on its own); empty, the main one for the web and another for the application.
@@ -311,9 +291,10 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
   return `<aside class="jira-side"><section class="jira-activity jira-general" aria-label="Asistente"><header><button class="icon-button jira-side-toggle" data-action="jira-assistant" aria-expanded="true" title="Plegar el asistente" aria-label="Plegar el asistente">»</button><strong>Asistente</strong>${warnView('general', 'el asistente', signedOut ? ['copilot'] : [], warn === 'general')}${choice}<span>${busy}</span>${reset}</header>${working}${picker}${field}${feedView(feed, feedOpen)}</section></aside>`;
 }
 
-function boardView(board, copilot, showArchived, drafts, search = '', tell = '', tells = {}, warn = null, assistantClosed = false, collectKey = null, feedOpen = new Set(), to = null, unread = 0, screens = null) {
+// `shown`: the keys the filters of Mantenimiento leave (all, without it); `head`, its head.
+function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, warn = null, assistantClosed = false, head = null, feedOpen = new Set(), to = null, unread = 0, screens = null, filtered = null) {
   const missing = missingOf(board, copilot);
-  const visible = board.tickets.filter(t => (showArchived || !t.archived) && matchesTicket(t, search)), archived = board.tickets.filter(t => t.archived).length;
+  const visible = shown ? board.tickets.filter(t => shown.has(t.key)) : board.tickets;
   const columns = COLUMNS.map(column => {
     const tickets = visible.filter(t => (SHOWN_IN[t.stage] ?? t.stage) === column.id).sort((a, b) => (a.stage === 'done') - (b.stage === 'done'));
     const active = tickets.some(t => t.key === board.pipeline?.running?.key);
@@ -326,12 +307,9 @@ function boardView(board, copilot, showArchived, drafts, search = '', tell = '',
   }).join('');
   const error = board.pipeline?.error ? `<p class="inline-error">${escape(board.pipeline.error)}</p>` : '';
   // Without a Copilot session the agents cannot work: how to sign in, as in pull request reviews.
-  const archivedButton = archived ? `<button class="link-button jira-archived" data-action="jira-show-archived">${showArchived ? 'Ocultar quitados' : `Mostrar ${archived} quitados del tablero`}</button>` : '';
-  // Below the board: the search and the tickets taken off it.
-  const foot = `<div class="jira-board-foot">${searchView(search)}${archivedButton}</div>`;
   // The assistant and the activity, beside the board.
   const assistant = closed => generalView(board.pipeline?.general, tells.general, missing.copilot, warn, closed, board.pipeline?.feed ?? [], feedOpen, { run: board.pipeline?.running ?? null, draft: tell, to }, unread, modelSelect({ id: 'general' }, board.settings, board.defaults, copilot));
-  return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, search, collectKey, screens)}<div class="jira-board">${columns}</div>${foot}</div>${assistant(assistantClosed)}</div>`;
+  return `${error}<div class="jira-main${assistantClosed ? ' side-closed' : ''}"><div class="jira-main-board">${boardControls(board, screens, head, filtered)}<div class="jira-board">${columns}</div></div>${assistant(assistantClosed)}</div>`;
 }
 
 export const SETTINGS_SUBMIT = '<button class="button primary" type="submit" form="jira-settings-form" title="Guarda y comprueba la conexión con Jira">Conectar</button>';
@@ -529,10 +507,10 @@ export function ticketDetail(board, detail, demo, drafts, selected = null, fileU
 export function jiraView(state, ui, copilot) {
   const demo = state.mode === 'demo', board = ui.board;
   const page = body => `<section class="maintenance-page jira-page">${body}</section>`;
-  if (!state.jira) return page(settingsView(state.jira));
+  if (!state.jira) return page(`${ui.head ? ui.head('') : ''}${settingsView(state.jira)}`);
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.showArchived, ui.answers, ui.search, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.collectKey, ui.feedOpen, ui.to, ui.unread, ui.screens));
+  return page(boardView(board, copilot, ui.answers, ui.shown ?? null, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.head ?? null, ui.feedOpen, ui.to, ui.unread, ui.screens, ui.filtered ?? null));
 }
 
 export function settingsFrom(form) {

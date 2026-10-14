@@ -1,9 +1,11 @@
 import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
-import { maintenanceView, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, setMaintenanceView, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
+import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, maintenanceViewName, setMaintenanceView, setMaintenanceOrigin, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
+import { testPlansView, filterTestPlans, toggleTestPlanOutcome, setTestPlansView, resetTestPlanFilters, rememberedTestPlan, chooseTestPlan, focusTestPlans, useTestPlansScope, testPlansScopeOf } from './test-plans.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
 import { aiChoice } from './ai-choice.js';
+import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
@@ -13,12 +15,14 @@ const key = member => (member.uniqueName || member.id || member.displayName || '
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
 const initials = name => name.trim().split(/\s+/).slice(0,2).map(s => s[0]).join('').toUpperCase();
 const date = value => value ? new Date(value).toLocaleDateString('es', { day:'numeric', month:'short', timeZone:'UTC' }) : 'Sin fecha';
-let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null, myIterationSnapshot = null;
+let securitySnapshot = null, maintenanceSnapshot = null, maintenanceSetup = null, myIterationSnapshot = null, testPlansSnapshot = null;
 // Pull request review: what the person is choosing; the reviews themselves come from the server.
 let prUi = { repositories: null, repository: '', pullRequests: null, reviewId: null, copilot: null, includeSummary: true };
+// Pipelines: the list read from Azure DevOps, the one open and the review shown.
+let pipelineUi = { snapshot: null, pipelineId: null, analysisId: null, filter: '' };
 // Jira: the board comes from the server and is polled while the section is open.
 const jiraAsked = new Set();
-let jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {}, tells: {} };
+let jiraUi = { view: 'board', board: null, detail: null, answers: {}, tells: {} };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
@@ -79,7 +83,7 @@ function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sinc
 // Pending changes are counted by the server, with the same rules as the review.
 const pendingCount = (ws = state?.workspace) => ws?.pendingChanges ?? 0;
 const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
-const isPlanningTab = () => !['home', 'permissions', 'maintenance', 'my-iteration', 'reviews', 'jira'].includes(tab);
+const isPlanningTab = () => !['home', 'permissions', 'maintenance', 'my-iteration', 'test-plans', 'reviews', 'pipelines', 'jira'].includes(tab);
 function savedStatus() {
   const count=pendingCount();
   return count ? `${plural(count,'pendiente')} de sincronizar` : 'Sin cambios pendientes';
@@ -89,9 +93,10 @@ function setState(next) {
   const scope = value => JSON.stringify([value?.mode, value?.config?.organization, value?.config?.project]);
   if (state && scope(state) !== scope(next)) {
     prUi = { repositories:null, repository:'', pullRequests:null, reviewId:null, copilot:null, includeSummary:true };
-    maintenanceSnapshot = null; maintenanceSetup = null;
+    maintenanceSnapshot = null; maintenanceSetup = null; testPlansSnapshot = null;
+    pipelineUi = { snapshot: null, pipelineId: null, analysisId: null, filter: '' };
   }
-  if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, showArchived: false, answers: {}, tells: {} };
+  if (state && state.mode !== next.mode) jiraUi = { view: 'board', board: null, detail: null, answers: {}, tells: {} };
   if (scope(state) !== scope(next) || state?.config?.team !== next?.config?.team) myIterationSnapshot = null;
   state = next; markSnapshot(state?.workspace);
 }
@@ -389,7 +394,7 @@ async function importWithProgress(target, existing = null, start = null) {
   const cancelButton = $('[data-cancel-operation]', target);
   if (start) $('.import-progress-heading strong', target).textContent = start.title || 'Consultando permisos';
   if (!isImport) $('.import-progress-note', target).textContent = 'La sesión de Azure puede reutilizarse sin pedir autenticación de nuevo.';
-  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status', '/api/jira-refresh'].includes(start?.path || existing?.path)) {
+  if (state.mode === 'demo' && ['/api/review', '/api/sync', '/api/upload-capacity', '/api/download-capacity', '/api/refresh-section', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states', '/api/pr-repositories', '/api/pr-list', '/api/pr-review', '/api/pr-publish', '/api/copilot-status', '/api/jira-refresh', '/api/pipelines', '/api/pipeline-review'].includes(start?.path || existing?.path)) {
     $('.import-progress-phase', target).textContent = 'Preparando la simulación con datos de ejemplo…';
     $('.import-progress-note', target).textContent = 'Esta operación no contacta con Azure DevOps ni con GitHub.';
   }
@@ -406,7 +411,7 @@ async function importWithProgress(target, existing = null, start = null) {
   });
   const renderProgress = progress => {
     if (progress.title) $('.import-progress-heading strong', target).textContent = progress.title;
-    cancelButton.hidden = existing ? !['/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/maintenance-states', '/api/work-item-states'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
+    cancelButton.hidden = existing ? !['/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states', '/api/pipelines', '/api/pipeline-review'].includes(existing.path) : progress.cancellable === false && !progress.cancelRequested;
     cancelButton.disabled = progress.cancellable === false || !!progress.cancelRequested;
     const elapsed = progress.startedAt ? Math.floor((Date.now() - progress.startedAt) / 1000) : 0;
     const last = Math.max(progress.updatedAt || 0, progress.activityAt || 0), idle = last ? Math.floor((Date.now() - last) / 1000) : 0;
@@ -539,9 +544,11 @@ async function resumeOperation() {
     await importWithProgress($('#connection-progress'), current);
     await loadState();
     if (current.path.startsWith('/api/security-')) { await loadSecurity(); tab = 'permissions'; render(); }
-    if (current.path === '/api/maintenance') { await loadMaintenance(); tab = 'maintenance'; render(); }
+    if (current.path === '/api/maintenance') { await loadMaintenance(); if (tab !== 'maintenance') setMaintenanceView('list'); tab = 'maintenance'; render(); }
     if (current.path === '/api/my-iteration') { await loadMyIteration(); tab = 'my-iteration'; render(); }
+    if (current.path === '/api/test-plans') { await loadTestPlans(); tab = 'test-plans'; render(); }
     if (current.path === '/api/jira-refresh') { tab = 'jira'; render(); startJiraPolling(); }
+    if (current.path.startsWith('/api/pipeline')) { await loadPipelines(); if (current.path === '/api/pipeline-review') { const latest = state.pipelineAnalyses?.[0]; pipelineUi.pipelineId = latest?.pipeline.id ?? null; pipelineUi.analysisId = latest?.id ?? null; } tab = 'pipelines'; render(); }
     if (current.path.startsWith('/api/pr-')) { if (current.path === '/api/pr-review') prUi.reviewId = state.prReviews?.[0]?.id ?? null; tab = 'reviews'; render(); }
     modal.close();
     toast('Operación completada. Datos actualizados.');
@@ -1251,7 +1258,7 @@ function render() {
   syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
   syncButton.title=`Sincronización: ${savedStatus()}`;
   renderSyncPanel();
-  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', reviews: 'Revisión de PRs', jira: 'Tickets de Jira' })[tab] || 'Planificación';
+  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', 'test-plans': 'Planes de prueba', reviews: 'Revisión de PRs', pipelines: 'Pipelines', jira: 'Mantenimiento' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
   syncJiraDesktop();
@@ -1260,8 +1267,8 @@ function render() {
     button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
     button.disabled = !!state.busy;
   });
-  // Inicio and Jira do not depend on Azure DevOps: only its sections ask to connect it.
-  const connecting = needsConnection() && !['home', 'jira'].includes(tab);
+  // Inicio and Mantenimiento do not depend on Azure DevOps: only its sections ask to connect it.
+  const connecting = needsConnection() && !['home', 'jira', 'maintenance'].includes(tab);
   // Only the test mode is announced: the real one needs no notice.
   $('#mode-banner').hidden = connecting || !demo;
   if (connecting) {
@@ -1281,10 +1288,13 @@ function render() {
   $('#app').setAttribute('aria-label', section);
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
   if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
+  if (testPlansSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) testPlansSnapshot = null;
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
-  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSnapshot, state, maintenanceSetup); return; }
+  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSources(), state, { setup: maintenanceSetup, tools: jiraGear() }); syncJiraScope(); return; }
   if (tab === 'my-iteration') { $('#app').innerHTML = myIterationView(myIterationSnapshot, state); return; }
+  if (tab === 'test-plans') { $('#app').innerHTML = testPlansView(testPlansSnapshot, state); return; }
   if (tab === 'reviews') { $('#app').innerHTML = reviewsView(state, prUi); return; }
+  if (tab === 'pipelines') { $('#app').innerHTML = pipelinesView(state, { ...pipelineUi, copilot: prUi.copilot }); return; }
   if (tab === 'jira') { renderJira(); return; }
   if (tab === 'permissions') { $('#app').innerHTML = permissionsView(securitySnapshot, state.config); return; }
   if(!ws){
@@ -1556,9 +1566,10 @@ function homeView() {
   return `<section class="home"><div class="home-sections">
     <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong>${pendingCount() ? `<small class="home-pending" title="Cambios guardados en local que aún no se han subido a Azure DevOps">${plural(pendingCount(),'pendiente')} de sincronizar</small>` : ''}</button>
     <button class="home-card my-iteration" data-action="open-my-iteration"><span class="home-icon" aria-hidden="true">▦</span><strong>Mi iteración</strong></button>
+    <button class="home-card test-plans" data-action="open-test-plans"><span class="home-icon" aria-hidden="true">✓</span><strong>Planes de prueba</strong></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
     <button class="home-card reviews" data-action="open-reviews"><span class="home-icon" aria-hidden="true">⌥</span><strong>Revisión de PRs</strong></button>
-    <button class="home-card jira" data-action="open-jira"><span class="home-icon" aria-hidden="true">◫</span><strong>Tickets de Jira</strong></button>
+    <button class="home-card pipelines" data-action="open-pipelines"><span class="home-icon" aria-hidden="true">▷</span><strong>Pipelines</strong></button>
     <button class="home-card permissions" data-action="permissions" ${state.mode === 'demo' ? 'disabled title="Disponible en el modo Azure DevOps"' : ''}><span class="home-icon" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg></span><strong>Permisos</strong></button>
   </div></section>`;
 }
@@ -1572,6 +1583,43 @@ async function loadMyIteration() {
   if (!response.ok) throw new Error('No se pudo recuperar la consulta de tu iteración.');
   myIterationSnapshot = (await response.json()).myIteration;
 }
+async function loadPipelines() {
+  const response = await fetch('/api/pipelines', { headers: { 'X-Neo-CSRF': state.csrf } });
+  if (!response.ok) throw new Error('No se pudo recuperar la consulta de pipelines.');
+  pipelineUi.snapshot = (await response.json()).pipelines;
+}
+async function pipelinesQuery() {
+  const result = await runOperation('/api/pipelines', {}, 'Pipelines', state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project);
+  pipelineUi.snapshot = result.pipelines; tab = 'pipelines'; render();
+}
+// The review of the last completed run: why it failed, or how to improve the pipeline.
+async function startPipelineReview(pipelineId) {
+  const pipeline = pipelineUi.snapshot?.pipelines.find(p => p.id === pipelineId), run = pipeline?.lastCompleted;
+  let data;
+  try { data = await runOperation('/api/pipeline-review', { pipelineId }, `Revisar ${pipeline?.name ?? 'el pipeline'}`, run ? `Ejecución #${run.number} · ${run.result === 'succeeded' ? 'cómo mejorarlo' : 'por qué falló'}` : ''); }
+  catch (error) {
+    if (error.reason !== 'copilot-auth') throw error;
+    modal.close(); prUi.copilot = { isAuthenticated: false }; render(); window.scrollTo({ top: 0 });
+    toast('GitHub Copilot no tiene sesión en este equipo.', 'error');
+    return;
+  }
+  pipelineUi.pipelineId = pipelineId; pipelineUi.analysisId = data.analysisId; tab = 'pipelines'; render(); window.scrollTo({ top: 0 });
+}
+async function loadTestPlans() {
+  const response = await fetch('/api/test-plans', { headers: { 'X-Neo-CSRF': state.csrf } });
+  if (!response.ok) throw new Error('No se pudo recuperar la consulta de planes de prueba.');
+  testPlansSnapshot = (await response.json()).testPlans;
+}
+// The plan chosen last in this browser is asked for again; without one, the
+// server picks the current plan.
+async function testPlansQuery(planId) {
+  useTestPlansScope(testPlansScopeOf(state));
+  showModal('Planes de prueba', state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project, '<div id="connection-progress"></div>');
+  const result = await importWithProgress($('#connection-progress'), null, { path: '/api/test-plans', input: { planId: planId ?? rememberedTestPlan() }, title: 'Consultando planes de prueba' });
+  testPlansSnapshot = result.testPlans;
+  if (testPlansSnapshot?.plan) chooseTestPlan(testPlansSnapshot.plan.id);
+  tab = 'test-plans'; modal.close(); render();
+}
 async function myIterationQuery() {
   showModal('Mi iteración', state.mode === 'demo' ? 'Datos de ejemplo' : 'Elementos asignados a tu cuenta en la iteración actual.', '<div id="connection-progress"></div>');
   const result = await importWithProgress($('#connection-progress'), null, { path: '/api/my-iteration', input: {}, title: 'Consultando mi iteración' });
@@ -1583,7 +1631,7 @@ async function maintenanceQuery(includeClosed = maintenanceIncludeClosed()) {
   const settings = state.maintenanceSettings;
   showModal(`Consultar ${settings.type}`, `${state.mode === 'demo' ? 'Datos de ejemplo' : state.config.project}${includeClosed ? '' : ` · estados distintos de ${settings.closedStates.join(', ') || 'ninguno'}`}.`, '<div id="connection-progress"></div>');
   const result = await importWithProgress($('#connection-progress'), null, { path: '/api/maintenance', input: { includeClosed }, title: `Consultando ${settings.type}${includeClosed ? '' : ' no cerrados'}` });
-  maintenanceSnapshot = result.maintenance; setMaintenanceIncludeClosed(!!maintenanceSnapshot?.includeClosed); tab = 'maintenance'; modal.close(); render();
+  maintenanceSnapshot = result.maintenance; setMaintenanceIncludeClosed(!!maintenanceSnapshot?.includeClosed); modal.close(); render();
 }
 function exportSecurity() {
   const blob = new Blob([JSON.stringify(securitySnapshot, null, 2)], { type: 'application/json' });
@@ -1641,7 +1689,7 @@ function syncJiraDesktop() {
   document.body.classList.toggle('jira-fit', tab === 'jira' && !!state?.jira);
   // The title lets Neo Team find this browser window to keep it on the web monitor.
   if (run?.desktopTitle) document.title = run.desktopTitle;
-  else if (tab === 'jira') document.title = 'Tickets de Jira · Neo Team';
+  else if (tab === 'jira') document.title = 'Mantenimiento · Neo Team';
 }
 function renderJira() {
   syncJiraDesktop();
@@ -1649,12 +1697,74 @@ function renderJira() {
   const focus = document.activeElement?.dataset?.focus;
   // Who the prompt speaks to: chosen for the step at work; a new step starts with its agent.
   const to = jiraUi.to?.run === String(jiraUi.board?.pipeline?.running?.startedAt) ? jiraUi.to.value : null;
-  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread() }, prUi.copilot);
+  // The head of Mantenimiento and its filters: the board shows, and Empezar takes, the tickets they leave.
+  const sources = maintenanceSources(), scope = jiraUi.board?.tickets ? maintenanceScope(sources, state) : null;
+  const head = tools => maintenanceHead(sources, state, { board: true, tools });
+  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread(), head, shown: scope?.keys ? boardKeys(sources, state) : null, filtered: scope?.keys?.length ?? null }, prUi.copilot);
   const nextLog = $('#app .jira-activity ol');
   if (nextLog && logScroll > 0) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
   restoreJiraForm();
   if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
   askJiraComment();
+  syncJiraScope();
+}
+// What Mantenimiento shows: the Jira board and the Azure DevOps query, as far as each is there.
+const maintenanceSources = () => ({ azure: maintenanceSnapshot, jira: jiraUi.board?.tickets ? jiraUi.board : null });
+const jiraGear = () => state.jira && state.mode !== 'demo' ? '<button class="icon-button jira-gear" data-action="jira-settings" title="Configuración de Jira" aria-label="Configuración de Jira"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>' : '';
+// While Empezar works, it follows the filters: a change of what is seen changes what it takes next.
+let jiraScopeSent = null;
+function syncJiraScope() {
+  const pipeline = jiraUi.board?.pipeline;
+  if (!pipeline?.auto || !jiraUi.board?.tickets) { jiraScopeSent = null; return; }
+  const keys = maintenanceScope(maintenanceSources(), state).keys, wanted = JSON.stringify(keys ? [...keys].sort() : null);
+  if (wanted === JSON.stringify(pipeline.scope ? [...pipeline.scope].sort() : null) || wanted === jiraScopeSent) return;
+  jiraScopeSent = wanted;
+  send('/api/jira-scope', { keys }).then(({ response, data }) => { if (response?.ok && data.jira) jiraUi.board = data.jira; }).catch(() => {});
+}
+// A filter changed: the view is drawn again, keeping the field being written and its cursor.
+function maintenanceFiltered(el) {
+  const focus = el?.dataset?.focus, start = el?.selectionStart, end = el?.selectionEnd;
+  if (tab === 'jira') renderJira(); else render();
+  const next = focus && $(`[data-focus="${CSS.escape(focus)}"]`);
+  if (!next) return;
+  next.focus();
+  try { if (start != null) next.setSelectionRange(start, end); } catch {}
+}
+// Updating acts on what is seen: on the board, the tickets of Jira the filters leave;
+// in the list and the people view, also the items of Azure DevOps, unless only Jira is shown.
+async function maintenanceRefresh() {
+  const targets = refreshTargets(state, tab === 'jira');
+  if (targets.jira) await jiraRefresh();
+  if (targets.azure) await maintenanceQuery(maintenanceIncludeClosed());
+}
+async function jiraRefresh() {
+  const { filters, keys } = maintenanceScope(maintenanceSources(), state);
+  const data = await runOperation('/api/jira-refresh', { filters }, 'Actualizar desde Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : keys ? 'Los tickets filtrados del tablero y del filtro.' : 'Los tickets del tablero y los nuevos del filtro.');
+  jiraUi.board = data.jira; jiraSeen = ''; render();
+  const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments);
+  const parts = [
+    collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.filtered ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,
+    sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira borrado${sync.closed.length === 1 ? '' : 's'} (${sync.closed.join(', ')})`,
+    news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
+    collect.left && `${collect.left} ya no está${collect.left === 1 ? '' : 'n'} en el filtro`,
+    sync.missing.length && `${sync.missing.length} ya no existe${sync.missing.length === 1 ? '' : 'n'} o no tienes acceso (${sync.missing.join(', ')})`,
+  ].filter(Boolean);
+  toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${collect.filtered ? `${collect.found} filtrados de ${collect.total} en el filtro` : `${collect.total} tickets en el filtro`}.`, sync.missing.length ? 'warning' : 'info');
+}
+// Mantenimiento opens on the board; the list and the people view read Azure DevOps
+// the first time they open.
+async function openMaintenance(next = 'board') {
+  setMaintenanceView(next); maintenanceSetup = null;
+  tab = next === 'board' ? 'jira' : 'maintenance'; jiraUi.view = 'board';
+  await loadMaintenance().catch(() => {});
+  render(); window.scrollTo({ top: 0 });
+  if (state.jira && (!jiraUi.board || tab === 'jira')) { await loadJira().catch(() => {}); render(); }
+  if (tab === 'jira' && state.jira) startJiraPolling();
+  if (tab === 'maintenance' && !maintenanceSnapshot && refreshTargets(state, false).azure) await maintenanceQuery();
+  if (state.jira && state.mode !== 'demo' && !prUi.copilot && !state.busy) {
+    const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
+    if (response?.ok && data.copilot) { prUi.copilot = data.copilot; await loadJira().catch(() => {}); if (tab === 'jira') render(); }
+  }
 }
 // Each comment a step leaves ready is asked once, also after reloading: closed without
 // deciding, it waits in the tab of its step.
@@ -1759,13 +1869,6 @@ async function jiraSharing(path, input, title, subtitle) {
     render(); throw error;
   }
 }
-// What updating collects is saved as it is chosen, with the key typed so far.
-async function saveJiraCollect() {
-  const mode = $('[data-jira-collect]')?.value ?? jiraUi.board?.settings?.collect?.mode ?? 'filter';
-  const key = jiraUi.collectKey ?? jiraUi.board?.settings?.collect?.key ?? '';
-  const data = await request('/api/jira-collect', { mode, key });
-  jiraUi.board = data.jira; jiraUi.collectKey = null; render();
-}
 async function startJiraPolling() {
   if (jiraPolling) return;
   jiraPolling = true;
@@ -1815,20 +1918,31 @@ const actions = {
   'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
   home: () => { tab = 'home'; render(); window.scrollTo({ top: 0 }); },
   'open-planning': () => { tab = lastPlanningTab; render(); },
-  'open-maintenance': async () => {
-    await loadMaintenance(); maintenanceSetup = null; tab = 'maintenance'; render();
-    if (!maintenanceSnapshot && state.maintenanceSettings && (state.config?.project || state.mode === 'demo')) await maintenanceQuery();
-  },
-  'maintenance-refresh': () => maintenanceQuery(maintenanceSnapshot ? !!maintenanceSnapshot.includeClosed : maintenanceIncludeClosed()),
+  'open-maintenance': () => openMaintenance(),
+  'maintenance-refresh': () => maintenanceRefresh(),
   'open-my-iteration': async () => {
     await loadMyIteration(); tab = 'my-iteration'; render();
     if (!myIterationSnapshot && (state.config?.team || state.mode === 'demo')) await myIterationQuery();
   },
   'my-iteration-refresh': () => myIterationQuery(),
-  'maintenance-clear-filters': () => { resetMaintenanceFilters(); render(); $('[data-maintenance-filter="text"]')?.focus(); },
-  'maintenance-state': el => toggleMaintenanceState(maintenanceSnapshot, el.dataset.state),
-  'maintenance-view': el => { setMaintenanceView(el.dataset.view); render(); $(`[data-action="maintenance-view"][data-view="${el.dataset.view}"]`)?.focus(); },
-  'maintenance-remove-condition': el => { removeMaintenanceCondition(Number(el.dataset.index)); render(); $('[data-maintenance-add]')?.focus(); },
+  'open-test-plans': async () => {
+    await loadTestPlans(); tab = 'test-plans'; render();
+    if (!testPlansSnapshot && (state.config?.project || state.mode === 'demo')) await testPlansQuery();
+  },
+  'test-plans-refresh': () => testPlansQuery(testPlansSnapshot?.plan?.id),
+  'test-plans-clear-filters': () => { resetTestPlanFilters(); render(); $('[data-test-plans-filter="text"]')?.focus(); },
+  'test-plans-outcome': el => toggleTestPlanOutcome(testPlansSnapshot, el.dataset.outcome),
+  'test-plans-view': el => { setTestPlansView(el.dataset.view); render(); $(`[data-action="test-plans-view"][data-view="${el.dataset.view}"]`)?.focus(); },
+  // A person, a suite or a cell of the matrix: pressing the active one again clears it.
+  'test-plans-focus': el => {
+    const { tester, suite, view } = el.dataset, again = el.getAttribute('aria-pressed') === 'true';
+    focusTestPlans({ tester: tester === undefined ? undefined : again ? '' : tester, suite, view }); render(); window.scrollTo({ top: 0 });
+  },
+  'maintenance-clear-filters': () => { resetMaintenanceFilters(); maintenanceFiltered(); $('[data-maintenance-filter="text"]')?.focus(); },
+  'maintenance-state': el => { toggleMaintenanceState(el.dataset.state); maintenanceFiltered(); $(`[data-action="maintenance-state"][data-state="${CSS.escape(el.dataset.state)}"]`)?.focus(); },
+  'maintenance-view': async el => { if (el.dataset.view !== maintenanceViewName() || (el.dataset.view === 'board') !== (tab === 'jira')) await openMaintenance(el.dataset.view); syncUrl(); $(`[data-action="maintenance-view"][data-view="${el.dataset.view}"]`)?.focus(); },
+  'maintenance-origin': el => { setMaintenanceOrigin(el.dataset.origin); maintenanceFiltered(); $(`[data-action="maintenance-origin"][data-origin="${el.dataset.origin}"]`)?.focus(); },
+  'maintenance-remove-condition': el => { removeMaintenanceCondition(Number(el.dataset.index)); maintenanceFiltered(); $('[data-maintenance-add]')?.focus(); },
   'security-clear-filters': () => { resetPermissionFilters(); render(); $('[data-security-filter="text"]')?.focus(); },
   'open-reviews': async () => {
     prUi.reviewId = null; tab = 'reviews'; render(); window.scrollTo({ top: 0 });
@@ -1840,30 +1954,23 @@ const actions = {
     await loadMyPullRequests();
   },
   'pr-mine-refresh': () => loadMyPullRequests(true),
-  'open-jira': async () => {
-    jiraUi.view = 'board'; tab = 'jira'; render(); window.scrollTo({ top: 0 });
-    if (!state.jira) return;
-    await loadJira().catch(() => {}); render(); startJiraPolling();
-    if (state.mode !== 'demo' && !prUi.copilot && !state.busy) {
-      const { response, data } = await send('/api/copilot-status', {}).catch(() => ({}));
-      if (response?.ok && data.copilot) { prUi.copilot = data.copilot; await loadJira().catch(() => {}); if (tab === 'jira') render(); }
-    }
+  'open-pipelines': async () => {
+    pipelineUi.pipelineId = null; pipelineUi.analysisId = null; tab = 'pipelines'; render(); window.scrollTo({ top: 0 });
+    if (state.mode !== 'demo' && !state.config?.project) return;
+    if (state.mode !== 'demo' && !prUi.copilot && !state.busy) send('/api/copilot-status', {}).then(({ response, data }) => { if (response?.ok && data.copilot) { prUi.copilot = data.copilot; if (tab === 'pipelines') render(); } }).catch(() => {});
+    if (!pipelineUi.snapshot) await loadPipelines();
+    if (!pipelineUi.snapshot) await pipelinesQuery(); else render();
   },
-  'jira-refresh': async () => {
-    if (jiraUi.collectKey != null) await saveJiraCollect();
-    const data = await runOperation('/api/jira-refresh', {}, 'Actualizar desde Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : 'Los tickets del tablero y los nuevos del filtro.');
-    jiraUi.board = data.jira; jiraSeen = ''; render();
-    const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments);
-    const parts = [
-      collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.mode === 'single' ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,
-      sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira quitado${sync.closed.length === 1 ? '' : 's'} del tablero (${sync.closed.join(', ')})`,
-      news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
-      collect.left && `${collect.left} ya no está${collect.left === 1 ? '' : 'n'} en el filtro`,
-      sync.missing.length && `${sync.missing.length} ya no existe${sync.missing.length === 1 ? '' : 'n'} o no tienes acceso (${sync.missing.join(', ')})`,
-    ].filter(Boolean);
-    const scope = { filter: `${collect.found} tickets en el filtro`, mine: `${collect.found} tickets tuyos en el filtro`, single: `${jiraUi.board.settings.collect?.key} sin cambios` }[collect.mode ?? 'filter'];
-    toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${scope}.`, sync.missing.length ? 'warning' : 'info');
+  'pipelines-refresh': () => pipelinesQuery(),
+  'pipeline-open': el => { pipelineUi.pipelineId = Number(el.dataset.pipeline); pipelineUi.analysisId = null; render(); window.scrollTo({ top: 0 }); },
+  'pipeline-back': () => { pipelineUi.pipelineId = null; pipelineUi.analysisId = null; render(); },
+  'pipeline-review': el => startPipelineReview(Number(el.dataset.pipeline)),
+  'pipeline-copy': async el => {
+    const analyses = analysesOf(state, pipelineUi.pipelineId), analysis = analyses.find(a => a.id === pipelineUi.analysisId) ?? analyses[0];
+    await navigator.clipboard.writeText(analysis?.findings.find(f => f.id === el.dataset.finding)?.fix ?? ''); toast('Cambio copiado.');
   },
+  'pipeline-analysis-delete': async el => { await request('/api/pipeline-analysis-delete', { id: el.dataset.analysis }); pipelineUi.analysisId = null; render(); toast('Revisión descartada.'); },
+  'open-jira': () => openMaintenance(),
   'jira-run': el => jiraAction('/api/jira-run', { key: el.dataset.key }),
   'jira-mode': el => jiraAction('/api/jira-mode', { stage: el.dataset.stage, mode: el.dataset.mode }),
   'jira-screens': async () => {
@@ -1907,7 +2014,8 @@ const actions = {
     if (publish) toast('Publicado en Jira.');
   },
   'jira-autolock': el => jiraAction('/api/jira-autolock', { key: el.dataset.key, locked: el.dataset.locked === 'true' }),
-  'jira-auto': el => jiraAction('/api/jira-auto', { on: el.dataset.on === 'true' }),
+  // Empezar takes the tickets the filters leave, or all of them when nothing is filtered.
+  'jira-auto': el => { const on = el.dataset.on === 'true', keys = on ? maintenanceScope(maintenanceSources(), state).keys : null; jiraScopeSent = null; return jiraAction('/api/jira-auto', { on, ...(keys ? { keys } : {}) }); },
   'jira-stop': el => jiraAction('/api/jira-stop', jiraChatTarget(el)),
   'jira-share': async el => {
     const key = el.dataset.key, force = el.dataset.force === 'true';
@@ -1926,7 +2034,7 @@ const actions = {
     const { warnings, by } = data.result;
     toast(`${key} sigue donde lo dejó ${by || 'el otro equipo'}.${warnings.length ? ` ${warnings.join(' ')}` : ''}`, warnings.length ? 'warning' : 'info');
   },
-  'jira-archive': el => jiraAction('/api/jira-archive', { key: el.dataset.key, archived: el.dataset.archived === 'true' }),
+  'jira-delete': el => jiraAction('/api/jira-delete', { key: el.dataset.key }),
   'jira-open-folder': el => jiraAction('/api/jira-open', el.dataset.key ? { key: el.dataset.key } : {}),
   'jira-learnings': async el => {
     const response = await fetch('/api/jira-learnings', { headers: { 'X-Neo-CSRF': state.csrf } });
@@ -1945,7 +2053,6 @@ const actions = {
     try { localStorage.setItem('neo-team:jira-assistant-closed', jiraAssistantClosed ? '1' : '0'); } catch { /* Kept for this visit only. */ }
     render();
   },
-  'jira-show-archived': () => { jiraUi.showArchived = !jiraUi.showArchived; render(); },
   'jira-open-ticket': async el => {
     const ticket = jiraUi.board?.tickets?.find(t => t.key === el.dataset.key);
     jiraUi.detail = { key: el.dataset.key }; jiraUi.ticketTab = null;
@@ -1996,7 +2103,8 @@ const actions = {
     showModal(failures.length ? (published.length ? 'Publicación parcial' : 'No se pudo publicar') : demo ? 'Publicación simulada' : 'Comentarios publicados', published.length ? `${plural(published.length, 'comentario publicado', 'comentarios publicados')}${demo ? ' en el ejemplo' : ' en Azure DevOps'}.` : 'No se ha publicado ningún comentario.',
       failures.length ? `<div class="notice warning">Los que fallaron siguen pendientes. Al volver a publicar se comprueba primero si llegaron a Azure, para no duplicarlos.</div>${failures.map(f => `<p class="inline-error" style="margin-top:15px">${escape(f.id === 'summary' ? 'Resumen' : currentReview()?.findings.find(x => x.id === f.id)?.title ?? f.id)}: ${escape(f.error)}</p>`).join('')}` : `<div class="notice">${demo ? 'En el ejemplo no se contacta con Azure DevOps.' : 'Los comentarios ya están en el pull request.'}</div>`);
   },
-  'maintenance-edit-settings': () => { maintenanceSetup = { type: state.maintenanceSettings.type, states: state.maintenanceSettings.states }; render(); },
+  // Without settings yet, the setup starts from the default type, with its states to load.
+  'maintenance-edit-settings': () => { maintenanceSetup = { type: state.maintenanceSettings?.type, states: state.maintenanceSettings?.states }; render(); },
   'maintenance-cancel-settings': () => { maintenanceSetup = null; render(); },
   'maintenance-load-states': async () => {
     const type = $('#maintenance-type').value.trim();
@@ -2125,7 +2233,8 @@ document.addEventListener('keydown', event => {
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
   if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell'](event.target).catch(errorInModal); return; }
-  if (event.target.dataset?.jiraCollectKey !== undefined && event.key === 'Enter' && !event.isComposing && !pending) { event.preventDefault(); saveJiraCollect().then(() => actions['jira-refresh']()).catch(errorInModal); return; }
+  // Intro in the search updates what it leaves: a ticket's key brings that ticket.
+  if (event.target.dataset?.maintenanceFilter === 'text' && event.key === 'Enter' && !event.isComposing && !pending && refreshTargets(state, tab === 'jira').jira) { event.preventDefault(); maintenanceRefresh().catch(errorInModal); return; }
   if (event.target.dataset?.jiraAnswer && event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); actions['jira-answer'](event.target.nextElementSibling).catch(errorInModal); return; }
   const jiraCard = event.target.classList?.contains('jira-card') ? event.target : null;
   if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
@@ -2194,14 +2303,20 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
-  if (el.dataset.maintenanceFilter) { filterMaintenance(maintenanceSnapshot, el.dataset.maintenanceFilter, el.value, Number(el.dataset.index)); return; }
-  if ('maintenanceAdd' in el.dataset) { if (el.value) { const index = addMaintenanceCondition(el.value); render(); $(`[data-maintenance-filter="condition"][data-index="${index}"]`)?.focus(); } return; }
-  if ('maintenanceIncludeClosed' in el.dataset) { try { await maintenanceQuery(el.checked); } catch (error) { render(); errorInModal(error); } return; }
+  if (el.dataset.maintenanceFilter) { if (el.tagName === 'SELECT') { filterMaintenance(el.dataset.maintenanceFilter, el.value, Number(el.dataset.index)); maintenanceFiltered(el); } return; }
+  if ('maintenanceAdd' in el.dataset) { if (el.value) { const index = addMaintenanceCondition(el.value); maintenanceFiltered(); $(`[data-maintenance-filter="condition"][data-index="${index}"]`)?.focus(); } return; }
+  if (el.dataset.testPlansFilter) { filterTestPlans(testPlansSnapshot, el.dataset.testPlansFilter, el.value); if (el.tagName === 'SELECT') el.classList.toggle('active', !!el.value); return; }
+  if ('testPlan' in el.dataset) { try { await testPlansQuery(Number(el.value)); } catch (error) { render(); errorInModal(error); } return; }
+  // The closed items of Azure DevOps are read only when asked for.
+  if ('maintenanceIncludeClosed' in el.dataset) { setMaintenanceIncludeClosed(el.checked); maintenanceFiltered(el); if (el.checked && tab === 'maintenance' && refreshTargets(state, false).azure && !maintenanceSnapshot?.includeClosed) { try { await maintenanceQuery(true); } catch (error) { render(); errorInModal(error); } } return; }
   try {
     if(el.id==='create-type'){updateCreationParents();return;}
     if(el.id==='pr-repository'){await loadPullRequests(el.value);return;}
+    // Where the review of a pipeline reads the code: the repository, or the folder of its clone.
+    if('pipelineRepository' in el.dataset){await request('/api/pipeline-source',{pipelineId:Number(el.dataset.pipelineRepository),repository:el.value});render();return;}
+    if('pipelineLocal' in el.dataset){const id=Number(el.dataset.pipelineLocal);await request('/api/pipeline-source',{pipelineId:id,repository:$(`[data-pipeline-repository="${id}"]`)?.value ?? '',path:el.value});render();toast(el.value.trim() ? 'El código se leerá del repositorio local.' : 'El código se leerá de Azure DevOps.');return;}
+    if('pipelineAnalysis' in el.dataset){pipelineUi.analysisId=el.value;render();$('[data-pipeline-analysis]')?.focus();return;}
     // The key is saved when updating (button or Enter), so leaving the field for the button does not race it.
-    if('jiraCollect' in el.dataset){await saveJiraCollect();if(el.value==='single')$('[data-jira-collect-key]')?.focus();return;}
     if('jiraTo' in el.dataset){jiraUi.to={value:el.value,run:String(jiraUi.board?.pipeline?.running?.startedAt)};render();$(`#app [data-focus="${el.value==='general'?'jira-tell:general':'jira-tell'}"]`)?.focus();return;}
     if(el.dataset.jiraScreen){await jiraAction('/api/jira-screens',{web:$('[data-jira-screen="web"]')?.value||null,app:$('[data-jira-screen="app"]')?.value||null});return;}
     // The model or the effort of a place that asks Copilot: both are saved together.
@@ -2239,6 +2354,7 @@ document.addEventListener('change',async event=>{
   }catch(error){render();errorInModal(error);}
 });
 document.addEventListener('input',event=>{
+  if ('pipelineFilter' in (event.target.dataset ?? {})) { filterPipelines(pipelineUi, event.target.value); return; }
   if (event.target.dataset?.personNote!==undefined) noteDrafts[event.target.dataset.personNote]=event.target.value;
   if (event.target.id === 'maintenance-type') {
     const form = $('#maintenance-settings-form');
@@ -2250,12 +2366,11 @@ document.addEventListener('input',event=>{
   }
   if (event.target.id === 'security-group-search') filterGroups();
   if (event.target.dataset.securityFilter === 'text') filterPermissions(securitySnapshot.report, 'text', event.target.value);
-  if (event.target.dataset.maintenanceFilter && event.target.tagName === 'INPUT') filterMaintenance(maintenanceSnapshot, event.target.dataset.maintenanceFilter, event.target.value, Number(event.target.dataset.index));
+  if (event.target.dataset.testPlansFilter && event.target.tagName === 'INPUT') filterTestPlans(testPlansSnapshot, event.target.dataset.testPlansFilter, event.target.value);
+  if (event.target.dataset.maintenanceFilter && event.target.tagName === 'INPUT') { filterMaintenance(event.target.dataset.maintenanceFilter, event.target.value, Number(event.target.dataset.index)); maintenanceFiltered(event.target); }
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
   if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
-  if(event.target.dataset.jiraCollectKey!==undefined){jiraUi.collectKey=event.target.value;}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
-  if(event.target.dataset.jiraSearch!==undefined){const {selectionStart,selectionEnd}=event.target;jiraUi.search=event.target.value;renderJira();$('[data-jira-search]')?.setSelectionRange(selectionStart,selectionEnd);}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
@@ -2321,9 +2436,14 @@ const PLANNING_ROUTES = { configuration: 'configuracion', iteration: 'iteracion'
 function currentPath() {
   if (tab === 'home') return '/';
   if (PLANNING_ROUTES[tab]) return `/planificacion/${PLANNING_ROUTES[tab]}`;
-  if (tab === 'jira') return jiraUi.detail?.key && modal.open ? `/jira/${encodeURIComponent(jiraUi.detail.key)}` : $('#jira-settings-form') && modal.open ? '/jira/configuracion' : '/jira';
+  if (tab === 'jira' || tab === 'maintenance') {
+    if (jiraUi.detail?.key && modal.open) return `/mantenimiento/${encodeURIComponent(jiraUi.detail.key)}`;
+    if ($('#jira-settings-form') && modal.open) return '/mantenimiento/configuracion';
+    return tab === 'maintenance' ? `/mantenimiento/${maintenanceViewName() === 'people' ? 'personas' : 'lista'}` : '/mantenimiento';
+  }
+  if (tab === 'pipelines') return pipelineUi.pipelineId ? `/pipelines/${pipelineUi.pipelineId}` : '/pipelines';
   if (tab === 'reviews') return prUi.reviewId ? `/revision-prs/${encodeURIComponent(prUi.reviewId)}` : '/revision-prs';
-  return { 'my-iteration': '/mi-iteracion', maintenance: '/mantenimiento', permissions: '/permisos' }[tab] ?? '/';
+  return { 'my-iteration': '/mi-iteracion', 'test-plans': '/planes-prueba', permissions: '/permisos' }[tab] ?? '/';
 }
 // Until the address of the page is opened, redraws do not change it.
 let routing = true;
@@ -2339,11 +2459,13 @@ async function openRoute(path) {
     if (modal.open && !pending) modal.close();
     if (section === 'planificacion') { tab = Object.entries(PLANNING_ROUTES).find(([, name]) => name === sub)?.[0] ?? lastPlanningTab; render(); }
     else if (section === 'mi-iteracion') await actions['open-my-iteration']();
-    else if (section === 'mantenimiento') await actions['open-maintenance']();
+    else if (section === 'planes-prueba') await actions['open-test-plans']();
     else if (section === 'permisos') await actions.permissions();
+    else if (section === 'pipelines') { await actions['open-pipelines'](); if (sub && pipelineUi.snapshot?.pipelines.some(p => String(p.id) === sub)) { pipelineUi.pipelineId = Number(sub); render(); } }
     else if (section === 'revision-prs') { await actions['open-reviews'](); if (sub && state.prReviews?.some(r => r.id === sub)) { prUi.reviewId = sub; render(); } }
-    else if (section === 'jira') {
-      await actions['open-jira']();
+    // Tickets de Jira became part of Mantenimiento: its old addresses still open it.
+    else if (section === 'mantenimiento' || section === 'jira') {
+      await openMaintenance({ lista: 'list', personas: 'people' }[sub] ?? 'board');
       if (sub === 'configuracion' && state.jira) actions['jira-settings']();
       else if (sub && jiraUi.board?.tickets?.some(t => t.key === sub)) await actions['jira-open-ticket']({ dataset: { key: sub } });
     } else { tab = 'home'; render(); }

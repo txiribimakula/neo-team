@@ -25,27 +25,30 @@ const text = async (cwd, args, options) => (await git(cwd, args, options)).toStr
 export const repositoryKey = (organization, project, repository) => [organization, project, repository].map(part => String(part ?? '').trim().toLowerCase()).join('/');
 
 // A remote of an Azure DevOps repository ends in /_git/<name> (with .git or %20).
-export function remoteFor(remotes, repository) {
+// With `anyHost`, a repository elsewhere (GitHub…) is recognised by its name with
+// its owner, as Azure Pipelines names it: …/owner/repo or …:owner/repo.
+export function remoteFor(remotes, repository, { anyHost = false } = {}) {
   const wanted = String(repository).toLowerCase();
+  const decode = value => { try { return decodeURIComponent(value); } catch { return value; } };
   return remotes.find(({ url }) => {
-    const match = url.replace(/\/+$/, '').replace(/\.git$/i, '').match(/\/_git\/([^/]+)$/);
-    if (!match) return false;
-    let name = match[1];
-    try { name = decodeURIComponent(name); } catch { /* keep it as written */ }
-    return name.toLowerCase() === wanted;
+    const clean = url.replace(/\/+$/, '').replace(/\.git$/i, '');
+    const match = clean.match(/\/_git\/([^/]+)$/);
+    if (match) return decode(match[1]).toLowerCase() === wanted;
+    const path = decode(clean).toLowerCase();
+    return anyHost && (path.endsWith(`/${wanted}`) || path.endsWith(`:${wanted}`));
   })?.name ?? null;
 }
 
 // The folder must be a clone of that repository, so a review never compares another one.
-export async function checkRepository(path, repository) {
+export async function checkRepository(path, repository, { anyHost = false } = {}) {
   if (typeof path !== 'string' || !path.trim() || !isAbsolute(path.trim())) throw fail('Indica la ruta completa de la carpeta del repositorio.');
   const folder = path.trim();
   if (!(await stat(folder).catch(() => null))?.isDirectory()) throw fail(`No existe la carpeta «${folder}».`);
   const root = await text(folder, ['rev-parse', '--show-toplevel'], { timeout: 15000 }).catch(() => null);
   if (!root) throw fail(`«${folder}» no es un repositorio git.`);
   const remotes = (await text(root, ['remote', '-v'], { timeout: 15000 })).split('\n').map(line => line.split(/\s+/)).filter(([name, url]) => name && url).map(([name, url]) => ({ name, url }));
-  const remote = remoteFor(remotes, repository);
-  if (!remote) throw fail(`La carpeta «${root}» no es un clon de «${repository}»: ninguno de sus remotos apunta a …/_git/${repository}.`);
+  const remote = remoteFor(remotes, repository, { anyHost });
+  if (!remote) throw fail(`La carpeta «${root}» no es un clon de «${repository}»: ninguno de sus remotos apunta a ${anyHost ? `…/${repository}` : `…/_git/${repository}`}.`);
   return { path: root, remote };
 }
 

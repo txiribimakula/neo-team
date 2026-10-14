@@ -35,7 +35,7 @@ test('the shared state of a ticket is downloaded apart and goes on where another
   const a = new TicketStore(join(dir, 'a')), b = new TicketStore(join(dir, 'b'));
 
   const folderA = a.folder('NEO-1');
-  await a.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1', summary: 'Falla' }), stage: 'verify', status: 'pending', iterations: 1, history: [{ stage: 'fix', number: 1, outcome: 'fixed', report: 'solucion-1.md', log: 'registros/solucionar-1.log' }], assignee: { id: 'ana', name: 'Ana', me: true }, archived: false }));
+  await a.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1', summary: 'Falla' }), stage: 'verify', status: 'pending', iterations: 1, history: [{ stage: 'fix', number: 1, outcome: 'fixed', report: 'solucion-1.md', log: 'registros/solucionar-1.log' }], assignee: { id: 'ana', name: 'Ana', me: true } }));
   await writeFile(join(folderA, 'solucion-1.md'), 'Corregido el redondeo');
   await mkdir(join(folderA, 'registros')); await writeFile(join(folderA, 'registros', 'solucionar-1.log'), 'log');
   await mkdir(join(folderA, 'evidencias')); await writeFile(join(folderA, 'evidencias', 'antes.png'), Buffer.from([137, 80, 78, 71, 0, 255]));
@@ -52,7 +52,7 @@ test('the shared state of a ticket is downloaded apart and goes on where another
 
   // The other computer has the ticket only collected, with a change of its own.
   const folderB = b.folder('NEO-1');
-  await b.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1', summary: 'Falla (Jira)' }), stage: 'analyze', history: [{ stage: 'collect', number: 1, outcome: 'ok', report: 'resumen.md' }], assignee: { id: 'ana', name: 'Ana', me: false }, archived: false, autoLock: true }));
+  await b.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1', summary: 'Falla (Jira)' }), stage: 'analyze', history: [{ stage: 'collect', number: 1, outcome: 'ok', report: 'resumen.md' }], assignee: { id: 'ana', name: 'Ana', me: false }, autoLock: true }));
   await writeFile(join(folderB, 'resumen.md'), 'mío'); await writeFile(join(folderB, 'descripcion.md'), '# NEO-1 de Jira');
   const { path: codeB } = await ensureWorktree(settingsB, { key: 'NEO-1' }, folderB);
   await writeFile(join(codeB, 'a.txt'), 'cambio local\n');

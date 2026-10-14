@@ -2,6 +2,7 @@ import { availableImportRules, isImportType } from './import-query.js';
 import { normalizeItem } from './planner.js';
 import { boardItem, myIterationBoard } from './my-iteration.js';
 import { maintenanceIssue } from './maintenance.js';
+import { defaultPlan, sortPlans, testPlan, testPlanSnapshot } from './test-plans.js';
 export function createDemo() {
   const monday = new Date(); monday.setUTCHours(0,0,0,0); monday.setUTCDate(monday.getUTCDate() + ((8 - monday.getUTCDay()) % 7 || 7));
   const date = offset => new Date(+monday + offset * 86400000).toISOString();
@@ -114,6 +115,43 @@ export function demoFunctionalIssues(settings, { includeClosed = false } = {}) {
       return maintenanceIssue(raw, settings.states, DEMO_MAINTENANCE_FIELDS);
     });
   return { type: settings.type, states: settings.states, closedStates: settings.closedStates, verifyStates: settings.verifyStates ?? [], includeClosed, fields: DEMO_MAINTENANCE_FIELDS, fetchedAt: new Date().toISOString(), limited: false, demo: true, organization: 'ejemplo', project: 'Neo Platform', issues };
+}
+
+// Test plans in the example: three plans, suites in two levels and points
+// assigned to the team, with outcomes that are the same on every query.
+export function demoTestPlans(planId) {
+  const day = offset => new Date(Date.now() + offset * 86400000).toISOString();
+  const person = name => name ? { displayName: name } : null;
+  const plans = sortPlans([
+    [301, 'Regresión 24', 'Active', 'Neo Platform\\Iteración 24', -4, 8, 'Lucía Martín', 0],
+    [305, 'Release 3.2 · Aceptación', 'Active', 'Neo Platform\\Iteración 25', 10, 22, 'Marcos Ruiz', 1],
+    [298, 'Regresión 23', 'Inactive', 'Neo Platform\\Iteración 23', -18, -6, 'Lucía Martín', 6],
+  ].map(([id, name, state, iteration, start, end, owner, changed]) => testPlan({ id, name, state, iteration, areaPath: 'Neo Platform', startDate: day(start), endDate: day(end), owner: person(owner), rootSuite: { id: id * 100 }, updatedDate: day(-changed) })));
+  const plan = plans.find(p => p.id === planId) ?? defaultPlan(plans);
+  const root = plan.rootSuiteId, progress = { 301: 0.62, 305: 0.08, 298: 1 }[plan.id], last = Math.min(0, (Date.parse(plan.endDate) - Date.now()) / 86400000);
+  const suites = [[root, plan.name, null], [root + 1, 'Autenticación', root], [root + 2, 'Inicio de sesión', root + 1], [root + 3, 'Recuperar contraseña', root + 1], [root + 4, 'Pedidos', root], [root + 5, 'Carrito', root + 4], [root + 6, 'Pago', root + 4], [root + 7, 'Informes', root], [root + 8, 'Accesibilidad', root]]
+    .map(([id, name, parent]) => ({ id, name, parentSuite: parent ? { id: parent } : null, suiteType: id === root + 8 ? 'requirementTestSuite' : 'staticTestSuite', requirementId: id === root + 8 ? 1045 : null }));
+  const cases = [
+    [2, 'Entrar con usuario y contraseña', 'Ana García', 1], [2, 'Entrar con la cuenta de Microsoft', 'Ana García', 1], [2, 'Bloquear tras cinco intentos fallidos', 'Marcos Ruiz', 1], [2, 'Recordar la sesión en este equipo', 'Ana García', 3],
+    [3, 'Pedir el enlace de recuperación', 'Lucía Martín', 1], [3, 'El enlace caduca a las 24 horas', 'Lucía Martín', 2], [3, 'La nueva contraseña cumple la política', '', 2],
+    [5, 'Añadir un producto al carrito', 'David López', 1], [5, 'Cambiar las unidades de un producto', 'David López', 2], [5, 'Aplicar un cupón de descuento', 'Marcos Ruiz', 2], [5, 'El carrito se conserva al volver', 'David López', 3],
+    [6, 'Pagar con tarjeta', 'Marcos Ruiz', 1], [6, 'Pagar con transferencia', 'Marcos Ruiz', 2], [6, 'Rechazo de la tarjeta', 'Sara Gómez', 1], [6, 'El total suma los descuentos', 'Sara Gómez', 1], [6, 'Recibo por correo', '', 3],
+    [7, 'Informe mensual de actividad', 'Ana García', 2], [7, 'Exportar el informe a CSV', 'Sara Gómez', 2], [7, 'Filtrar el informe por proyecto', 'Ana García', 3], [7, 'Incluir los proyectos archivados', '', 3],
+    [8, 'Navegar el menú con el teclado', 'Lucía Martín', 2], [8, 'Contraste de los botones', 'Lucía Martín', 3], [8, 'Lector de pantalla en el carrito', 'Sara Gómez', 2],
+  ];
+  // Outcomes are spread by a fixed rule, so the example is stable.
+  const outcomeOf = n => { const r = (n * 37) % 100 / 100; return r >= progress ? (r < progress + 0.06 ? 'inProgress' : 'unspecified') : r < progress * 0.12 ? 'failed' : r < progress * 0.18 ? 'blocked' : r < progress * 0.21 ? 'notApplicable' : 'passed'; };
+  const points = [], items = new Map();
+  cases.forEach(([suite, name, tester, priority], index) => {
+    const caseId = plan.id * 10 + 3000 + index, configurations = [2, 5, 6].includes(suite) ? ['Chrome · Windows', 'Safari · iOS'] : ['Chrome · Windows'];
+    items.set(caseId, { fields: { 'Microsoft.VSTS.Common.Priority': priority, 'System.State': 'Ready' } });
+    configurations.forEach((configuration, c) => {
+      const n = index * 2 + c + 1, outcome = outcomeOf(n), run = !['unspecified', 'inProgress'].includes(outcome), assigned = c && tester === 'Ana García' ? 'Javier Moreno' : tester;
+      points.push({ id: plan.id * 1000 + n, tester: person(assigned), configuration: { name: configuration }, isActive: true, isAutomated: false, testSuite: { id: root + suite }, testCaseReference: { id: caseId, name, state: 'Ready' },
+        results: { outcome, lastResultDetails: run ? { dateCompleted: day(last - (n % 6)), runBy: person(n % 9 === 0 ? 'Lucía Martín' : assigned || 'Lucía Martín') } : { dateCompleted: '0001-01-01T00:00:00Z' } } });
+    });
+  });
+  return testPlanSnapshot({ organization: 'ejemplo', project: 'Neo Platform', plans, plan, suites, points, cases: items, demo: true });
 }
 
 // My iteration in the example: Ana García's items in the current iteration.
@@ -273,17 +311,17 @@ const demoUser = name => ({ displayName: name, accountId: name.toLowerCase().nor
 // The account of the example, to which NEO-101 is assigned.
 export const DEMO_JIRA_ME = { id: 'ejemplo', name: 'Cuenta de ejemplo' };
 const DEMO_TICKETS = [
-  { key: 'NEO-101', summary: 'La exportación a Excel redondea mal los importes', type: 'Bug', priority: 'High', assignee: { accountId: 'ejemplo', displayName: 'Cuenta de ejemplo' }, updated: '2026-10-01T09:12:00.000+0200',
+  { key: 'NEO-101', summary: 'La exportación a Excel redondea mal los importes', type: 'Bug', priority: 'High', components: ['Facturación'], assignee: { accountId: 'ejemplo', displayName: 'Cuenta de ejemplo' }, updated: '2026-10-01T09:12:00.000+0200',
     description: 'h3. Pasos\n# Abrir *Facturas*\n# Pulsar {{Exportar}}\n# Abrir el Excel generado\n\nLos importes con 3 decimales salen redondeados hacia abajo. Ver !captura-exportar.png|thumbnail!',
     attachments: [{ id: '5001', filename: 'captura-exportar.png', created: '2026-09-30T10:00:00.000+0200', content: DEMO_PNG }],
     afterSync: { updated: '2026-10-07T09:00:00.000+0200', status: { name: 'Cerrado', statusCategory: { key: 'done' } } },
     comments: [{ author: 'Lucía Martín', created: '2026-09-30T11:00:00.000+0200', body: 'Pasa también con el cliente [~lmartin] de pruebas. La captura es !captura-exportar.png!' }] },
-  { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver de la ficha', type: 'Bug', priority: 'Medium', updated: '2026-10-02T16:40:00.000+0200',
+  { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver de la ficha', type: 'Bug', priority: 'Medium', components: ['Clientes'], updated: '2026-10-02T16:40:00.000+0200',
     description: 'Al filtrar clientes por provincia, abrir uno y volver, la lista aparece sin filtrar. Vídeo: [^filtro-clientes.mp4]',
     attachments: [{ id: '5002', filename: 'filtro-clientes.mp4', created: '2026-10-02T16:30:00.000+0200', content: Buffer.from('video de ejemplo') }],
     comments: [],
     afterSync: { updated: '2026-10-07T09:30:00.000+0200', comments: [{ author: 'Lucía Martín', created: '2026-10-07T09:30:00.000+0200', body: 'Pasa también al volver con *Atrás*: !filtro-atras.png!' }], attachments: [{ id: '5003', filename: 'filtro-atras.png', created: '2026-10-07T09:29:00.000+0200', content: DEMO_PNG }] } },
-  { key: 'NEO-103', summary: 'Error al imprimir albaranes en impresoras de red', type: 'Bug', priority: 'Low', assignee: { accountId: 'lucia-martin', displayName: 'Lucía Martín' }, updated: '2026-10-03T08:05:00.000+0200',
+  { key: 'NEO-103', summary: 'Error al imprimir albaranes en impresoras de red', type: 'Bug', priority: 'Low', components: ['Impresión'], assignee: { accountId: 'lucia-martin', displayName: 'Lucía Martín' }, updated: '2026-10-03T08:05:00.000+0200',
     description: 'A veces sale el mensaje _Impresora no disponible_ al imprimir un albarán.', attachments: [], comments: [{ author: 'Soporte', created: '2026-10-03T08:00:00.000+0200', body: 'No tenemos más datos del cliente.' }] },
 ];
 // A ticket of the example as Jira has it now: after a synchronization, with its changes.
@@ -303,7 +341,7 @@ export class DemoJiraClient {
   async search(jql = '') {
     if (String(jql).startsWith('key in')) DemoJiraClient.checks++;
     const changed = t => DemoJiraClient.synced && t.afterSync;
-    return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: changed(t) ? t.afterSync.updated : t.updated, status: changed(t)?.status ?? { name: 'Abierto', statusCategory: { key: 'indeterminate' } }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null } })), limited: false };
+    return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: changed(t) ? t.afterSync.updated : t.updated, status: changed(t)?.status ?? { name: 'Abierto', statusCategory: { key: 'indeterminate' } }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null, reporter: demoUser('Soporte'), created: t.updated, labels: ['cliente'], components: (t.components ?? []).map(name => ({ name })) } })), limited: false };
   }
   async issue(key) {
     const t = demoTicket(key);

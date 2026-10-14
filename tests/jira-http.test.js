@@ -25,10 +25,15 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   const get = async path => (await fetch(url + path, { headers: { 'X-Neo-CSRF': state.csrf } })).json();
 
   // Every section has its own address and reloading it gives the page.
-  for (const path of ['/jira', '/jira/NEO-101', '/jira/configuracion', '/revision-prs/abc123', '/planificacion/capacidad', '/mi-iteracion', '/mantenimiento', '/permisos']) {
+  for (const path of ['/jira', '/jira/NEO-101', '/mantenimiento/NEO-101', '/mantenimiento/configuracion', '/mantenimiento/lista', '/revision-prs/abc123', '/planificacion/capacidad', '/mi-iteracion', '/planes-prueba', '/pipelines', '/pipelines/12', '/mantenimiento', '/permisos']) {
     const response = await fetch(url + path);
     assert.equal(response.status, 200, path);
     assert.match(await response.text(), /<script type="module" src="\/app\.js">/);
+  }
+  // Every module the interface imports is served: one missing stops the whole page.
+  for (const file of await readdir(new URL('../dist/', import.meta.url))) {
+    if (!file.endsWith('.js')) continue;
+    for (const [, imported] of (await readFile(new URL(`../dist/${file}`, import.meta.url), 'utf8')).matchAll(/^import .* from '\.\/([^']+)';$/gm)) assert.equal((await fetch(`${url}/${imported}`)).status, 200, `${file} imports ${imported}`);
   }
   for (const path of ['/jira/x.js', '/otra', '/server/index.js']) assert.equal((await fetch(url + path)).status, 404, path);
   assert.equal(state.jira, null, 'without settings there is no board');
@@ -215,15 +220,14 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([fresh.news.comments, fresh.news.attachments], [1, 1], 'what is new is marked on its card');
   assert.match(await readFile(join(directory, 'jira-ejemplo', 'NEO-102', 'resumen.md'), 'utf8'), /filtro-atras\.png/, 'and its index is redone');
   assert.equal((await post('/api/jira-seen', { key: 'NEO-102' })).data.jira.tickets.find(t => t.key === 'NEO-102').news, undefined, 'until the person opens it');
-  const closed = synced.data.jira.tickets.find(t => t.key === 'NEO-101');
-  assert.deepEqual([closed.archived, closed.closedInJira.status], [true, 'Cerrado'], 'it leaves the board, keeping its files');
+  assert.ok(!synced.data.jira.tickets.some(t => t.key === 'NEO-101'), 'the one closed in Jira is deleted');
+  assert.equal(await readdir(join(directory, 'jira-ejemplo', 'NEO-101')).catch(() => null), null, 'with its folder');
   assert.ok((await readdir(join(directory, 'jira-ejemplo', 'NEO-102', 'adjuntos'))).includes('filtro-atras.png'));
   assert.match(await readFile(join(directory, 'jira-ejemplo', 'NEO-102', 'comentarios.md'), 'utf8'), /Pasa también al volver con \*\*Atrás\*\*: !\[filtro-atras\.png\]\(adjuntos\/filtro-atras\.png\)/);
   assert.equal(synced.data.jira.tickets.find(t => t.key === 'NEO-102').stage, 'done', 'the column is kept');
   assert.deepEqual((await post('/api/jira-refresh')).data.result.sync.updated, [], 'nothing new the second time');
-  assert.equal((await post('/api/jira-archive', { key: 'NEO-101' })).status, 200);
   board = (await post('/api/jira-auto', { on: false })).data.jira;
-  assert.ok(board.tickets.find(t => t.key === 'NEO-101').archived);
+  assert.ok(!board.tickets.some(t => t.key === 'NEO-101'), 'and it does not come back from the filter');
   assert.deepEqual([board.tickets.find(t => t.key === 'NEO-103').stage, board.tickets.find(t => t.key === 'NEO-103').reproduceAttempts], ['analyze', 0], 'updating indexed it again and it is back in Analizar');
   // Done by hand: the step is recorded as the person's and the ticket goes on.
   board = (await post('/api/jira-done', { key: 'NEO-103', note: 'Analizado a mano.' })).data.jira;
@@ -238,12 +242,33 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.equal((await post('/api/jira-done', { key: 'NEO-999' })).status, 404);
   assert.ok(board.pipeline.feed.some(item => item.family === 'jira' && item.key === 'NEO-102' && /^2 comentarios en el pull request \d+$/.test(item.title)), 'publishing the review shows in the activity');
   assert.equal((await post('/api/jira-run', { key: '../../etc' })).status, 400);
-  // Updating can bring only your tickets or a single one.
-  assert.equal((await post('/api/jira-collect', { mode: 'single', key: 'neo-102' })).data.jira.settings.collect.key, 'NEO-102');
-  const single = (await post('/api/jira-refresh')).data.result.collect;
-  assert.deepEqual([single.mode, single.found, single.left], ['single', 1, 0]);
-  assert.equal((await post('/api/jira-collect', { mode: 'single', key: 'hola' })).status, 400);
-  await post('/api/jira-collect', { mode: 'single', key: 'NEO-999' });
-  const outside = await post('/api/jira-refresh');
-  assert.deepEqual([outside.status, /NEO-999 no está en el filtro/.test(outside.data.error)], [404, true], 'a ticket outside the filter is not brought');
+  // Updating brings what the filters of Mantenimiento leave; the whole filter is read, not downloaded.
+  const single = (await post('/api/jira-refresh', { filters: { text: 'neo-102' } })).data;
+  assert.deepEqual([single.result.collect.filtered, single.result.collect.found, single.result.collect.left], [true, 1, 0]);
+  assert.deepEqual(single.jira.catalog.map(e => [e.key, e.components]), [['NEO-101', ['Facturación']], ['NEO-102', ['Clientes']], ['NEO-103', ['Impresión']]], 'the filter, as it was read');
+  assert.equal(single.jira.pipeline.feed.at(-1).meta, '1 filtrado');
+  const outside = (await post('/api/jira-refresh', { filters: { text: 'NEO-999' } })).data.result.collect;
+  assert.deepEqual([outside.found, outside.downloaded], [0, 0], 'a ticket outside the filter is not brought');
+  const byField = (await post('/api/jira-refresh', { filters: { conditions: [{ field: 'jira.components', value: 'Impresión', kind: 'select' }] } })).data.result.collect;
+  assert.deepEqual([byField.filtered, byField.found], [true, 1], 'any field filters what is brought');
+  // Empezar takes the tickets the filters leave, and follows them while it works.
+  board = (await post('/api/jira-auto', { on: true, keys: ['NEO-103'] })).data.jira;
+  assert.deepEqual(board.pipeline.scope, ['NEO-103']);
+  assert.ok(board.pipeline.feed.some(item => item.title === 'Empezar: los 1 filtrados, uno tras otro'));
+  assert.deepEqual((await post('/api/jira-scope', { keys: ['NEO-102', 'NEO-103'] })).data.jira.pipeline.scope, ['NEO-102', 'NEO-103']);
+  assert.equal((await post('/api/jira-scope', { keys: ['../x'] })).status, 400);
+  assert.equal((await post('/api/jira-scope', { keys: 'NEO-1' })).status, 400);
+  board = (await post('/api/jira-auto', { on: false })).data.jira;
+  await idle();
+  assert.equal((await post('/api/jira-auto', { on: true })).data.jira.pipeline.scope, null, 'with nothing filtered, all of them');
+  await post('/api/jira-auto', { on: false });
+  await idle();
+  // Deleted by hand: it goes with its folder and updating does not bring it back, unless it is asked for.
+  board = (await post('/api/jira-delete', { key: 'NEO-103' })).data.jira;
+  assert.ok(!board.tickets.some(t => t.key === 'NEO-103') && board.pipeline.feed.some(item => item.key === 'NEO-103' && item.title === 'Borrado'));
+  assert.equal(await readdir(join(directory, 'jira-ejemplo', 'NEO-103')).catch(() => null), null);
+  const unbrought = await post('/api/jira-refresh');
+  assert.deepEqual([unbrought.data.result.collect.downloaded, unbrought.data.jira.tickets.some(t => t.key === 'NEO-103')], [0, false]);
+  assert.ok((await post('/api/jira-refresh', { filters: { text: 'NEO-103' } })).data.jira.tickets.some(t => t.key === 'NEO-103'), 'filtering that one ticket brings it back');
+  assert.equal((await post('/api/jira-delete', { key: 'NEO-999' })).status, 404);
 });

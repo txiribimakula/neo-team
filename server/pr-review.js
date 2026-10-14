@@ -111,7 +111,7 @@ Response format (JSON), with every text in English:
 - At most ${LIMITS.findings} findings, ordered by severity. If there are no problems, "findings" is an empty list.`;
 }
 
-function extractJson(output) {
+export function extractJson(output) {
   const raw = String(output ?? '').trim();
   const candidates = [raw, raw.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], raw.includes('{') ? raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) : null];
   for (const candidate of candidates) { if (!candidate) continue; try { return JSON.parse(candidate); } catch { /* try the next form */ } }

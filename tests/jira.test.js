@@ -5,9 +5,10 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { jqlFrom, jiraSettingsFrom, wikiToMarkdown, attachmentNames, safeName, JiraClient, collectTicket } from '../server/jira.js';
-import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, CopilotAgent, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectJql, collectScopeFrom, collectFilter, syncTickets } from '../server/jira-agents.js';
-import { jiraView, ticketDetail, ticketHead, typeIcon, priorityIcon, markdown, assigneeView, matchesTicket, easeView, pendingComments, commentPrompt } from '../dist/jira.js';
+import { autoLocked, easeFrom, runBuild, collectSummary, logComment, nextAfter, defaultModel, modelFor, CopilotAgent, permissionFor, stagePrompt, systemMessage, TicketStore, JiraPipeline, AgentConversation, DemoAgent, ensureWorktree, newTicket, checkKey, collectFilter, readCatalog, catalogEntry, syncTickets } from '../server/jira-agents.js';
+import { jiraView, ticketDetail, ticketHead, typeIcon, priorityIcon, markdown, assigneeView, easeView, pendingComments, commentPrompt } from '../dist/jira.js';
 import { loginSteps } from '../dist/reviews.js';
+import { jiraItems, matchesText } from '../dist/maintenance-items.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-jira-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
 
@@ -113,53 +114,52 @@ test('a collected ticket has its description, comments and attachments on disk',
   assert.equal(downloads, 0, 'an attachment already downloaded is kept');
 });
 
-test('updating collects the whole filter, only your tickets or a single one', async t => {
-  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'filter' }), 'project = NEO ORDER BY updated DESC');
-  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'mine' }), '(project = NEO) AND assignee = currentUser() ORDER BY updated DESC');
-  assert.equal(collectJql('10020', { mode: 'mine' }), '(filter = 10020) AND assignee = currentUser()');
-  assert.equal(collectJql('ORDER BY created', { mode: 'mine' }), 'assignee = currentUser() ORDER BY created');
-  assert.equal(collectJql('project = NEO ORDER BY updated DESC', { mode: 'single', key: 'NEO-7' }), '(project = NEO) AND issuekey = NEO-7 ORDER BY updated DESC', 'one ticket, of the filter');
-  assert.throws(() => collectJql('1', { mode: 'single', key: '' }), /clave del ticket/);
-  assert.deepEqual(collectScopeFrom({ mode: 'single', key: ' https://e.atlassian.net/browse/neo-12 ' }), { mode: 'single', key: 'NEO-12' }, 'the key or its address');
-  assert.deepEqual(collectScopeFrom(undefined), { mode: 'filter', key: '' });
-  assert.throws(() => collectScopeFrom({ mode: 'single', key: 'hola' }), /no es válido/);
-
+test('updating reads the whole filter and downloads only the tickets the filters leave', async t => {
   const tickets = new TicketStore(await temp(t)), queries = [];
-  const issue = (key, assignee) => ({ key, fields: { summary: key, updated: '2026-10-01', assignee } });
+  const issue = (key, assignee, category = 'new') => ({ key, fields: { summary: key, updated: '2026-10-01', assignee, status: { name: category === 'done' ? 'Cerrado' : 'Abierto', statusCategory: { key: category } }, components: [{ name: 'Facturas' }], labels: ['cliente'], reporter: { accountId: 's', displayName: 'Soporte' } } });
   const client = {
-    search: async jql => { queries.push(jql); return { issues: [issue('NEO-1', { accountId: 'yo', displayName: 'Yo' }), issue('NEO-2', { accountId: 'otra', displayName: 'Otra' })], limited: false }; },
+    search: async (jql, fields, progress, limit) => { queries.push([jql, fields.includes('components'), limit]); return { issues: [issue('NEO-1', { accountId: 'yo', displayName: 'Yo' }), issue('NEO-2', { accountId: 'otra', displayName: 'Otra' }), issue('NEO-3', null, 'done')], limited: false }; },
     issue: async key => ({ key, fields: { summary: key, status: { name: 'Open' }, updated: '2026-10-01' } }), comments: async () => [], download: async () => new Response(''),
   };
-  const run = scope => collectFilter({ client, settings: { url: 'https://e.atlassian.net', filter: 'project = NEO' }, tickets, me: { id: 'yo' }, scope });
-  assert.deepEqual([(await run({ mode: 'mine' })).downloaded, (await tickets.list()).map(x => x.key)], [1, ['NEO-1']], 'only yours');
+  const settings = { url: 'https://e.atlassian.net', filter: 'project = NEO' };
+  const catalog = await readCatalog({ client, settings, me: { id: 'yo' } });
+  assert.deepEqual(queries, [['project = NEO', true, 1000]], 'one query, with the fields to filter by, up to 1000 tickets');
+  assert.deepEqual(catalog.entries[0], { key: 'NEO-1', summary: 'NEO-1', status: 'Abierto', category: 'new', priority: '', type: '', assignee: { id: 'yo', name: 'Yo', me: true }, reporter: 'Soporte', labels: ['cliente'], components: ['Facturas'], fixVersions: [], created: null, updated: '2026-10-01' });
+  assert.deepEqual(catalogEntry({ key: 'NEO-4', fields: {} }), { key: 'NEO-4', summary: '', status: '', category: '', priority: '', type: '', assignee: null, reporter: '', labels: [], components: [], fixVersions: [], created: null, updated: null });
+  const run = keys => collectFilter({ client, settings, tickets, me: { id: 'yo' }, catalog, keys });
+  const mine = await run(new Set(['NEO-1']));
+  assert.deepEqual([mine.downloaded, mine.found, mine.total, mine.filtered, (await tickets.list()).map(x => x.key)], [1, 1, 3, true, ['NEO-1']], 'only those filtered');
   await tickets.update('NEO-9', () => newTicket({ key: 'NEO-9' }));
-  assert.equal((await run({ mode: 'single', key: 'NEO-2' })).left, 0, 'one ticket does not tell which ones left the filter');
-  assert.deepEqual((await tickets.list()).map(x => [x.key, x.inFilter]), [['NEO-1', true], ['NEO-2', true], ['NEO-9', true]]);
-  await assert.rejects(run({ mode: 'single', key: 'NEO-5' }), /NEO-5 no está en el filtro/);
-  assert.equal((await run({ mode: 'filter' })).left, 1, 'the whole filter does');
-  assert.deepEqual(queries.slice(0, 2), ['(project = NEO) AND assignee = currentUser()', '(project = NEO) AND issuekey = NEO-2']);
+  const all = await run(null);
+  assert.deepEqual([all.downloaded, all.unchanged, all.left, (await tickets.list()).map(x => [x.key, x.inFilter])], [1, 1, 1, [['NEO-1', true], ['NEO-2', true], ['NEO-9', false]]], 'nothing filtered: the whole filter, but not those finished in Jira');
+  const later = await collectFilter({ client, settings, tickets, me: { id: 'yo' }, catalog: { ...catalog, limited: true }, keys: null });
+  assert.equal(later.left, 0, 'a filter read in part does not tell which ones left it');
+  // What updating the board just did is not undone by the filter, read before it.
+  await tickets.remove('NEO-2');
+  assert.equal((await collectFilter({ client, settings, tickets, catalog, synced: { closed: ['NEO-2'], updated: [] } })).downloaded, 0);
+  // One deleted by hand comes back only when it is the one ticket filtered.
+  await tickets.forget('NEO-2', true);
+  assert.equal((await run(new Set(['NEO-1', 'NEO-2']))).downloaded, 0);
+  assert.equal((await run(new Set(['NEO-2']))).downloaded, 1);
+  assert.deepEqual([...await tickets.deleted()], []);
 });
 
-test('the board chooses what updating brings and shares the state of a ticket', () => {
+test('the board shares the state of a ticket', () => {
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1', hasToken: true } };
   const tickets = [{ key: 'NEO-1', summary: 'Uno', stage: 'analyze', status: 'pending', history: [{ stage: 'collect' }] },
     { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'pending', history: [{ stage: 'collect' }], shared: { id: '9', author: 'Ana', created: '2026-10-10T10:00:00Z' } },
     { key: 'NEO-3', summary: 'Tres', stage: 'analyze', status: 'pending', history: [], shared: { id: '5', created: '2026-10-10T10:00:00Z' }, sharedSeen: '5' }];
-  const view = collect => jiraView(state, { view: 'board', board: { settings: { ...state.jira, collect }, pipeline: {}, tickets } }, { isAuthenticated: true, models: [] });
-  assert.match(view({ mode: 'mine', key: '' }), /<select data-jira-collect[^>]*>[\s\S]*?<option value="mine" selected>Asignados a mí/);
-  assert.doesNotMatch(view({ mode: 'mine', key: '' }), /data-jira-collect-key/);
-  assert.match(view({ mode: 'single', key: 'NEO-7' }), /<input data-jira-collect-key[^>]*value="NEO-7"/);
-  const html = view({ mode: 'filter', key: '' }), card = key => html.match(new RegExp(`aria-label="${key} · [^"]+">([\\s\\S]*?)</article>`))[1];
+  const html = jiraView(state, { view: 'board', board: { settings: state.jira, pipeline: {}, tickets } }, { isAuthenticated: true, models: [] }), card = key => html.match(new RegExp(`aria-label="${key} · [^"]+">([\\s\\S]*?)</article>`))[1];
   assert.match(card('NEO-1'), /<span class="jira-card-actions"><button class="icon-button jira-lock[\s\S]*?<\/button><button class="icon-button jira-run"[^>]*>▶<\/button><button class="icon-button jira-tool" data-action="jira-share"[\s\S]*?<\/button><button class="icon-button jira-done"/, 'uploading its state goes right after ▶');
   assert.doesNotMatch(card('NEO-1'), /jira-resume/);
   assert.match(card('NEO-2'), /data-action="jira-resume"[^>]*title="Traer el estado que subió Ana/, 'what another computer shared is offered');
   assert.doesNotMatch(card('NEO-3'), /data-action="jira-(resume|share)"/, 'nothing to share yet, and its own state is not offered back');
-  const both = jiraView(state, { view: 'board', board: { settings: { ...state.jira, collect: { mode: 'filter' } }, pipeline: {}, tickets: [{ ...tickets[1], diverged: { id: '9', mine: '2 pasos', theirs: 'Ana · 10 oct' } }] } }, { isAuthenticated: true, models: [] });
+  const both = jiraView(state, { view: 'board', board: { settings: state.jira, pipeline: {}, tickets: [{ ...tickets[1], diverged: { id: '9', mine: '2 pasos', theirs: 'Ana · 10 oct' } }] } }, { isAuthenticated: true, models: [] });
   assert.match(both, /<div class="jira-diverged"><button class="button small" data-action="jira-resume" data-key="NEO-2" data-force="true" title="Traer el estado de Ana · 10 oct. Lo tuyo \(2 pasos\) se guarda en copias">Traer el suyo<\/button><button class="button small" data-action="jira-share" data-key="NEO-2" data-force="true" title="Subir lo tuyo \(2 pasos\) como el más reciente. El de Ana · 10 oct sigue en Jira">Subir el mío<\/button><\/div>/, 'worked on both sides: the person chooses on the card');
   assert.doesNotMatch(both, /jira-tool jira-resume|data-action="jira-share" data-key="NEO-2" title/, 'instead of the icons');
 });
 
-test('with one ticket or only yours, updating downloads nothing else from the board', async t => {
+test('with the filtered tickets, updating downloads nothing else from the board', async t => {
   const tickets = new TicketStore(await temp(t)), searches = [], downloads = [];
   for (const key of ['NEO-1', 'NEO-2', 'NEO-3']) await tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));
   const assignees = { 'NEO-1': { accountId: 'yo' }, 'NEO-2': { accountId: 'otra' }, 'NEO-3': null };
@@ -167,12 +167,12 @@ test('with one ticket or only yours, updating downloads nothing else from the bo
     search: async jql => { searches.push(jql); return { issues: ['NEO-1', 'NEO-2', 'NEO-3'].filter(k => jql.includes(k)).map(key => ({ key, fields: { updated: '2026-10-02T00:00:00Z', assignee: assignees[key], status: { statusCategory: { key: 'indeterminate' } } } })) }; },
     issue: async key => { downloads.push(key); return { key, fields: { summary: key, updated: '2026-10-02T00:00:00Z' } }; }, comments: async () => [], download: async () => new Response(''),
   };
-  const sync = scope => syncTickets({ client, settings: { url: 'https://e' }, tickets, me: { id: 'yo' }, scope });
-  assert.deepEqual((await sync({ mode: 'single', key: 'NEO-3' })).updated.map(u => u.key), ['NEO-3']);
-  assert.deepEqual([searches.at(-1), downloads], ['key in (NEO-3)', ['NEO-3']], 'only that ticket is asked for and downloaded');
-  assert.deepEqual((await sync({ mode: 'mine' })).updated.map(u => u.key), ['NEO-1'], 'only yours are downloaded');
-  assert.equal((await tickets.get('NEO-2')).updated, '2026-10-01T00:00:00Z', 'the rest stay as they were, to be downloaded with the whole filter');
-  assert.deepEqual((await sync({ mode: 'filter' })).updated.map(u => u.key), ['NEO-2']);
+  const sync = keys => syncTickets({ client, settings: { url: 'https://e' }, tickets, me: { id: 'yo' }, keys });
+  assert.deepEqual((await sync(new Set(['NEO-3']))).updated.map(u => u.key), ['NEO-3']);
+  assert.deepEqual([searches.at(-1), downloads], ['key in (NEO-1, NEO-2, NEO-3)', ['NEO-3']], 'all are checked, only that one is downloaded');
+  assert.deepEqual((await sync(new Set(['NEO-1']))).updated.map(u => u.key), ['NEO-1']);
+  assert.equal((await tickets.get('NEO-2')).updated, '2026-10-01T00:00:00Z', 'the rest stay as they were, to be downloaded when nothing is filtered');
+  assert.deepEqual((await sync(null)).updated.map(u => u.key), ['NEO-2']);
 });
 
 test('tickets move between columns and back to fix while verification fails', () => {
@@ -383,13 +383,20 @@ test('each ticket is fixed in its own worktree and branch', async t => {
   assert.deepEqual(await ensureWorktree({ repository: repo }, { key: 'NEO-7' }, folder), worktree, 'it is reused');
   await assert.rejects(ensureWorktree({ repository: '' }, { key: 'NEO-8' }, folder), /carpeta del repositorio/);
   assert.ok((await stat(join(folder, 'codigo', '.git'))).isFile());
+  // Deleting the ticket takes its worktree and its branch, even with changes in it.
+  await writeFile(join(folder, 'codigo', 'a.txt'), 'cambiado');
+  await new TicketStore(join(root, 'tickets')).remove('NEO-7', { byHand: true });
+  assert.equal(await stat(folder).catch(() => null), null);
+  assert.equal(run('branch', '--list', 'neo/NEO-7').toString().trim(), '');
+  assert.doesNotMatch(run('worktree', 'list').toString(), /NEO-7/);
+  assert.deepEqual([...await new TicketStore(join(root, 'tickets')).deleted()], ['NEO-7']);
 });
 
 test('the board shows a column per agent with its model and the live step', () => {
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1', models: { fix: 'claude-opus-4.5' }, efforts: { fix: 'high', verify: 'max' }, hasToken: true } };
   const board = { settings: state.jira, defaults: { collect: 'claude-haiku-4.5', verify: 'gpt-4.1' }, tools: { winapp: false, ffmpeg: true },
     pipeline: { auto: true, running: { key: 'NEO-1', stage: 'reproduce', model: 'claude-sonnet-4.5', startedAt: Date.now(), activity: [{ at: Date.now(), kind: 'tool', message: 'winapp ui inspect -a App' }] } },
-    tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }, { key: 'NEO-3', summary: 'Tres', stage: 'done', status: 'done', archived: true }] };
+    tickets: [{ key: 'NEO-1', summary: 'Uno', stage: 'reproduce', status: 'running' }, { key: 'NEO-2', summary: 'Dos', stage: 'fix', status: 'blocked', note: 'Necesita datos', iterations: 2 }] };
   const html = jiraView(state, { view: 'board', board }, { isAuthenticated: true, models: [{ id: 'claude-opus-4.5', name: 'Claude Opus 4.5', multiplier: 3, efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }, { id: 'gpt-4.1', name: 'GPT-4.1', multiplier: 0, efforts: [] }] });
   assert.deepEqual([...html.matchAll(/<section class="jira-column[^"]*" aria-label="([^"]+)">/g)].map(m => m[1]), ['Analizar', 'Reproducir', 'Solucionar', 'Verificar', 'Revisar'], 'a column per agent: collecting, building and the solved ones have none');
   const flow = jiraView(state, { view: 'board', board: { ...board, pipeline: {}, tickets: [{ key: 'NEO-7', summary: 'Hecho', stage: 'done', status: 'done' }, { key: 'NEO-8', summary: 'Por compilar', stage: 'build', status: 'pending' }, { key: 'NEO-9', summary: 'Nuevo', stage: 'collect', status: 'pending' }] } }, { isAuthenticated: true, models: [] });
@@ -430,8 +437,6 @@ test('the board shows a column per agent with its model and the live step', () =
   assert.match(html, /status-running[\s\S]*data-action="jira-stop"/, 'it is stopped from the card');
   assert.doesNotMatch(html, /jira-running/, 'there is no separate progress panel');
   assert.match(html, /Necesita datos/);
-  assert.doesNotMatch(html, /NEO-3 · Tres/, 'tickets taken off the board are hidden');
-  assert.match(html, /Mostrar 1 quitados/);
   assert.match(jiraView({ mode: 'azure', jira: null }, {}), /id="jira-settings-form"/, 'without settings the section is the form');
   const signedOut = jiraView(state, { view: 'board', board: { ...board, pipeline: { auto: false, running: null, needsCopilot: true, error: 'Sin sesión' } } }, { isAuthenticated: true });
   assert.doesNotMatch(signedOut, /Iniciar sesión en GitHub Copilot/, 'signing in is not in the middle of the board');
@@ -464,13 +469,13 @@ test('the ticket popup has a tab per completed step and the answer field while s
   const first = ticketDetail(board, detail, false, {}, 'step-0');
   assert.match(first, /Resumen del ticket/);
   assert.match(first, /En Jira/, 'and whether it was published in Jira');
-  assert.doesNotMatch(html, /data-action="jira-(done|run|autolock|archive|open-folder)"|data-jira-move/, 'the popup leaves every action to the card, and has no column picker');
+  assert.doesNotMatch(html, /data-action="jira-(done|run|autolock|delete|open-folder)"|data-jira-move/, 'the popup leaves every action to the card, and has no column picker');
   const byHand = ticketDetail(board, { ...detail, history: [{ ...detail.history[0], by: 'person', model: null }] }, false, {}, 'step-0');
   assert.match(byHand, /Hecho por ti/);
   assert.match(ticketDetail(board, { ...detail, history: [{ ...detail.history[0], rewound: '2026-10-10T10:00:00Z' }] }, false, {}, 'step-0'), /<span class="pill" title="Deshecho [^"]+">Rebobinado<\/span>/);
   const cardHtml = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' } } }, null);
   assert.match(cardHtml, /class="icon-button jira-done" data-action="jira-done" data-key="NEO-3" title="Ya lo he hecho yo: pasar a Solucionar"/, '⏩ moves the ticket on, as done by hand');
-  assert.match(cardHtml, /<span class="jira-card-actions"><button class="icon-button jira-lock[^"]*"[^>]*>[\s\S]*?<\/button><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button><button class="icon-button jira-done"[^>]*>[\s\S]*?<\/button><\/span>\s*<span class="jira-card-meta">[\s\S]*?<span class="jira-card-tools">[\s\S]*?data-action="jira-archive"[^>]*>[\s\S]*?<\/button><\/span><\/span>/, '▶ on the left and ⏩ on the right, above the row of the other icons, at the bottom');
+  assert.match(cardHtml, /<span class="jira-card-actions"><button class="icon-button jira-lock[^"]*"[^>]*>[\s\S]*?<\/button><button class="icon-button jira-run"[^>]*aria-label="Ejecutar NEO-3">▶<\/button><button class="icon-button jira-done"[^>]*>[\s\S]*?<\/button><\/span>\s*<span class="jira-card-meta">[\s\S]*?<span class="jira-card-tools">[\s\S]*?data-action="jira-delete"[^>]*>[\s\S]*?<\/button><\/span><\/span>/, '▶ on the left and ⏩ on the right, above the row of the other icons, at the bottom');
   const at = stage => jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, stage, status: stage === 'done' ? 'done' : 'pending' }] } }, null);
   assert.match(at('build'), /title="Ya lo he hecho yo: pasar a Revisar"/, 'waiting for its build, the verification is the step done');
   assert.match(at('review'), /title="Ya lo he hecho yo: pasar a Resueltos"/);
@@ -481,9 +486,7 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.doesNotMatch(status.match(/<span class="jira-card-meta">[\s\S]*?<\/article>/)[0], /Tareas por hacer/, 'and not in the bottom row');
   assert.doesNotMatch(at('review'), /jira-rewind/, 'there is no rewinding back');
   assert.match(cardHtml, /<header><a class="jira-key"[^>]*>NEO-3<small[^>]*>↗<\/small><\/a><button class="icon-button jira-tool jira-card-folder" data-action="jira-open-folder" data-key="NEO-3" title="Abrir su carpeta"/, 'its folder opens from right after its key');
-  assert.match(cardHtml, /<span class="jira-card-tools">[\s\S]*?<button class="icon-button jira-tool" data-action="jira-archive" data-key="NEO-3" data-archived="true" title="Quitar del tablero \(su carpeta se conserva\)"/, 'its folder opens and it leaves the board from its card');
-  const archivedCard = jiraView({ mode: 'azure', jira: { url: 'https://e', filter: '1' } }, { view: 'board', showArchived: true, board: { ...board, settings: { url: 'https://e', filter: '1' }, tickets: [{ ...ticket, archived: true }] } }, null);
-  assert.match(archivedCard, /data-action="jira-archive" data-key="NEO-3" data-archived="false" title="Volver al tablero"/, 'and comes back the same way');
+  assert.match(cardHtml, /<span class="jira-card-tools">[\s\S]*?<button class="icon-button jira-tool" data-action="jira-delete" data-key="NEO-3" title="Borrar \(con su carpeta, su copia del código y su rama\)"/, 'it is deleted from its card');
   assert.match(ticketDetail(board, detail, false, {}, 'ticket'), /data-part="description" open/);
 });
 
@@ -677,19 +680,22 @@ test('nothing reaches Jira from the agents: no token, no Neo Team data and no we
   assert.match(systemMessage('fix'), /Never contact Jira or any web service and never publish anything/);
 });
 
-test('the board is filtered by key or title while typing', () => {
-  const ticket = { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver' };
-  for (const search of ['', 'neo-102', '102', 'CLIENTES', 'filtro volver', 'NEO clientés']) assert.ok(matchesTicket(ticket, search), search);
-  for (const search of ['NEO-103', 'impresora', 'filtro impresora']) assert.ok(!matchesTicket(ticket, search), search);
+test('the board shows the tickets the filters of Mantenimiento leave, under its head', () => {
+  const ticket = { key: 'NEO-102', summary: 'El filtro de clientes se pierde al volver', stage: 'reproduce', status: 'pending' };
+  const [item] = jiraItems([ticket]);
+  for (const search of ['', 'neo-102', '102', 'CLIENTES', 'filtro volver', 'NEO clientés']) assert.ok(matchesText(item, search), search);
+  for (const search of ['NEO-103', 'impresora', 'filtro impresora']) assert.ok(!matchesText(item, search), search);
   const state = { mode: 'azure', jira: { url: 'https://e', filter: '1' } };
-  const board = { settings: state.jira, pipeline: {}, tickets: [{ ...ticket, stage: 'reproduce', status: 'pending' }, { key: 'NEO-103', summary: 'Error al imprimir', stage: 'fix', status: 'pending' }] };
-  const html = jiraView(state, { view: 'board', board, search: 'impri' }, null);
-  assert.match(html, /<label class="jira-search"><svg[\s\S]*?<\/svg><input type="search" data-jira-search data-focus="jira-search" value="impri"[^>]*><\/label>/, 'with a funnel');
-  assert.match(html, /<div class="jira-board-controls">\s*<button[^>]*data-action="jira-refresh"[\s\S]*?<span class="jira-links"><button class="button jira-square" data-action="jira-auto"[^>]*>[^<]*<\/button><button class="icon-button jira-gear" data-action="jira-settings"[\s\S]*?<\/span><\/div><div class="jira-board">/, 'updating first; starting and the settings on the right');
-  assert.doesNotMatch(html.match(/<div class="jira-board-controls">[\s\S]*?<\/div><div class="jira-board">/)[0], /jira-search/);
-  assert.match(html, /<\/div><div class="jira-board-foot"><label class="jira-search">/, 'the search, below the board');
+  const board = { settings: state.jira, pipeline: {}, tickets: [ticket, { key: 'NEO-103', summary: 'Error al imprimir', stage: 'fix', status: 'pending' }] };
+  const html = jiraView(state, { view: 'board', board, shown: new Set(['NEO-103']), filtered: 1, head: tools => `<div class="maintenance-top">${tools}</div>` }, null);
+  assert.match(html, /<div class="jira-main-board"><div class="maintenance-top"><span class="jira-links"><button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los pendientes de los 1 tickets filtrados, uno tras otro"[^>]*>▶<\/button><button class="icon-button jira-gear" data-action="jira-settings"[\s\S]*?<\/span><\/div><div class="jira-board">/, 'starting and the settings, in the head');
   assert.match(html, /Error al imprimir/);
   assert.doesNotMatch(html, /El filtro de clientes/, 'in every column');
+  assert.doesNotMatch(html, /jira-search|jira-collect|jira-board-foot/, 'the search is the one of Mantenimiento');
+  const alone = jiraView(state, { view: 'board', board }, null);
+  assert.match(alone, /<div class="jira-board-controls"><span class="jira-links"><button class="button jira-square" data-action="jira-auto" data-on="true" title="Empezar: procesa los tickets pendientes uno tras otro/, 'without a head, every ticket and the tools alone');
+  assert.match(alone, /El filtro de clientes/);
+  assert.match(jiraView({ mode: 'azure', jira: null }, { head: () => '<div class="maintenance-top"></div>' }), /<div class="maintenance-top"><\/div><[\s\S]*id="jira-settings-form"/, 'without settings, the head and the form');
 });
 
 test('each agent step proposes a Jira comment, sent only once confirmed', async () => {
@@ -825,8 +831,7 @@ test('an agent that lacks what it needs does not run, by hand or in the automati
   assert.match(noFfmpeg, /aria-label="Analizar">[\s\S]*?<li>ffmpeg: instálalo<\/li>/, 'without ffmpeg, Analizar warns');
   assert.match(noFfmpeg, /data-action="jira-run" data-key="NEO-3"/, 'but it still runs: ffmpeg is only for the frames');
   assert.doesNotMatch(noFfmpeg.match(/class="jira-board-controls">([\s\S]*?)<\/div>/)[1], /jira-warn/, 'downloading warns of nothing');
-  assert.match(html.match(/class="jira-board-controls">([\s\S]*?)<\/div>/)[1], /data-action="jira-refresh"[^>]*aria-label="Actualizar"><svg/, 'one button updates from Jira, in the row above the board');
-  assert.doesNotMatch(html, /data-action="jira-(collect|sync)"/, 'instead of two');
+  assert.doesNotMatch(html, /data-action="jira-(refresh|collect|sync)"/, 'updating is in the head of Mantenimiento');
   const news = jiraView({ mode: 'azure', jira: {} }, { view: 'board', board: { ...board, tickets: [{ key: 'NEO-4', summary: 'Cuatro', stage: 'fix', status: 'pending', news: { comments: 2, attachments: 1 } }] } }, { isAuthenticated: true });
   assert.match(news, /<span class="pill jira-news" title="Desde Jira: 2 comentarios y 1 adjunto nuevos\. Ábrelo para verlo">Novedades<\/span>/, 'a ticket with news from Jira shows it');
   assert.match(html, /<textarea data-jira-tell data-general="true"[^>]*placeholder="Pide algo al asistente[^>]*><\/textarea><button[^>]*>Enviar/, 'with a Copilot session the assistant can be asked');

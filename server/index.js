@@ -18,14 +18,17 @@ import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctiona
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
 import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
 import { listScreens, screensFrom } from './jira-desktop.js';
-import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, collectScopeFrom, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
+import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, readCatalog, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
 import { choiceFrom, effortFor } from './ai-choice.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
 import { AzureReviewHub } from './jira-review.js';
 import { runAssistant, assistantRequest, setImportRule } from './assistant.js';
 import { maintenanceSettingsFrom } from './maintenance.js';
+import { filterItems, filtersFrom, jiraItems, narrowed } from '../dist/maintenance-items.js';
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
+import { AzurePipelines, runAnalysis, sourceKey, PIPELINE_LIMITS } from './pipelines.js';
+import { DemoPipelineGateway, DemoPipelineAnalyst } from './demo-pipelines.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const port = Number(process.env.NEO_TEAM_PORT || 4310);
@@ -48,6 +51,19 @@ function reviewConfig() {
   if (!store.data.config?.project) throw fail('Conecta Azure DevOps y elige un proyecto para revisar sus pull requests.');
   return configFrom(store.data.config, false);
 }
+// Pipelines: their last runs, in memory for the active mode and project, and the
+// reviews of Copilot, saved locally like those of the pull requests.
+const azurePipelines = new AzurePipelines(azure), demoPipelines = new DemoPipelineGateway(), demoAnalyst = new DemoPipelineAnalyst();
+const pipelineTools = () => store.data.mode === 'demo' ? { gateway: demoPipelines, reviewer: demoAnalyst } : { gateway: azurePipelines, reviewer: copilot };
+function pipelineConfig() {
+  if (store.data.mode === 'demo') return reviewConfig();
+  if (!store.data.config?.project) throw fail('Conecta Azure DevOps y elige un proyecto para ver sus pipelines.');
+  return configFrom(store.data.config, false);
+}
+let pipelines = null;
+const pipelinesScope = () => JSON.stringify([store.data.mode, store.data.config?.organization, store.data.config?.project]);
+const currentPipelines = () => pipelines?.scope === pipelinesScope() ? pipelines : null;
+const currentAnalyses = () => (store.data.pipelineAnalyses ?? []).filter(a => a.mode === store.data.mode);
 // Jira tickets: settings and token of the real workspace, a fixed example, and
 // one pipeline of agents per tickets folder, running apart from other operations.
 const jiraTokenFile = () => join(store.directory, 'jira-token');
@@ -67,7 +83,7 @@ const refreshJiraToken = async () => { jiraHasToken = !!(await jiraToken()); };
 await refreshJiraToken();
 function jiraSettings() {
   const base = store.data.mode === 'demo' ? DEMO_JIRA_SETTINGS : store.data.jira;
-  return base ? { ...base, models: store.data.jiraModels ?? {}, efforts: store.data.jiraEfforts ?? {}, modes: store.data.jiraModes ?? {}, collect: collectScopeFrom(store.data.jiraCollect), screens: screensFrom(store.data.jiraScreens) } : null;
+  return base ? { ...base, models: store.data.jiraModels ?? {}, efforts: store.data.jiraEfforts ?? {}, modes: store.data.jiraModes ?? {}, screens: screensFrom(store.data.jiraScreens) } : null;
 }
 const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 'jira-ejemplo') : resolve(settings?.ticketsDir || join(store.directory, 'jira'));
 function publicJira() {
@@ -116,7 +132,8 @@ async function jiraBoard() {
   await pipeline.recovered;
   await pipeline.generalState();
   const tickets = (await pipeline.tickets.list()).map(t => ({ ...t, locked: autoLocked(t), history: (t.history ?? []).map(({ usage, activity, ...h }) => ({ ...h, tokens: usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : null })) }));
-  return { settings, tickets, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization, screens: process.platform === 'win32' } };
+  const catalog = await pipeline.tickets.catalog();
+  return { settings, tickets, catalog: catalog?.entries ?? [], catalogAt: catalog?.at ?? null, catalogLimited: !!catalog?.limited, pipeline: pipeline.snapshot(), defaults: Object.fromEntries(STAGES.map(s => [s.id, defaultModel(s.tier, copilotModels)])), tools: store.data.mode === 'demo' ? { winapp: true, ffmpeg: true, azure: true, demo: true } : { ...(await detectJiraTools()), azure: !!store.data.config?.organization, screens: process.platform === 'win32' } };
 }
 const currentReviews = () => (store.data.prReviews ?? []).filter(review => review.mode === store.data.mode);
 function findReview(data, id) {
@@ -184,7 +201,7 @@ function requireSession(req) {
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 // The server keeps running the code it started with, while the interface is read
 // from disk on every request: after an update, it asks to be restarted.
-const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
+const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url), new URL('../dist/maintenance-items.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
 const startedCode = serverCode();
 let codeCheckedAt = 0, outdated = false;
 function serverOutdated() {
@@ -200,7 +217,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -221,7 +238,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-collect', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-archive', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -255,6 +272,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/maintenance') {
       requireSession(req);
       return json(res, { maintenance: currentMaintenance() });
+    }
+    if (req.method === 'GET' && path === '/api/pipelines') {
+      requireSession(req);
+      return json(res, { pipelines: currentPipelines() });
     }
     if (req.method === 'GET' && path === '/api/my-iteration') {
       requireSession(req);
@@ -307,15 +328,15 @@ const server = http.createServer(async (req, res) => {
         if (!busy || !operation || input.id !== operation.id) throw fail('La operación ya terminó o cambió. Actualiza su estado.', 409);
         if (!operation.cancellable) throw fail('Esta operación no se puede cancelar mientras guarda o sincroniza datos.', 409);
         operation = { ...operation, cancelRequested: true, cancellable: false, message: 'Cancelando la consulta…', updatedAt: Date.now() };
-        if (['/api/pr-review', '/api/copilot-status', '/api/assistant'].includes(operation.path)) await copilot.abort();
+        if (['/api/pr-review', '/api/copilot-status', '/api/assistant', '/api/pipeline-review'].includes(operation.path)) await copilot.abort();
         await azure.close();
         return json(res, { cancelling: true });
       }
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot' };
-      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/assistant', '/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
+      operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pipelines', '/api/pipeline-review', '/api/assistant','/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
         if (path === '/api/work-item-states') {
@@ -499,6 +520,60 @@ const server = http.createServer(async (req, res) => {
           } });
           return json(res, { result, state: publicState({ operationComplete: true }) });
         }
+        // Pipelines: the list and the review only read Azure DevOps and the code.
+        if (path === '/api/pipelines') {
+          const config = pipelineConfig(), { gateway } = pipelineTools();
+          if (gateway === azurePipelines) { progress({ message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.' }); await azure.open(config); }
+          progress({ message: `Consultando los pipelines de ${config.project} y su última ejecución…` });
+          const list = await gateway.pipelines(config);
+          progress({ message: 'Consultando los repositorios del proyecto…' });
+          const repositories = await gateway.repositories(config);
+          pipelines = { scope: pipelinesScope(), fetchedAt: new Date().toISOString(), organization: config.organization, project: config.project, pipelines: list, repositories };
+          return json(res, { pipelines: currentPipelines() });
+        }
+        if (path === '/api/pipeline-review') {
+          const config = pipelineConfig(), { gateway, reviewer } = pipelineTools(), demo = store.data.mode === 'demo';
+          if (!Number.isSafeInteger(input.pipelineId) || input.pipelineId < 1) throw fail('Elige un pipeline.');
+          if (!demo) { progress({ message: 'Conectando con Azure DevOps. Completa el acceso de Microsoft si se solicita.' }); await azure.open(config); }
+          const analysis = await runAnalysis({ gateway, reviewer, config, pipelineId: input.pipelineId, mode: store.data.mode, onProgress: progress,
+            repository: store.data.pipelineSources?.[sourceKey(config.organization, config.project, input.pipelineId)] ?? null,
+            folderOf: name => demo ? null : store.data.localRepositories?.[repositoryKey(config.organization, config.project, name)] ?? null,
+            model: demo ? null : store.data.pipelineModel ?? null, effort: demo ? null : copilotEffort('pipeline') });
+          progress({ cancellable: false });
+          const data = structuredClone(store.data);
+          data.pipelineAnalyses = [analysis, ...(data.pipelineAnalyses ?? [])].slice(0, PIPELINE_LIMITS.analyses);
+          await store.save(data);
+          return json(res, { analysisId: analysis.id, state: publicState({ operationComplete: true }) });
+        }
+        if (path === '/api/pipeline-source') {
+          // Where the review of a pipeline reads the code: a repository of the project (the
+          // pipeline's by default) and, optionally, the folder of a local clone of it.
+          const config = pipelineConfig(), pipeline = currentPipelines()?.pipelines.find(p => p.id === input.pipelineId);
+          if (!pipeline) throw fail('Actualiza la lista de pipelines.', 409);
+          const own = pipeline.repository?.name ?? '', repository = typeof input.repository === 'string' && input.repository.trim() ? input.repository.trim() : own;
+          const other = repository.toLowerCase() !== own.toLowerCase();
+          if (other && !currentPipelines().repositories.some(r => r.name === repository)) throw fail('Elige un repositorio del proyecto.');
+          const data = structuredClone(store.data), key = sourceKey(config.organization, config.project, pipeline.id);
+          data.pipelineSources = { ...data.pipelineSources };
+          if (other) data.pipelineSources[key] = repository; else delete data.pipelineSources[key];
+          if (typeof input.path === 'string') {
+            if (store.data.mode === 'demo') throw fail('En el ejemplo no se usan repositorios locales.');
+            if (!repository) throw fail('El pipeline no tiene repositorio: elige uno.');
+            const local = repositoryKey(config.organization, config.project, repository);
+            data.localRepositories = { ...data.localRepositories };
+            if (input.path.trim()) data.localRepositories[local] = (await checkRepository(input.path, repository, { anyHost: !other && pipeline.repository?.type !== 'TfsGit' })).path;
+            else delete data.localRepositories[local];
+          }
+          await store.save(data);
+          return json(res, publicState());
+        }
+        if (path === '/api/pipeline-analysis-delete') {
+          const data = structuredClone(store.data);
+          if (!(data.pipelineAnalyses ?? []).some(a => a.id === input.id && a.mode === data.mode)) throw fail('La revisión ya no está disponible.', 404);
+          data.pipelineAnalyses = data.pipelineAnalyses.filter(a => a.id !== input.id);
+          await store.save(data);
+          return json(res, publicState());
+        }
         if (path === '/api/pr-local-repo') {
           // The local clone of a repository, so its pull requests are compared with git.
           if (store.data.mode === 'demo') throw fail('En el ejemplo no se usan repositorios locales.');
@@ -520,7 +595,7 @@ const server = http.createServer(async (req, res) => {
         if (path === '/api/copilot-model') {
           // The model and the effort that review (or that answer the tabs' prompts);
           // empty: the default of the plan (or NEO_TEAM_COPILOT_MODEL) and of the model.
-          const choice = choiceFrom(input), use = input.use === 'assistant' ? 'assistant' : 'copilot';
+          const choice = choiceFrom(input), use = ['assistant', 'pipeline'].includes(input.use) ? input.use : 'copilot';
           if (!choice) throw fail('Modelo o esfuerzo no válido.');
           const data = structuredClone(store.data), effort = effortFor(choice.model || copilot.model, choice.effort, copilotModels);
           if (choice.model) data[`${use}Model`] = choice.model; else delete data[`${use}Model`];
@@ -537,26 +612,30 @@ const server = http.createServer(async (req, res) => {
           return json(res, { copilot: status });
         }
         if (path === '/api/jira-refresh') {
-          // One update: the tickets on the board first (the finished ones leave, the changed
-          // ones are downloaded again) and then the filter, whose new tickets reach Analizar.
+          // One update: the filter is read first, without downloading it, so the filters of
+          // Mantenimiento choose what to bring; then the tickets on the board (the finished
+          // ones leave, the changed ones are downloaded again) and the new ones of the filter,
+          // which reach Analizar. With nothing filtered, the whole filter is brought.
           const settings = jiraSettings();
           if (!settings) throw fail('Configura Jira primero.');
           const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
           const pipeline = jiraPipeline();
           if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(() => null));
           const ffmpeg = store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg;
-          const options = { client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, scope: settings.collect, onProgress: progress };
-          // A single ticket has to be in the filter: that is checked before touching anything.
-          const single = settings.collect.mode === 'single' ? await collectFilter(options) : null;
+          const filters = filtersFrom(input.filters);
+          const catalog = await readCatalog({ client, settings, me: jiraMe(), onProgress: progress });
+          await pipeline.tickets.saveCatalog(catalog);
+          const keys = narrowed(filters) ? new Set(filterItems(jiraItems(await pipeline.tickets.list(), catalog.entries), filters).rows.filter(item => item.origin === 'jira').map(item => item.key)) : null;
+          const options = { client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, catalog, keys, onProgress: progress };
           const sync = await syncTickets(options);
           // A ticket finished in Jira is no longer waiting for an agent.
           pipeline.queue = pipeline.queue.filter(q => !sync.closed.includes(q.key));
           if (sync.closed.includes(pipeline.focus)) pipeline.focus = null;
-          const collect = single ?? await collectFilter(options);
+          const collect = await collectFilter({ ...options, synced: sync });
           await pipeline.collectAll();
           const news = sync.updated.filter(u => u.comments || u.attachments).map(u => u.key);
           const told = [collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}`, sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira`, news.length && `novedades en ${news.join(', ')}`, collect.left && `${collect.left} fuera del filtro`, sync.missing.length && `${sync.missing.length} sin acceso`].filter(Boolean);
-          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', key: collect.mode === 'single' ? settings.collect.key : undefined, title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: { filter: 'todo el filtro', mine: 'asignados a mí', single: 'un ticket' }[collect.mode], detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.missing.length && `Sin acceso o ya no existen: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
+          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: keys ? `${keys.size} filtrado${keys.size === 1 ? '' : 's'}` : 'todo el filtro', detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.missing.length && `Sin acceso o ya no existen: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
           return json(res, { result: { sync, collect }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-share' || path === '/api/jira-resume') {
@@ -616,13 +695,6 @@ const server = http.createServer(async (req, res) => {
           await pipeline.tickets.update(key, t => { const { diverged: _, ...rest } = t; return { ...rest, sharedSeen: ticket.shared.id, sharedBase: base }; });
           pipeline.feed.add({ family: resumed.warnings.length ? 'warning' : 'jira', key, title: `Estado traído de Jira${resumed.manifest.by ? `: sigue donde lo dejó ${resumed.manifest.by}` : ''}`, detail: [...resumed.warnings, resumed.backup && `Lo anterior de este equipo: ${resumed.backup}`].filter(Boolean).join('\n') });
           return json(res, { result: { key, warnings: resumed.warnings, backup: resumed.backup, by: resumed.manifest.by ?? '' }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
-        }
-        if (path === '/api/jira-collect') {
-          // What updating collects: the filter, only your tickets or a single one.
-          const data = structuredClone(store.data);
-          data.jiraCollect = collectScopeFrom(input);
-          await store.save(data);
-          return json(res, { state: publicState({ operationComplete: true }), jira: await jiraBoard() });
         }
         if (path === '/api/jira-seen') {
           // The person opened the ticket: its news are no longer new.
@@ -738,17 +810,22 @@ const server = http.createServer(async (req, res) => {
           await jiraPipeline().markDone(checkKey(input.key), note);
           return json(res, { jira: await jiraBoard() });
         }
-        if (['/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-move', '/api/jira-archive', '/api/jira-learnings', '/api/jira-open'].includes(path)) {
+        if (['/api/jira-run', '/api/jira-auto', '/api/jira-scope', '/api/jira-stop', '/api/jira-move', '/api/jira-delete', '/api/jira-learnings', '/api/jira-open'].includes(path)) {
           const pipeline = jiraPipeline();
           if (path === '/api/jira-run') { await pipeline.enqueue(checkKey(input.key)); pipeline.feed.add({ family: 'person', key: input.key, title: 'Ejecutar' }); }
-          else if (path === '/api/jira-auto') { pipeline.setAuto(input.on === true); pipeline.feed.add({ family: 'person', title: input.on === true ? 'Empezar: los pendientes, uno tras otro' : 'Pausar al terminar el paso en curso' }); }
+          // Empezar and the filters while it works: only the tickets the person sees, or all of them.
+          else if (path === '/api/jira-auto' || path === '/api/jira-scope') {
+            if (input.keys != null && (!Array.isArray(input.keys) || input.keys.length > 5000)) throw fail('Tickets no válidos.');
+            if (path === '/api/jira-scope') pipeline.setScope(input.keys ?? null);
+            else { pipeline.setAuto(input.on === true, input.keys ?? null); pipeline.feed.add({ family: 'person', title: input.on !== true ? 'Pausar al terminar el paso en curso' : Array.isArray(input.keys) ? `Empezar: los ${input.keys.length} filtrados, uno tras otro` : 'Empezar: los pendientes, uno tras otro' }); }
+          }
           else if (path === '/api/jira-stop') {
             if (input.general !== true && input.index === undefined) pipeline.feed.add({ family: 'person', key: pipeline.running?.key, title: 'Detener' });
             if (input.general === true) await pipeline.stopGeneral();
             else if (input.index !== undefined) await pipeline.stopChat(checkKey(input.key), input.index);
             else await pipeline.stop();
           }
-          else if (path === '/api/jira-move' || path === '/api/jira-archive') {
+          else if (path === '/api/jira-move' || path === '/api/jira-delete') {
             const key = checkKey(input.key);
             if (pipeline.running?.key === key) throw fail('Un agente está trabajando en este ticket. Detenlo antes.', 409);
             if (!(await pipeline.tickets.get(key))) throw fail('El ticket ya no está disponible.', 404);
@@ -756,8 +833,8 @@ const server = http.createServer(async (req, res) => {
               if (!STAGE_IDS.includes(input.stage)) throw fail('Columna no válida.');
               await pipeline.tickets.update(key, t => ({ ...t, stage: input.stage, status: input.stage === 'done' ? 'done' : 'pending', note: null, ...(input.resetIterations ? { iterations: 0, reproduceAttempts: 0 } : {}) }));
             } else {
-              await pipeline.tickets.update(key, t => ({ ...t, archived: input.archived !== false }));
-              pipeline.feed.add({ family: 'person', key, title: input.archived !== false ? 'Quitado del tablero' : 'Vuelve al tablero' });
+              await pipeline.tickets.remove(key, { byHand: true });
+              pipeline.feed.add({ family: 'person', key, title: 'Borrado' });
             }
             pipeline.queue = pipeline.queue.filter(q => q.key !== key);
           } else if (path === '/api/jira-learnings') {
@@ -1005,9 +1082,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET') throw fail('Método no permitido.', 405);
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
-    const route = /^\/(planificacion|mi-iteracion|mantenimiento|revision-prs|jira|permisos)(\/[^.]*)?$/.test(path);
+    const route = /^\/(planificacion|mi-iteracion|planes-prueba|mantenimiento|revision-prs|pipelines|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

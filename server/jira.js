@@ -10,7 +10,7 @@ import { basename, extname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-export const LIMITS = { tickets: 200, attachmentBytes: 300 * 1024 * 1024, frames: 40, text: 2000 };
+export const LIMITS = { tickets: 200, catalog: 1000, attachmentBytes: 300 * 1024 * 1024, frames: 40, text: 2000 };
 export const VIDEO = /\.(mp4|mov|webm|avi|mkv|wmv|m4v)$/i;
 export const IMAGE = /\.(png|jpe?g|gif|bmp|webp)$/i;
 
@@ -174,8 +174,9 @@ export class JiraClient {
     return raw ? response : response.status === 204 ? null : response.json();
   }
   // Cloud pages with nextPageToken (/search/jql); Data Center with startAt (/search).
-  async search(jql, fields, onProgress = () => {}) {
+  async search(jql, fields, onProgress = () => {}, limit = LIMITS.tickets) {
     const issues = [];
+    let total = Infinity;
     if (this.settings.deployment === 'cloud') {
       let nextPageToken;
       do {
@@ -183,10 +184,10 @@ export class JiraClient {
         issues.push(...(page.issues ?? []));
         onProgress(issues.length);
         nextPageToken = page.isLast === false || page.nextPageToken ? page.nextPageToken : undefined;
-      } while (nextPageToken && issues.length < LIMITS.tickets);
+      } while (nextPageToken && issues.length < limit);
+      total = nextPageToken ? issues.length + 1 : issues.length;
     } else {
-      let total = Infinity;
-      while (issues.length < Math.min(total, LIMITS.tickets)) {
+      while (issues.length < Math.min(total, limit)) {
         const page = await this.call('/rest/api/2/search', { query: { jql, fields: fields.join(','), maxResults: 100, startAt: issues.length } });
         total = page.total ?? 0;
         issues.push(...(page.issues ?? []));
@@ -194,7 +195,7 @@ export class JiraClient {
         if (!page.issues?.length) break;
       }
     }
-    return { issues: issues.slice(0, LIMITS.tickets), limited: issues.length > LIMITS.tickets };
+    return { issues: issues.slice(0, limit), limited: issues.length > limit || total > Math.min(issues.length, limit) };
   }
   issue(key) { return this.call(`/rest/api/2/issue/${encodeURIComponent(key)}`, { query: { fields: 'summary,description,environment,status,priority,issuetype,reporter,assignee,created,updated,labels,components,versions,fixVersions,attachment' } }); }
   async comments(key) {
@@ -307,7 +308,7 @@ export async function collectTicket({ client, settings, key, folder, ffmpeg = fa
   // The same comments one by one, for the interface.
   await writeAtomic(join(folder, 'comentarios.json'), JSON.stringify(comments.map(c => ({ author: person(c.author), created: c.created ?? null, updated: c.updated && c.updated !== c.created ? c.updated : null, body: wikiToMarkdown(c.body, names) })), null, 2));
   const f = issue.fields ?? {};
-  return { key: issue.key, summary: f.summary ?? '', type: f.issuetype?.name ?? '', jiraStatus: f.status?.name ?? '', priority: f.priority?.name ?? '', updated: f.updated ?? null, url: ticketUrl(settings, issue.key), attachments: attachments.length, comments: comments.length, skipped, shared: sharedOf(all) };
+  return { key: issue.key, summary: f.summary ?? '', type: f.issuetype?.name ?? '', jiraStatus: f.status?.name ?? '', jiraCategory: f.status?.statusCategory?.key ?? '', priority: f.priority?.name ?? '', updated: f.updated ?? null, url: ticketUrl(settings, issue.key), attachments: attachments.length, comments: comments.length, skipped, shared: sharedOf(all) };
 }
 
 // Files of a ticket, for the agents and the interface.

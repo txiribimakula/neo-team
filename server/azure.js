@@ -7,6 +7,7 @@ import { isExecutable, localDay } from '../dist/hierarchy.js';
 import { activityReader, describeCall, seconds } from './activity.js';
 import { MAINTENANCE_FIELDS, MAINTENANCE_LIMIT, maintenanceFields, maintenanceIssue, maintenanceWiql } from './maintenance.js';
 import { MY_ITERATION_FIELDS, MY_ITERATION_LIMIT, boardItem, currentIteration, myIterationBoard, myIterationWiql, parentsWiql } from './my-iteration.js';
+import { TEST_CASE_FIELDS, defaultPlan, sortPlans, testPlan, testPlanSnapshot } from './test-plans.js';
 
 export function parseToolResult(result) {
   const blocks = (result.content ?? []).filter(b => b.type === 'text').map(b => {
@@ -75,7 +76,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write', 'neo_test_plans', 'neo_test_plan_points']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -209,6 +210,28 @@ export class AzureGateway {
       catch (error) { if (mine.some(i => i.type === type)) throw error; }
     }
     return { ...board, me: mine.find(i => i.assignedTo)?.assignedTo ?? '', limited: !!result.limited, ...myIterationBoard(mine, parents, states) };
+  }
+  // Test plans: every plan of the project and, for the chosen one (or the current
+  // one), its suites and test points with the priority of their test cases.
+  async testPlans(config, planId, onProgress = () => {}) {
+    onProgress({ message: `Consultando los planes de prueba de ${config.project}…` });
+    const raw = await this.call('neo_test_plans', { project: config.project });
+    if (!Array.isArray(raw)) throw new Error('Azure DevOps no devolvió una lista válida de planes de prueba.');
+    const plans = sortPlans(raw.map(testPlan)), plan = plans.find(p => p.id === planId) ?? defaultPlan(plans);
+    const base = { organization: config.organization, project: config.project, plans, plan };
+    if (!plan?.rootSuiteId) return testPlanSnapshot(base);
+    onProgress({ message: `Consultando los puntos de prueba de «${plan.name}»…` });
+    const result = await this.call('neo_test_plan_points', { project: config.project, planId: plan.id, rootSuiteId: plan.rootSuiteId });
+    if (!Array.isArray(result?.points) || !Array.isArray(result.suites)) throw new Error('Azure DevOps no devolvió una lista válida de puntos de prueba.');
+    const ids = [...new Set(result.points.map(p => p.testCaseReference?.id).filter(Number.isInteger))], cases = new Map();
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      onProgress({ message: `Leyendo los casos de prueba (${Math.min(offset + 200, ids.length)} de ${ids.length})…` });
+      const batch = await this.call('neo_work_items_batch', { project: config.project, ids: ids.slice(offset, offset + 200) });
+      for (const item of Array.isArray(batch) ? batch : []) cases.set(item.id, { fields: Object.fromEntries(TEST_CASE_FIELDS.map(f => [f, item.fields?.[f]])) });
+    }
+    const snapshot = testPlanSnapshot({ ...base, suites: result.suites, points: result.points, cases, limited: !!result.limited });
+    onProgress({ message: `${snapshot.points.length} puntos de prueba obtenidos.` });
+    return snapshot;
   }
   async workItemStates(config, type) {
     const states = await this.call('neo_work_item_states', { project: config.project, type });

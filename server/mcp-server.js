@@ -17,6 +17,7 @@ import { configureCoreTools } from '@azure-devops/mcp/dist/tools/core.js';
 import { configureWorkTools } from '@azure-devops/mcp/dist/tools/work.js';
 import { configureWorkItemTools } from '@azure-devops/mcp/dist/tools/work-items.js';
 import { wrapExternalToolResponse } from '@azure-devops/mcp/dist/shared/content-safety.js';
+import { configurePipelineTools } from './mcp-pipelines.js';
 
 const [organization, authentication = 'interactive', tenant] = process.argv.slice(2);
 if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(organization ?? '')) throw new Error('Organización inválida');
@@ -75,6 +76,7 @@ server.tool = (...args) => {
 configureCoreTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 configureWorkTools(server, tokenProvider, connectionProvider);
 configureWorkItemTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
+configurePipelineTools(server, connectionProvider);
 
 server.tool('neo_security_login', 'Explicitly open Microsoft account selection in the browser for this MCP session.', {}, async () => {
   await tokenProvider({ forceRefresh: true, interactive: true });
@@ -356,5 +358,55 @@ server.tool('neo_pull_request_reply_write', 'Reply in a comment thread of a pull
   if (!created?.id) throw new Error('Azure DevOps no confirmó la respuesta.');
   await git.updateThread({ status: THREAD_STATUS[status] }, repositoryId, pullRequestId, threadId, project);
   return { content: [{ type: 'text', text: JSON.stringify({ id: created.id }) }] };
+});
+
+// Test plans are read from the testplan REST API, page by page with the
+// continuation token of each answer, up to a limit of items.
+const TEST_POINT_LIMIT = 5000;
+async function testPlanList(project, path, params = {}, limit = TEST_POINT_LIMIT) {
+  const items = [];
+  let token = null;
+  do {
+    const query = new URLSearchParams({ 'api-version': '7.1', ...params, ...(token ? { continuationToken: token } : {}) });
+    emit('http', `Petición a Azure DevOps: GET /${project}/_apis/testplan/${path}`);
+    const response = await fetch(`https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/testplan/${path}?${query}`, { headers: { Authorization: `Bearer ${await tokenProvider()}`, 'User-Agent': 'NeoTeam/0.1.0' } });
+    if (!response.ok) throw new Error(`Azure HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    items.push(...((await response.json()).value ?? []));
+    token = response.headers.get('x-ms-continuationtoken');
+  } while (token && items.length < limit);
+  return { items: items.slice(0, limit), limited: items.length > limit || !!token };
+}
+server.tool('neo_test_plans', 'List the test plans of a project.', {
+  project: z.string().min(1).max(200),
+}, async ({ project }) => {
+  const { items } = await testPlanList(project, 'Plans', { includePlanDetails: 'true' }, 2000);
+  return { content: [{ type: 'text', text: JSON.stringify(items.map(({ id, name, state, iteration, areaPath, startDate, endDate, owner, rootSuite, updatedDate }) => ({ id, name, state, iteration, areaPath, startDate, endDate, owner: owner ? { displayName: owner.displayName } : null, rootSuite: rootSuite ? { id: rootSuite.id } : null, updatedDate }))) }] };
+});
+// Every suite of a plan and its test points. The points of the whole plan come
+// from the root suite in one recursive query; if Azure answers only those of the
+// root, the other suites are read one by one.
+server.tool('neo_test_plan_points', 'List the suites of a test plan and the test points of every suite, with their tester and last outcome.', {
+  project: z.string().min(1).max(200), planId: z.number().int().positive(), rootSuiteId: z.number().int().positive(),
+}, async ({ project, planId, rootSuiteId }) => {
+  const suites = (await testPlanList(project, `Plans/${planId}/Suites`, {}, 2000)).items;
+  const pointsOf = (suiteId, recursive) => testPlanList(project, `Plans/${planId}/Suites/${suiteId}/TestPoint`, { includePointDetails: 'true', returnIdentityRef: 'true', isRecursive: String(recursive) });
+  const root = await pointsOf(rootSuiteId, true);
+  let points = root.items, limited = root.limited;
+  const others = suites.filter(s => s.id !== rootSuiteId);
+  if (others.length && !points.some(p => p.testSuite?.id && p.testSuite.id !== rootSuiteId)) {
+    for (let offset = 0; offset < others.length && points.length < TEST_POINT_LIMIT; offset += 6) {
+      for (const page of await Promise.all(others.slice(offset, offset + 6).map(s => pointsOf(s.id, false).then(page => ({ ...page, items: page.items.map(p => ({ ...p, testSuite: p.testSuite ?? { id: s.id } })) }))))) {
+        points.push(...page.items); limited ||= page.limited;
+      }
+      emit('info', `${Math.min(offset + 6, others.length)} / ${others.length} suites leídas.`);
+    }
+  }
+  limited ||= points.length > TEST_POINT_LIMIT;
+  points = points.slice(0, TEST_POINT_LIMIT).map(({ id, tester, configuration, isActive, isAutomated, results, testCaseReference, testSuite }) => ({
+    id, tester: tester ? { displayName: tester.displayName, uniqueName: tester.uniqueName } : null, configuration: configuration ? { name: configuration.name } : null, isActive, isAutomated,
+    results: results ? { outcome: results.outcome, lastResultDetails: results.lastResultDetails ? { dateCompleted: results.lastResultDetails.dateCompleted, runBy: results.lastResultDetails.runBy ? { displayName: results.lastResultDetails.runBy.displayName } : null } : null } : null,
+    testCaseReference: testCaseReference ? { id: testCaseReference.id, name: testCaseReference.name, state: testCaseReference.state } : null, testSuite: testSuite ? { id: testSuite.id } : null,
+  }));
+  return { content: [{ type: 'text', text: JSON.stringify({ suites: suites.map(({ id, name, parentSuite, suiteType, requirementId }) => ({ id, name, parentSuite: parentSuite ? { id: parentSuite.id } : null, suiteType, requirementId })), points, limited }) }] };
 });
 await server.connect(new StdioServerTransport());

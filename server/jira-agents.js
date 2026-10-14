@@ -11,7 +11,7 @@ import { JiraDesktop, desktopStage, desktopTitle, desktopTool } from './jira-des
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
-import { IMAGE, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
+import { IMAGE, LIMITS, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
 import { ActivityFeed } from './jira-feed.js';
 import { effortFor } from './ai-choice.js';
 import { DemoReviewHub, changedFiles, commentState, commentsBlock, commentsIn, diffText, azureRemote, publishCode, publishPending, pullRequestLink, reviewComments, severityOf, snapshot, treeOf, answerText, ANSWERS, SEVERITIES } from './jira-review.js';
@@ -117,6 +117,9 @@ export class TicketStore {
   // `repository`: the folder of the application's repository, where the learnings are kept.
   constructor(root, { repository = async () => null } = {}) { this.root = root; this.locks = new Map(); this.repository = repository; }
   folder(key) { return join(this.root, checkKey(key)); }
+  // The tickets of the filter as the last update read them (catalogo.json).
+  async catalog() { return readText(join(this.root, 'catalogo.json')).then(text => JSON.parse(text ?? 'null'), () => null); }
+  async saveCatalog(catalog) { await mkdir(this.root, { recursive: true, mode: 0o700 }); await writeAtomic(join(this.root, 'catalogo.json'), JSON.stringify(catalog)); }
   async get(key) {
     try { return JSON.parse(await readFile(join(this.folder(key), 'estado.json'), 'utf8')); } catch { return null; }
   }
@@ -138,6 +141,34 @@ export class TicketStore {
     this.locks.set(key, next);
     next.finally(() => { if (this.locks.get(key) === next) this.locks.delete(key); }).catch(() => {});
     return next;
+  }
+  // A ticket deleted from the board goes completely: its folder, the worktree of its
+  // code and its branch (neo/<KEY>) in the repository. One deleted by hand is
+  // remembered so updating does not bring it back; bringing that one ticket does.
+  remove(key, { byHand = false } = {}) {
+    const previous = this.locks.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+      const folder = this.folder(key), code = join(folder, 'codigo');
+      const common = (await stat(join(code, '.git')).catch(() => null)) && (await git(code, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { timeout: 15000 }).catch(() => null))?.toString('utf8').trim();
+      if (common) await git(dirname(common), ['--git-dir', common, 'worktree', 'remove', '--force', code], { timeout: 5 * 60000 }).catch(() => {});
+      await rm(folder, { recursive: true, force: true });
+      if (common) {
+        await git(dirname(common), ['--git-dir', common, 'worktree', 'prune'], { timeout: 30000 }).catch(() => {});
+        await git(dirname(common), ['--git-dir', common, 'branch', '-D', `neo/${key}`], { timeout: 15000 }).catch(() => {});
+      }
+      if (byHand) await this.forget(key, true);
+    });
+    this.locks.set(key, next);
+    next.finally(() => { if (this.locks.get(key) === next) this.locks.delete(key); }).catch(() => {});
+    return next;
+  }
+  async deleted() { return new Set(JSON.parse((await readText(join(this.root, 'borrados.json'))) ?? '[]')); }
+  async forget(key, on) {
+    const keys = await this.deleted();
+    if (keys.has(key) === on) return;
+    if (on) keys.add(key); else keys.delete(key);
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    await writeAtomic(join(this.root, 'borrados.json'), JSON.stringify([...keys].sort()));
   }
   // What each agent learned, per column, plus what all of them share. They live in
   // the application's repository, in .github/neo-team/aprendizajes, for the person to
@@ -206,58 +237,55 @@ async function redownloaded(tickets, key, known, meta) {
   const news = comments || attachments ? { comments: (known.news?.comments ?? 0) + comments, attachments: (known.news?.attachments ?? 0) + attachments, at: new Date().toISOString() } : known.news;
   return { comments, attachments, news };
 }
-// What updating collects: the whole filter, only its tickets assigned to you, or a
-// single ticket of the filter by its key.
-export const COLLECT_MODES = ['filter', 'mine', 'single'];
-export function collectScopeFrom(input) {
-  const mode = COLLECT_MODES.includes(input?.mode) ? input.mode : 'filter';
-  // The key, or a Jira address that names it (…/browse/NEO-12, ?selectedIssue=NEO-12).
-  const key = String(input?.key ?? '').trim().match(/[A-Z][A-Z0-9_]{0,30}-\d{1,9}/i)?.[0]?.toUpperCase() ?? '';
-  if (String(input?.key ?? '').trim() && !key) throw fail('El ticket no es válido: escribe su clave (NEO-123) o su dirección en Jira.');
-  return { mode, key };
+// The tickets of the filter, read in one query without downloading them: the filters
+// of Mantenimiento look at them to choose which ones to download.
+export const CATALOG_FIELDS = ['summary', 'status', 'updated', 'created', 'priority', 'issuetype', 'assignee', 'reporter', 'labels', 'components', 'fixVersions'];
+export function catalogEntry(issue, me = null) {
+  const f = issue.fields ?? {}, names = list => (list ?? []).map(item => item?.name).filter(Boolean);
+  return { key: issue.key, summary: f.summary ?? '', status: f.status?.name ?? '', category: f.status?.statusCategory?.key ?? '', priority: f.priority?.name ?? '', type: f.issuetype?.name ?? '',
+    assignee: assigneeOf(issue, me), reporter: accountOf(f.reporter)?.name ?? '', labels: Array.isArray(f.labels) ? f.labels.map(String) : [], components: names(f.components), fixVersions: names(f.fixVersions),
+    created: f.created ?? null, updated: f.updated ?? null };
 }
-// The filter's query narrowed with one more condition, keeping its order.
-export function collectJql(filter, scope = {}) {
-  const jql = jqlFrom(filter);
-  if (scope.mode === 'single' && !scope.key) throw fail('Escribe la clave del ticket que quieres recolectar.');
-  const condition = scope.mode === 'single' ? `issuekey = ${checkKey(scope.key)}` : scope.mode === 'mine' ? 'assignee = currentUser()' : null;
-  if (!condition) return jql;
-  const order = jql.match(/(?:^|\s)ORDER\s+BY\s+([\s\S]*)$/i), where = (order ? jql.slice(0, order.index) : jql).trim();
-  return `${where ? `(${where}) AND ${condition}` : condition}${order ? ` ORDER BY ${order[1]}` : ''}`;
+export async function readCatalog({ client, settings, me = null, onProgress = () => {} }) {
+  onProgress({ message: 'Consultando el filtro en Jira…' });
+  const result = await client.search(jqlFrom(settings.filter), CATALOG_FIELDS, count => onProgress({ message: `Consultando el filtro en Jira… ${count} tickets` }), LIMITS.catalog);
+  return { entries: result.issues.filter(issue => KEY.test(issue.key ?? '')).map(issue => catalogEntry(issue, me)), limited: !!result.limited, at: new Date().toISOString() };
 }
-export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, scope = { mode: 'filter' }, onProgress = () => {} }) {
-  const what = { filter: 'el filtro', mine: 'tus tickets del filtro', single: `${scope.key} en el filtro` }[scope.mode] ?? 'el filtro';
-  onProgress({ message: `Consultando ${what} en Jira…` });
-  const result = await client.search(collectJql(settings.filter, scope), ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee'], count => onProgress({ message: `Consultando ${what} en Jira… ${count} tickets` }));
-  // Narrowed here too, in case the server did not apply the whole query.
-  const issues = result.issues.filter(issue => scope.mode === 'single' ? issue.key === scope.key : scope.mode === 'mine' ? !!assigneeOf(issue, me)?.me : true), { limited } = result;
-  if (scope.mode === 'single' && !issues.length) throw fail(`${scope.key} no está en el filtro (o no existe o no tienes acceso).`, 404);
-  const found = new Set(issues.map(i => i.key));
-  const counts = { found: issues.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
-  for (const [index, issue] of issues.entries()) {
-    if (!KEY.test(issue.key)) continue;
-    const known = await tickets.get(issue.key);
-    const folder = tickets.folder(issue.key);
-    const complete = !!(await stat(join(folder, 'descripcion.md')).catch(() => null));
-    const assignee = assigneeOf(issue, me);
-    if (known && complete && known.updated === issue.fields?.updated) {
-      counts.unchanged++;
-      if (known.inFilter === false || JSON.stringify(known.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(issue.key, t => ({ ...t, inFilter: true, assignee }));
+// Downloads the tickets of the filter that are new or changed in Jira, only those in
+// `keys` when the person filters which ones. Every ticket of the filter on the board
+// gets who it is assigned to; those that left it are marked, unless the filter had
+// more tickets than were read. `synced`: what updating the board just did, which the
+// filter, read before, does not know yet.
+export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, synced = null, onProgress = () => {} }) {
+  const read = catalog ?? await readCatalog({ client, settings, me, onProgress });
+  const closed = new Set(synced?.closed ?? []), fresh = new Set((synced?.updated ?? []).map(u => u.key));
+  // One deleted by hand stays out unless the filters leave only it: bringing that ticket brings it back.
+  const deleted = await tickets.deleted(), only = keys?.size === 1 ? [...keys][0] : null;
+  // Those finished in Jira are not downloaded: updating would delete them.
+  const wanted = read.entries.filter(entry => entry.category !== 'done' && !closed.has(entry.key) && (!keys || keys.has(entry.key)) && (!deleted.has(entry.key) || entry.key === only)), issues = wanted.slice(0, LIMITS.tickets);
+  const chosen = new Set(issues.map(entry => entry.key)), found = new Set(read.entries.map(entry => entry.key));
+  const counts = { found: wanted.length, total: read.entries.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
+  for (const [index, entry] of read.entries.entries()) {
+    const known = await tickets.get(entry.key);
+    const complete = !!known && !!(await stat(join(tickets.folder(entry.key), 'descripcion.md')).catch(() => null));
+    if (!chosen.has(entry.key) || (complete && (known.updated === entry.updated || fresh.has(entry.key)))) {
+      if (chosen.has(entry.key)) counts.unchanged++;
+      if (known && (known.inFilter === false || JSON.stringify(known.assignee ?? null) !== JSON.stringify(entry.assignee))) await tickets.update(entry.key, t => ({ ...t, inFilter: true, assignee: entry.assignee }));
       continue;
     }
     // The ticket an agent is working on is downloaded again next time.
-    if (issue.key === busyKey) { counts.skipped.push(issue.key); continue; }
-    onProgress({ message: `Descargando ${issue.key} (${index + 1} de ${issues.length})…`, counts: { ...counts } });
-    const meta = await collectTicket({ client, settings, key: issue.key, folder, ffmpeg, onProgress: message => onProgress({ message }) });
-    const again = known ? await redownloaded(tickets, issue.key, known, meta) : null;
-    await tickets.update(issue.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee, inFilter: true, collectedAt: new Date().toISOString(), ...(again?.news ? { news: again.news } : {}) }));
+    if (entry.key === busyKey) { counts.skipped.push(entry.key); continue; }
+    onProgress({ message: `Descargando ${entry.key} (${index + 1} de ${read.entries.length})…`, counts: { ...counts } });
+    const meta = await collectTicket({ client, settings, key: entry.key, folder: tickets.folder(entry.key), ffmpeg, onProgress: message => onProgress({ message }) });
+    const again = known ? await redownloaded(tickets, entry.key, known, meta) : null;
+    await tickets.update(entry.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee: entry.assignee, inFilter: true, collectedAt: new Date().toISOString(), ...(again?.news ? { news: again.news } : {}) }));
+    if (deleted.has(entry.key)) await tickets.forget(entry.key, false);
     counts.downloaded++;
   }
-  // Only the whole filter tells which tickets left it.
-  if (scope.mode === 'filter') for (const ticket of await tickets.list()) {
+  if (!read.limited) for (const ticket of await tickets.list()) {
     if (!found.has(ticket.key) && ticket.inFilter !== false) { await tickets.update(ticket.key, t => ({ ...t, inFilter: false })); counts.left++; }
   }
-  return { ...counts, limited, mode: scope.mode };
+  return { ...counts, limited: read.limited || wanted.length > issues.length, filtered: !!keys };
 }
 
 // Recolectar without AI: an index of the ticket made from what was downloaded — the
@@ -296,12 +324,12 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 }
 
 // Brings the local tickets up to date with Jira: those finished there (status of
-// category Done) leave the board, keeping their files, and those changed there are
+// category Done) are deleted with their files, and those changed there are
 // downloaded again, which brings their new comments and attachments.
-// With a single ticket only that one is looked at; with yours, the rest are checked
-// (to take the finished ones off the board) but their changes are not downloaded.
-export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, scope = { mode: 'filter' }, onProgress = () => {} }) {
-  const local = (await tickets.list()).filter(t => !t.archived && (scope.mode !== 'single' || t.key === scope.key));
+// With `keys`, the tickets the person filters, the rest are checked (to delete the
+// finished ones) but their changes are not downloaded.
+export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, keys = null, onProgress = () => {} }) {
+  const local = await tickets.list();
   const result = { checked: local.length, closed: [], updated: [], missing: [], skipped: [] };
   const remote = new Map();
   for (let i = 0; i < local.length; i += 100) {
@@ -316,11 +344,11 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
     if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
     const assignee = assigneeOf(issue, me), status = issue.fields?.status;
     if (status?.statusCategory?.key === 'done') {
-      await tickets.update(ticket.key, t => ({ ...t, archived: true, closedInJira: { status: status.name ?? '', at: new Date().toISOString() }, jiraStatus: status.name ?? t.jiraStatus, assignee, updated: issue.fields?.updated ?? t.updated }));
+      await tickets.remove(ticket.key);
       result.closed.push(ticket.key);
       continue;
     }
-    if (issue.fields?.updated === ticket.updated || (scope.mode === 'mine' && !assignee?.me)) {
+    if (issue.fields?.updated === ticket.updated || (keys && !keys.has(ticket.key))) {
       if (JSON.stringify(ticket.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(ticket.key, t => ({ ...t, assignee }));
       continue;
     }
@@ -838,7 +866,7 @@ export class JiraPipeline {
     this.logWrites = (this.logWrites ?? Promise.resolve()).then(async () => { await mkdir(dirname(path), { recursive: true }); await appendFile(path, logLines(items)); }).catch(() => {});
     return this.logWrites;
   }
-  snapshot() { return { auto: this.auto, focus: this.focus ?? null, running: this.running, last: this.last ?? null, chats: Object.fromEntries([...this.chats].map(([id, chat]) => [id, chat.conversation])), general: this.general ? { conversation: this.general.conversation, activity: this.general.activity.slice(-100) } : null, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false, feed: this.feed.recent() }; }
+  snapshot() { return { auto: this.auto, scope: this.scope ? [...this.scope] : null, focus: this.focus ?? null, running: this.running, last: this.last ?? null, chats: Object.fromEntries([...this.chats].map(([id, chat]) => [id, chat.conversation])), general: this.general ? { conversation: this.general.conversation, activity: this.general.activity.slice(-100) } : null, queue: this.queue.map(q => q.key), error: this.error, needsCopilot: this.needsCopilot ?? false, feed: this.feed.recent() }; }
   // The end of a step, in one line: its outcome, how long it took and its report folded.
   feedOutcome(key, stage, outcome, { seconds = null, report = null, error = null, question = null } = {}) {
     const family = outcome === 'error' ? 'error' : ['blocked', 'not_reproduced', 'failed', 'build_failed', 'not_fixed'].includes(outcome) ? 'warning' : 'step';
@@ -952,7 +980,7 @@ Read what you need from them and the ticket files before answering.`;
   // at once and reaches Analizar (or stops with a question when it has nothing to go on).
   async collectAll() {
     let collected = 0;
-    for (const ticket of await this.tickets.list()) if (ticket.stage === 'collect' && !ticket.archived && this.running?.key !== ticket.key) { await this.collectNow(ticket.key); collected++; }
+    for (const ticket of await this.tickets.list()) if (ticket.stage === 'collect' && this.running?.key !== ticket.key) { await this.collectNow(ticket.key); collected++; }
     if (collected && this.auto) void this.loop();
   }
   async collectNow(key) {
@@ -998,7 +1026,9 @@ Read what you need from them and the ticket files before answering.`;
     this.auto = false; this.focus = key; this.queue = [{ key }]; this.error = null; this.needsCopilot = false;
     void this.loop();
   }
-  setAuto(on) { this.auto = !!on; if (on) this.focus = null; this.error = null; this.needsCopilot = false; if (on) void this.loop(); }
+  // Empezar works on the tickets the person sees: `keys`, or all of them when nothing is filtered.
+  setAuto(on, keys = null) { this.auto = !!on; if (on) { this.focus = null; this.setScope(keys); } this.error = null; this.needsCopilot = false; if (on) void this.loop(); }
+  setScope(keys) { this.scope = Array.isArray(keys) ? new Set(keys.map(checkKey)) : null; }
   async stop() {
     this.auto = false; this.queue = []; this.focus = null;
     if (this.running) { this.running = { ...this.running, stopping: true }; this.building?.abort(); await this.agent.abort(); }
@@ -1011,6 +1041,8 @@ Read what you need from them and the ticket files before answering.`;
   // to pending, to be run again with ▶ or Empezar.
   async recover() {
     for (const ticket of await this.tickets.list()) {
+      // Tickets once taken off the board, kept until deleting replaced it.
+      if (ticket.archived) { await this.tickets.remove(ticket.key); continue; }
       if (ticket.status !== 'running' || this.running?.key === ticket.key) continue;
       await this.tickets.update(ticket.key, t => t.status !== 'running' || this.running?.key === t.key ? t
         : { ...t, status: 'pending', note: `${stageOf(t.stage)?.name ?? 'El paso'} se interrumpió al cerrarse Neo Team: vuelve a ejecutarlo.` });
@@ -1090,18 +1122,18 @@ Read what you need from them and the ticket files before answering.`;
     while (this.queue.length) {
       const { key } = this.queue.shift();
       const ticket = await this.tickets.get(key);
-      if (ticket && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) !== 'off' && !(await this.lacking(ticket.stage)).length) return key;
+      if (ticket && ticket.stage !== 'done' && await this.modeOf(ticket.stage) !== 'off' && !(await this.lacking(ticket.stage)).length) return key;
     }
     if (this.focus) {
       const ticket = await this.tickets.get(this.focus);
-      if (ticket?.status === 'pending' && ticket.stage !== 'done' && !ticket.archived && await this.modeOf(ticket.stage) === 'auto' && !(await this.lacking(ticket.stage)).length) return ticket.key;
+      if (ticket?.status === 'pending' && ticket.stage !== 'done' && await this.modeOf(ticket.stage) === 'auto' && !(await this.lacking(ticket.stage)).length) return ticket.key;
       this.focus = null;
       return null;
     }
     if (!this.auto) return null;
     const modes = (await this.settings()).modes ?? {};
     const blocked = new Set((await Promise.all(Object.keys(NEEDS).map(async stage => (await this.lacking(stage)).length ? stage : null))).filter(Boolean));
-    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (t.stage === 'collect' || (modes[t.stage === 'build' ? 'verify' : t.stage] ?? 'auto') === 'auto') && !blocked.has(t.stage) && !autoLocked(t) && !t.archived && t.inFilter !== false);
+    const pending = (await this.tickets.list()).filter(t => t.status === 'pending' && t.stage !== 'done' && (t.stage === 'collect' || (modes[t.stage === 'build' ? 'verify' : t.stage] ?? 'auto') === 'auto') && !blocked.has(t.stage) && !autoLocked(t) && t.inFilter !== false && (!this.scope || this.scope.has(t.key)));
     // Collecting costs nothing and takes no time: every pending ticket gets it first.
     return (pending.find(t => t.stage === 'collect') ?? pending.find(t => t.key === this.lastKey) ?? pending[0])?.key ?? null;
   }
