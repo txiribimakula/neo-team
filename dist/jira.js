@@ -98,7 +98,7 @@ export function priorityIcon(name) {
 // On the card, «Revisar» opens the ticket on its latest step, to read why it stopped before answering.
 function answerField(ticket, drafts = {}, onCard = false) {
   const review = onCard ? `<button class="button small" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" title="Abrir el ticket para revisar por qué se paró">Revisar</button>` : '';
-  return `<div class="jira-answer"><textarea data-jira-answer="${escape(ticket.key)}" data-focus="jira-answer:${escape(ticket.key)}" rows="2" maxlength="10000" placeholder="Tu respuesta" aria-label="Respuesta para el agente de ${escape(stageName(ticket.stage))}">${escape(drafts[ticket.key] ?? '')}</textarea><div class="jira-answer-actions">${review}<button class="button small" data-action="jira-answer" data-key="${escape(ticket.key)}" title="Guardar la respuesta y retomar el ticket (Ctrl+Enter)">Responder</button></div></div>`;
+  return `<div class="jira-answer"><textarea data-jira-answer="${escape(ticket.key)}" data-focus="jira-answer:${escape(ticket.key)}" rows="3" maxlength="10000" placeholder="Tu respuesta" aria-label="Respuesta para el agente de ${escape(stageName(ticket.stage))}">${escape(drafts[ticket.key] ?? '')}</textarea><div class="jira-answer-actions">${review}<button class="button small" data-action="jira-answer" data-key="${escape(ticket.key)}" title="Guardar la respuesta y retomar el ticket (Ctrl+Enter)">Responder</button></div></div>`;
 }
 // How easy the analysis found the ticket: three bars, as many lit as the harder of
 // reproducing it and fixing it allows. The details are in the tooltip.
@@ -222,10 +222,10 @@ function screensView(board, open) {
 const chatAttrs = chat => !chat ? '' : chat.general ? 'data-general="true"' : `data-key="${escape(chat.key)}" data-index="${chat.index}"`;
 function tellView(run, draft = '', chat = null) {
   const attrs = chatAttrs(chat), focus = `jira-tell${chat ? `:${chat.id}` : ''}`;
-  const send = (placeholder, label, off = '') => `<textarea data-jira-tell ${attrs} data-focus="${escape(focus)}" rows="1" maxlength="4000" placeholder="${escape(placeholder)}" aria-label="${escape(label)}" ${off}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" ${attrs} title="Enviar (Enter; Mayús+Enter para otra línea)" ${off}>Enviar</button>`;
+  const send = (placeholder, label, off = '') => `<textarea data-jira-tell ${attrs} data-focus="${escape(focus)}" rows="2" maxlength="4000" placeholder="${escape(placeholder)}" aria-label="${escape(label)}" ${off}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" ${attrs} title="Enviar (Enter; Mayús+Enter para otra línea)" ${off}>Enviar</button>`;
   if (chat) {
     const talking = ['starting', 'working', 'waiting'].includes(chat.state);
-    return `<div class="jira-tell">${send(chat.offline ?? (chat.general ? 'Pide algo al asistente: cambiar aprendizajes, revisar tickets…' : 'Pregunta al agente de este paso'), chat.general ? 'Mensaje para el asistente general' : 'Mensaje para el agente de este paso', chat.offline ? 'disabled' : '')}${talking ? `<button class="button small" data-action="jira-stop" ${attrs} title="Termina esta conversación; puedes retomarla con otro mensaje">Terminar</button>` : ''}</div>`;
+    return `<div class="jira-tell">${send(chat.offline ?? (chat.general ? 'Pide algo al asistente…' : 'Pregunta al agente de este paso'), chat.general ? 'Mensaje para el asistente general' : 'Mensaje para el agente de este paso', chat.offline ? 'disabled' : '')}${talking ? `<button class="button small" data-action="jira-stop" ${attrs} title="Termina esta conversación; puedes retomarla con otro mensaje">Terminar</button>` : ''}</div>`;
   }
   const column = stepOf(run.stage), waiting = run.conversation === 'waiting', off = run.stopping ? 'disabled' : '';
   const input = column?.byCode ? '' : `${send(waiting ? 'Responde o pregunta al agente' : 'Interrumpe al agente para preguntarle o decirle algo', `Mensaje para el agente de ${column?.name ?? ''}`, off)}${waiting
@@ -269,7 +269,7 @@ export const feedView = (feed = [], open = new Set()) => feed.length ? `<ol clas
 // to the activity below.
 function liveField(run, draft = '') {
   const waiting = run.conversation === 'waiting', off = run.stopping ? 'disabled' : '';
-  return `<div class="jira-tell"><textarea data-jira-tell data-focus="jira-tell" rows="1" maxlength="4000" placeholder="${waiting ? 'Responde o pregunta al agente' : 'Interrumpe al agente para preguntarle o decirle algo'}" aria-label="Mensaje para el agente de ${escape(stageName(run.stage))}" ${off}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" title="Enviar (Enter; Mayús+Enter para otra línea)" ${off}>Enviar</button>${waiting
+  return `<div class="jira-tell"><textarea data-jira-tell data-focus="jira-tell" rows="2" maxlength="4000" placeholder="${waiting ? 'Responde o pregunta al agente' : 'Interrumpe al agente para preguntarle o decirle algo'}" aria-label="Mensaje para el agente de ${escape(stageName(run.stage))}" ${off}>${escape(draft)}</textarea><button class="button small primary" data-action="jira-tell" title="Enviar (Enter; Mayús+Enter para otra línea)" ${off}>Enviar</button>${waiting
     ? `<button class="button small" data-action="jira-pause" data-on="false" title="El agente sigue con su tarea" ${off}>Continuar</button>`
     : `<button class="button small" data-action="jira-pause" data-on="true" title="Interrumpe al agente donde está, sin perder lo que lleva, y espera" ${off}>Pausar</button>`}</div>`;
 }

@@ -7,6 +7,7 @@ import { reviewsView, publishConfirmation, localFolder, loginSteps } from './rev
 import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
+import { matchesQuery, compileQuery } from './search.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -594,9 +595,9 @@ function selected() {
 }
 // The previous iteration is imported only to be reviewed, never planned.
 function planningIterations() { return state.workspace?.iterations.filter(i => !i.past) ?? []; }
+// The plan of the iteration follows the same filter as the backlog.
 function filtered(items) {
-  const search = query.trim().toLowerCase();
-  return items.filter(i => !search || `${i.id} ${i.title} ${i.tags.join(' ')} ${i.assigneeName} ${i.assignedTo} ${i.state}`.toLowerCase().includes(search)).sort((a,b) => (a.priority ?? 5) - (b.priority ?? 5) || a.id - b.id);
+  return items.filter(i => matchesTask(i,backlogQuery)).sort((a,b) => (a.priority ?? 5) - (b.priority ?? 5) || a.id - b.id);
 }
 const memberName = value => state.workspace?.members.find(m => key(m) === value)?.displayName || (value || 'Sin asignar');
 const iterationName = value => state.workspace?.iterations.find(i => i.path === value)?.name || (value === state.workspace?.settings.backlogIteration.path ? 'Backlog' : value);
@@ -619,12 +620,13 @@ function capacityWarning(owner, iteration=selected()) {
   return capacity===0 ? `${member.displayName} no tiene capacidad en ${iteration.name}.` : capacity==null ? `${member.displayName} no tiene capacidad definida en ${iteration.name}.` : '';
 }
 const plain = text => String(text ?? '').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase();
+// Both searches take AND, OR, parentheses, "phrases" and -words (search.js).
 function matchesTask(item, text) {
-  const wanted=plain(text.trim()).replace(/^#/,'');
-  return !wanted || plain(item.title).includes(wanted) || /^\d+$/.test(wanted) && String(item.id).includes(wanted);
+  const title=plain(item.title);
+  return matchesQuery(text,term=>{const wanted=term.replace(/^#/,'');return title.includes(wanted) || /^\d+$/.test(wanted) && String(item.id).includes(wanted);});
 }
 function matchesText(item, text) {
-  return plain(`${item.id} #${item.id} ${item.title} ${(item.tags || []).join(' ')} ${item.type}`).includes(plain(text.trim()));
+  return matchesQuery(text,plain(`${item.id} #${item.id} ${item.title} ${(item.tags || []).join(' ')} ${item.type}`));
 }
 // Opens the real work item in Azure DevOps, in the project it belongs to.
 function azureLink(item, label='↗', config=null, className='azure-link') {
@@ -714,7 +716,8 @@ function stepView() {
 }
 // Each planning tab has its own AI prompt. Copilot only gets the tools of that tab,
 // which search and change the local copy; its changes stay pending like any other.
-const ASSISTANT_HINTS={configuration:'Pide a la IA… «no importes los bugs resueltos»',iteration:'Pide a la IA… «planifica la siguiente iteración»',capacity:'Pide a la IA… «Ana libra el viernes»',planning:'Pide a la IA… «reparte las tareas sin asignar»'};
+// The tabs with their own AI; the prompt is left open to whatever the person asks.
+const ASSISTANT_HINTS={configuration:'Pide a la IA…',iteration:'Pide a la IA…',capacity:'Pide a la IA…',planning:'Pide a la IA…'};
 const assistantUi={};
 const assistantOf=which=>assistantUi[`${state.mode}|${which}`] ??= {draft:'',history:[],running:false};
 function assistantOutput(ui) {
@@ -1085,13 +1088,19 @@ function plannerView() {
   const missing=!previous && state.workspace.mode==='azure' ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="refresh-section" data-section="tasks"><small>Iteración anterior</small><span>Descargar</span></button><button type="button" aria-pressed="true"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : '';
   const periods=previous ? `<div class="planning-periods" role="group" aria-label="Iteración con la que trabajas"><button type="button" data-action="planning-period" data-period="previous" aria-pressed="${planningPeriod==='previous'}"><small>${hasEnded(previous) ? 'Iteración anterior' : 'En curso'}</small><span>${escape(previous.name)}${open ? ` <em>${open} sin decidir</em>` : ' ✓'}</span></button><button type="button" data-action="planning-period" data-period="current" aria-pressed="${planningPeriod==='current'}"><small>${iterationKinds([iteration]).get(iteration.id)==='current' ? 'Iteración actual' : 'Planificando'}</small><span>${escape(iteration.name)}</span></button></div>` : missing;
   if (planningPeriod==='previous') return periods+previousView();
-  return periods+board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
+  return periods+board(iteration,plannedItems(iteration));
 }
-// The available backlog filters as the person types, without redrawing the plan.
+// The filter applies as the person types, redrawing only the backlog and the lanes so
+// the search box and any draft keep their place.
 function refreshBacklog() {
   const tree=$('#backlog-tree');if(!tree)return;
   tree.innerHTML=leftPanelContent();
   $('#backlog-count').textContent=leftPanelCount();
+  const lanes=$('#plan-lanes'), iteration=selected();
+  if (!lanes || !iteration) return;
+  const planned=plannedItems(iteration);
+  lanes.innerHTML=planLanes(iteration,planned);
+  $('#plan-count').textContent=planCount(planned);
 }
 // Each scrolling column fits the part of the window it can use, from wherever the
 // board starts, so its end and its scrollbar are always visible.
@@ -1127,7 +1136,7 @@ const ASSIGNEE = { displayName: 'Asignado', assignee: true };
 const selectedTasks = new Set();
 function bulkBar() {
   const count=selectedTasks.size;
-  return `<div id="bulk-bar" class="bulk-bar" ${count ? '' : 'hidden'}><span class="bulk-count">${plural(count,'tarea')}</span><div class="comment-box"><textarea rows="1" maxlength="4000" data-comment-for="bulk" data-focus="comment:bulk" placeholder="Comentario… @ para mencionar" aria-label="Comentario para las tareas seleccionadas">${escape(commentDrafts.bulk ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><button type="button" class="button small primary" data-action="add-comment" data-task="bulk">Comentar</button><button type="button" class="close" data-action="clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`;
+  return `<div id="bulk-bar" class="bulk-bar" ${count ? '' : 'hidden'}><span class="bulk-count">${plural(count,'tarea')}</span><div class="comment-box"><textarea rows="2" maxlength="4000" data-comment-for="bulk" data-focus="comment:bulk" placeholder="Comentario… @ para mencionar" aria-label="Comentario para las tareas seleccionadas">${escape(commentDrafts.bulk ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><button type="button" class="button small primary" data-action="add-comment" data-task="bulk">Comentar</button><button type="button" class="close" data-action="clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`;
 }
 // Choosing a box only touches its card and the bar, so the draft and the focus stay.
 function selectTask(id, on) {
@@ -1147,7 +1156,7 @@ function commentButton(item) {
 function taskComments(item) {
   if (!commentsOpen.has(item.id)) return '';
   const pendingList=pendingCommentsOf(item.id).map(c=>`<div class="pending-comment"><p>${renderMentions(c.text)}</p><button type="button" class="link-button" data-action="discard-comment" data-key="${escape(c.key)}">Quitar</button></div>`).join('');
-  return `<div class="task-comments">${pendingList}<div class="comment-box"><textarea rows="2" maxlength="4000" data-comment-for="${item.id}" data-focus="comment:${item.id}" placeholder="Comentario… @ para mencionar" aria-label="Comentario para #${item.id}">${escape(commentDrafts[item.id] ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><div class="comment-actions"><button type="button" class="button small primary" data-action="add-comment" data-task="${item.id}">Comentar</button></div></div>`;
+  return `<div class="task-comments">${pendingList}<div class="comment-box"><textarea rows="4" maxlength="4000" data-comment-for="${item.id}" data-focus="comment:${item.id}" placeholder="Comentario… @ para mencionar" aria-label="Comentario para #${item.id}">${escape(commentDrafts[item.id] ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><div class="comment-actions"><button type="button" class="button small primary" data-action="add-comment" data-task="${item.id}">Comentar</button></div></div>`;
 }
 const duplicateButton = item => `<button type="button" class="icon-button" data-action="duplicate" data-task="${item.id}" title="Duplicar con su mismo padre" aria-label="Duplicar #${item.id}">⧉</button>`;
 // Hour fields are edited on the card itself, with the names they have in Azure DevOps.
@@ -1186,10 +1195,15 @@ function lane(member, allItems, index, iteration) {
   const capacity = state.workspace.capacityHours[iteration.id]?.[member.id] ?? null;
   const unknown = owned.filter(i=>i.canEstimateHours && i.remainingWork === null).length;
   const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
-  const open=expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
+  // While filtering, the people with matching tasks open and the rest fold; each can
+  // still be toggled until the filter changes.
+  const searching=!!compileQuery(backlogQuery), shown=filtered(owned);
+  const open=searching ? !!shown.length!==lanesToggled.has(key(member)) : expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
   const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
-  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${filtered(owned).map(i=>taskCard(i,false,nextIteration(iteration),true)).join('') || '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>'}</div></div></section>`;
+  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${searching ? `${shown.length} de ` : ''}${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${shown.map(i=>taskCard(i,false,nextIteration(iteration),true)).join('') || (owned.length ? '<div class="drop-hint">Ninguna coincide con el filtro</div>' : '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>')}</div></div></section>`;
 }
+// Lanes opened or folded by hand while filtering; a new filter starts over.
+const lanesToggled = new Set();
 // What is typed in a note survives a redraw (such as opening the lane) until it is saved.
 const noteDrafts={};
 // The left panel alternates between the available backlog and the sprint's
@@ -1233,9 +1247,9 @@ function leftPanelCount() {
   const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : quick ? state.workspace.effectiveItems.filter(i=>quick(i) && matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
   return `${shown} de ${total}`;
 }
-function board(iteration, planned) {
-  const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)), unassigned=unassignedTasks(iteration);
-  const members=ws.members, available=new Set(planningMembers(iteration.id).map(key));
+// The people of the plan, each with the tasks the filter leaves.
+function planLanes(iteration, planned) {
+  const ws = state.workspace, members=ws.members, available=new Set(planningMembers(iteration.id).map(key));
   const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
   // People whose hours are all assigned go last. The order holds while assigning and
   // is refreshed on entering the step or closing someone, so rows never jump.
@@ -1244,6 +1258,13 @@ function board(iteration, planned) {
   // Available first, then those with every hour assigned, then those without capacity.
   if (laneOrder?.key!==orderKey) laneOrder={key:orderKey,ids:members.map((m,index)=>({id:key(m),index,rank:!available.has(key(m)) || ws.capacityHours[iteration.id]?.[m.id]==null ? 2 : full(m) ? 1 : 0})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(m=>m.id)};
   const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
+  const extra=(title,note,items,cls='')=>{const shown=filtered(items);return shown.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${shown.map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';};
+  return ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')+extra('Otras personas','Responsables que no figuran en este equipo',outside);
+}
+const planCount = planned => compileQuery(backlogQuery) ? `${planned.filter(i=>matchesTask(i,backlogQuery)).length} de ${plural(planned.length,'tarea')}` : plural(planned.length,'tarea');
+const plannedItems = iteration => state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path);
+function board(iteration, planned) {
+  const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)), unassigned=unassignedTasks(iteration);
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
   const widen=`<button type="button" class="icon-button backlog-width" data-action="toggle-backlog-width" aria-pressed="${backlogWide}" title="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}" aria-label="${backlogWide ? 'Reducir el backlog' : 'Ampliar el backlog'}">${backlogWide ? shrinkIcon : expandIcon}</button>`;
@@ -1251,11 +1272,10 @@ function board(iteration, planned) {
   const overdue=overdueTest(ws), childless=childlessTest(planningTree());
   const quickButton=(filter,label,title,count)=>`<button type="button" data-action="backlog-filter" data-filter="${filter}" aria-pressed="${backlogFilter===filter}" title="${title}">${label}<span class="count">${count}</span></button>`;
   const quick=leftPanel==='backlog' ? `<div class="backlog-quick" role="group" aria-label="Filtros del backlog">${quickButton('overdue','Iteraciones pasadas','Tareas sin cerrar en iteraciones ya terminadas',backlog.filter(overdue).length)}${quickButton('childless','Sin hijos','Épicas, features e historias sin hijos',ws.effectiveItems.filter(childless).length)}</div>` : '';
-  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
-  const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';
+  const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas del backlog y del plan: espacios o AND, OR, paréntesis, &quot;frase&quot; y -excluir" title="Espacio o AND: todas · OR o |: alguna · ( ) agrupa · &quot;frase&quot; · -palabra excluye" aria-controls="backlog-tree plan-lanes" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   // Only tasks still in the plan stay chosen (another iteration, a task moved away…).
   for (const id of selectedTasks) if (!planned.some(i=>i.id===id)) selectedTasks.delete(id);
-  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section>${bulkBar()}</div>`;
+  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count" id="plan-count">${planCount(planned)}</span></div><div class="members-grid" id="plan-lanes">${planLanes(iteration,planned)}</div></section>${bulkBar()}</div>`;
 }
 
 function render() {
@@ -2156,7 +2176,7 @@ const actions = {
   'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
-  'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
+  'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';lanesToggled.clear();$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
   'backlog-filter':el=>{backlogFilter=backlogFilter===el.dataset.filter ? '' : el.dataset.filter;updatePlanningView();$(`.backlog-quick [data-filter="${el.dataset.filter}"]`)?.focus({preventScroll:true});},
   'toggle-backlog-width':()=>{backlogWide=!backlogWide;try{localStorage.setItem('neo-team:backlog-wide',backlogWide ? '1' : '0');}catch{/* Kept for this visit only. */}updatePlanningView();$('[data-action="toggle-backlog-width"]')?.focus({preventScroll:true});},
   'assistant-clear':()=>{const ui=assistantOf(tab);Object.assign(ui,{asked:'',reply:'',changes:[],error:''});updateAssistant(tab);$('#assistant-prompt')?.focus({preventScroll:true});},
@@ -2195,7 +2215,7 @@ const actions = {
   },
   'refresh-task-states': el => editTask(Number(el.dataset.task), true),
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
-  'toggle-lane': el=>{const member=el.dataset.member;if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
+  'toggle-lane': el=>{const member=el.dataset.member;if(compileQuery(backlogQuery)){if(!lanesToggled.delete(member))lanesToggled.add(member);}else if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': el=>{collapsed.clear();updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="expand-tree"]')?.focus({preventScroll:true});},
   'collapse-tree': el=>{state.workspace.effectiveItems.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="collapse-tree"]')?.focus({preventScroll:true});},
   tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousGroupOrder=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
@@ -2402,7 +2422,7 @@ document.addEventListener('input',event=>{
   if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
-  if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
+  if(event.target.id==='backlog-search'){backlogQuery=event.target.value;lanesToggled.clear();refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
 });

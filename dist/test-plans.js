@@ -2,6 +2,7 @@
 // outcome and by the person assigned to run them, with filters by person,
 // suite, configuration and priority.
 import { workDaysLeft } from './my-iteration.js';
+import { compileQuery } from './search.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const normalize = value => String(value ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase('es').trim();
@@ -92,12 +93,12 @@ function treeOf(snapshot) {
 const suiteName = (snapshot, id) => treeOf(snapshot).byId.get(id)?.name ?? '';
 
 function visible(snapshot) {
-  const tree = treeOf(snapshot), text = normalize(filters.text), suite = filters.suite && tree.byId.has(Number(filters.suite)) ? tree.under(Number(filters.suite)) : null;
+  const tree = treeOf(snapshot), text = compileQuery(filters.text), suite = filters.suite && tree.byId.has(Number(filters.suite)) ? tree.under(Number(filters.suite)) : null;
   return snapshot.points.filter(p => (!filters.tester || (filters.tester === NONE ? !p.tester : p.tester === filters.tester))
     && (!suite || suite.has(p.suiteId))
     && (!filters.configuration || p.configuration === filters.configuration)
     && (!filters.priority || String(p.priority ?? '') === filters.priority)
-    && (!text || normalize(`${p.caseId} ${p.title} ${p.tester} ${p.runBy} ${p.configuration} ${tree.path.get(p.suiteId) ?? ''}`).includes(text)));
+    && (!text || text(normalize(`${p.caseId} ${p.title} ${p.tester} ${p.runBy} ${p.configuration} ${tree.path.get(p.suiteId) ?? ''}`))));
 }
 const byOutcome = rows => filters.outcomes.length ? rows.filter(p => filters.outcomes.includes(p.outcome)) : rows;
 function counts(rows) {

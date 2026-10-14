@@ -393,7 +393,7 @@ section.board-column:not(.backlog){padding-right:4px}
 .icon-button small{font-size:10px;margin-left:1px;font-weight:700;color:var(--green)}.icon-button{width:auto;min-width:26px;padding:0 4px}
 .task-comments{margin-top:10px;padding-top:10px;border-top:1px solid #edf0ec;display:flex;flex-direction:column;gap:8px;cursor:default}
 .pending-comment{display:flex;gap:8px;align-items:flex-start;background:#f3f8ee;border-radius:7px;padding:7px 9px;font-size:13px}.pending-comment p{margin:0;flex:1;white-space:pre-wrap;overflow-wrap:anywhere}
-.comment-box{position:relative}.comment-box textarea{width:100%;resize:vertical;min-height:52px;border:1px solid #d5dfd7;border-radius:7px;padding:8px 10px;font:inherit;font-size:13px}
+.comment-box{position:relative}.comment-box textarea{width:100%;resize:vertical;field-sizing:content;min-height:92px;max-height:50vh;border:1px solid #d5dfd7;border-radius:7px;padding:8px 10px;font:inherit;font-size:13px;line-height:1.45}
 .mention-list{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:white;border:1px solid #d5dfce;border-radius:8px;box-shadow:0 12px 30px #17251c26;z-index:20;padding:4px;max-height:220px;overflow:auto}
 .mention-option{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:6px 8px;border-radius:6px;text-align:left;font-size:13px;cursor:pointer}.mention-option .avatar{width:24px;height:24px;font-size:10px}
 .mention-option[aria-selected="true"],.mention-option:hover{background:#eef5e3}
@@ -404,10 +404,10 @@ section.board-column:not(.backlog){padding-right:4px}
 .task-card.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
 .bulk-bar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);width:min(760px,calc(100vw - 32px));display:flex;align-items:center;gap:10px;background:white;border:1px solid #c9d6c6;border-radius:12px;padding:10px 12px;box-shadow:0 14px 40px #17251c2e;z-index:9}.bulk-bar[hidden]{display:none}
 .bulk-count{min-width:72px;font-size:13px;font-weight:650;color:var(--green);white-space:nowrap}
-.bulk-bar .comment-box{flex:1;min-width:0}.bulk-bar .comment-box textarea{min-height:36px;resize:none}
+.bulk-bar .comment-box{flex:1;min-width:0}.bulk-bar .comment-box textarea{min-height:58px;max-height:40vh;resize:none}
 .bulk-bar .mention-list{top:auto;bottom:100%;margin:0 0 6px}
-.board:has(>.bulk-bar:not([hidden])) .board-column{padding-bottom:84px}
-body:has(.bulk-bar:not([hidden])) #toast{bottom:96px}
+.board:has(>.bulk-bar:not([hidden])) .board-column{padding-bottom:110px}
+body:has(.bulk-bar:not([hidden])) #toast{bottom:122px}
 /* People without capacity in the sprint still get a lane: last, dimmed and marked. */
 .member.no-capacity .member-toggle{opacity:.6}.member.no-capacity:hover .member-toggle,.member.no-capacity:not(.collapsed) .member-toggle{opacity:1}
 .no-capacity-badge{display:inline-block;margin-left:8px;background:#fbf1d9;color:#8a6412;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;vertical-align:middle}
@@ -575,7 +575,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-await{font-size:12px;color:#8a6a1f;font-weight:600}
 .jira-question{margin:0;font-size:13px;line-height:1.4;color:#7b2e26;overflow-wrap:anywhere;white-space:pre-wrap}
 .jira-answer{display:flex;flex-direction:column;gap:6px}
-.jira-answer textarea{font-size:13px;padding:6px 8px;min-height:52px;cursor:text}
+.jira-answer textarea{font-size:13px;line-height:1.45;padding:6px 8px;field-sizing:content;min-height:80px;max-height:40vh;resize:vertical;cursor:text}
 .jira-answer-actions{display:flex;justify-content:flex-end;gap:6px}.jira-answer-actions .button{flex:1 1 0;min-width:0;padding-left:6px;padding-right:6px}.jira-answer-actions .button:only-child{flex:none;padding-left:10px;padding-right:10px}
 .jira-blocked{display:flex;flex-direction:column;gap:8px}
 .jira-answers{margin:8px 0 0;font-size:13px}.jira-answers dt{color:var(--muted);margin-top:8px}.jira-answers dd{margin:2px 0 0;white-space:pre-wrap}
@@ -664,7 +664,7 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-activity pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .jira-activity .log-warning{background:#fff4e9;color:#8a3d18}
 .jira-tell{display:flex;gap:6px;align-items:flex-end;padding:8px 10px;border-bottom:1px solid var(--line);background:#f7f9f7}
-.jira-tell textarea{flex:1;min-width:0;resize:vertical;min-height:32px;max-height:30vh;padding:6px 9px;font-family:inherit;font-size:13px;line-height:1.4}
+.jira-tell textarea{flex:1;min-width:0;resize:vertical;field-sizing:content;min-height:56px;max-height:40vh;padding:6px 9px;font-family:inherit;font-size:13px;line-height:1.4}
 .jira-tell .button{flex-shrink:0}
 .jira-activity .log-person{background:#eef3fb;color:#2f4a80}
 .jira-activity .log-agent{background:#f1f7ee;border-left:3px solid #5d9440}

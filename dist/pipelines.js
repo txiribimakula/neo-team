@@ -3,6 +3,7 @@
 import { aiChoice, effortName } from './ai-choice.js';
 import { markdown } from './jira.js';
 import { loginView } from './reviews.js';
+import { normalize, matchesQuery } from './search.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const when = value => value ? new Date(value).toLocaleString('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const branch = ref => String(ref ?? '').replace(/^refs\/heads\//, '');
@@ -44,11 +45,7 @@ function copilotLine(ui, demo, state) {
   return ` · <span class="${status && !status.isAuthenticated ? 'warning-text' : 'text-muted'}">${text}</span>${choice} <button class="link-button" data-action="pr-copilot-status">Comprobar</button>`;
 }
 
-const matches = (pipeline, filter) => {
-  const plain = value => String(value ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-  const haystack = plain(`${pipeline.name} ${folder(pipeline.path)} ${pipeline.repository?.name ?? ''}`);
-  return plain(filter).split(/\s+/).filter(Boolean).every(word => haystack.includes(word));
-};
+const matches = (pipeline, filter) => matchesQuery(filter, normalize(`${pipeline.name} ${folder(pipeline.path)} ${pipeline.repository?.name ?? ''}`));
 // Hides the rows that do not match, without redrawing the list.
 export function filterPipelines(ui, value) {
   ui.filter = value;

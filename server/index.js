@@ -201,7 +201,7 @@ function requireSession(req) {
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 // The server keeps running the code it started with, while the interface is read
 // from disk on every request: after an update, it asks to be restarted.
-const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url), new URL('../dist/maintenance-items.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
+const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url), new URL('../dist/maintenance-items.js', import.meta.url), new URL('../dist/search.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
 const startedCode = serverCode();
 let codeCheckedAt = 0, outdated = false;
 function serverOutdated() {
@@ -1084,7 +1084,7 @@ const server = http.createServer(async (req, res) => {
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
     const route = /^\/(planificacion|mi-iteracion|planes-prueba|mantenimiento|revision-prs|pipelines|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

@@ -6,7 +6,8 @@ export const groupLabels = { new: 'Sin empezar', active: 'En curso', verify: 'Ve
 export const GROUPS = Object.keys(groupLabels);
 export const EMPTY = '__empty__';
 export const DATE_RANGES = [['last:7', 'Últimos 7 días'], ['last:30', 'Últimos 30 días'], ['last:90', 'Últimos 90 días'], ['older:30', 'Hace más de 30 días'], ['older:90', 'Hace más de 90 días']];
-export const normalize = value => String(value ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase('es').trim();
+import { normalize, matchesQuery, compileQuery } from './search.js';
+export { normalize };
 
 // The fields both origins fill keep the references of Azure DevOps, so the filters
 // saved before keep working; the rest belong to one origin only.
@@ -91,7 +92,7 @@ export function filtersFrom(saved) {
   };
 }
 // Whether anything narrows the items, beyond leaving out the closed ones.
-export const narrowed = filters => !!(normalize(filters.text) || filters.states.length || filters.origin || filters.conditions.some(c => c.value));
+export const narrowed = filters => !!(compileQuery(filters.text) || filters.states.length || filters.origin || filters.conditions.some(c => c.value));
 
 export function matches(item, condition) {
   const value = valueOf(item, condition.field);
@@ -101,17 +102,16 @@ export function matches(item, condition) {
     const [mode, days] = condition.value.split(':'), age = (Date.now() - new Date(value)) / 86400000;
     return mode === 'last' ? age <= Number(days) : age > Number(days);
   }
-  if (condition.kind === 'text') return normalize(value).includes(normalize(condition.value));
+  if (condition.kind === 'text') return matchesQuery(condition.value, normalize(value));
   const many = valuesOf(item, condition.field);
   return many ? many.includes(condition.value) : String(value) === condition.value;
 }
-// Every word typed has to be somewhere in the item: its key, title, person, state…
+// What is typed is searched in the item (its key, title, person, state…) with the
+// syntax of search.js: every word, unless OR offers alternatives.
 const searchText = item => normalize(`${item.label} ${item.title} ${item.assignedTo} ${item.state} ${item.areaPath ?? ''} ${(item.tags ?? []).join(' ')} ${Object.values(item.values ?? {}).join(' ')}`);
 export function matchesText(item, text) {
-  const words = normalize(text).split(/\s+/).filter(Boolean);
-  if (!words.length) return true;
-  const haystack = searchText(item);
-  return words.every(word => haystack.includes(word));
+  const query = compileQuery(text);
+  return !query || query(searchText(item));
 }
 // The items the filters leave: `base` before choosing states (the summary counts it)
 // and `rows`, what is shown and acted on.
