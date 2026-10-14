@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDemo } from '../server/demo.js';
 import { LocalStore } from '../server/store.js';
-import { Planner, stageChanges, planReview, resolveConflict, workingCapacity, identityKey } from '../server/planner.js';
+import { Planner, stageChanges, planReview, resolveConflict, workingCapacity, identityKey, addComment, addComments } from '../server/planner.js';
 
 async function fixture(t, mode = 'azure') {
   const dir = await mkdtemp(join(tmpdir(),'neo-planner-'));
@@ -82,6 +82,19 @@ test('already-applied remote values reconcile without replaying a write',async t
   f.remote.set(1042,{...f.remote.get(1042),remainingWork:18,rev:2});
   const review=await f.planner.prepareReview();await f.planner.sync(review.token);
   assert.equal(f.calls.length,0);assert.equal(f.workspace().drafts[1042],undefined);
+});
+test('@<asignado> mentions whoever has each task, and one comment goes to several tasks or none',()=>{
+  const ws=createDemo();
+  addComments(ws,[1042,1038,1053],'@<asignado> revisa esto, @<lucia@example.test>');
+  assert.deepEqual(ws.pendingComments.map(c=>[c.id,c.text]),[[1042,'@<ana@example.test> revisa esto, @<lucia@example.test>'],[1038,'@<marcos@example.test> revisa esto, @<lucia@example.test>'],[1053,'revisa esto, @<lucia@example.test>']],'a task without anyone assigned loses the mention');
+  stageChanges(ws,1053,{assignedTo:'david@example.test'});
+  addComment(ws,1053,'Hola @<asignado>');
+  assert.equal(ws.pendingComments.at(-1).text,'Hola @<david@example.test>','the local assignment counts');
+  const before=ws.pendingComments.length;
+  assert.throws(()=>addComments(ws,[1042,1054],'@<asignado>'),/#1054 no tiene a nadie asignado/);
+  assert.throws(()=>addComments(ws,[1042,9999],'Hola'));
+  for (const ids of [[],[1042,1042],'1042']) assert.throws(()=>addComments(ws,ids,'Hola'));
+  assert.equal(ws.pendingComments.length,before,'a task that fails leaves the others without the comment');
 });
 test('a local edit invalidates a review token',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});const review=await f.planner.prepareReview();

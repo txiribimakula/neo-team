@@ -1117,10 +1117,25 @@ function updatePlanningView() {
   if((backlogQuery.trim() || backlogFilter) && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 
-// Comments are written on the card; @ offers the people of the sprint. Mentions are
-// sent as @<email>, which Azure DevOps turns into a real mention.
+// Comments are written on the card; @ offers the people of the sprint and «Asignado»,
+// whoever has each task. Mentions are sent as @<email>, which Azure DevOps turns into a
+// real mention; @<asignado> is resolved for each task when it is saved.
 const commentsOpen = new Set(), commentDrafts = {}, commentMentions = {};
 let mentionUi = null;
+const ASSIGNEE = { displayName: 'Asignado', assignee: true };
+// Tasks of the plan chosen with their box, to comment on all of them at once.
+const selectedTasks = new Set();
+function bulkBar() {
+  const count=selectedTasks.size;
+  return `<div id="bulk-bar" class="bulk-bar" ${count ? '' : 'hidden'}><span class="bulk-count">${plural(count,'tarea')}</span><div class="comment-box"><textarea rows="1" maxlength="4000" data-comment-for="bulk" data-focus="comment:bulk" placeholder="Comentario… @ para mencionar" aria-label="Comentario para las tareas seleccionadas">${escape(commentDrafts.bulk ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><button type="button" class="button small primary" data-action="add-comment" data-task="bulk">Comentar</button><button type="button" class="close" data-action="clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`;
+}
+// Choosing a box only touches its card and the bar, so the draft and the focus stay.
+function selectTask(id, on) {
+  if (on) selectedTasks.add(id); else selectedTasks.delete(id);
+  document.querySelectorAll(`.task-card[data-task="${id}"]`).forEach(card=>{card.classList.toggle('selected',on);const box=card.querySelector('[data-select-task]');if(box)box.checked=on;});
+  const bar=$('#bulk-bar');
+  if (bar) { bar.hidden=!selectedTasks.size; $('.bulk-count',bar).textContent=plural(selectedTasks.size,'tarea'); }
+}
 const pendingCommentsOf = id => (state.workspace.pendingComments ?? []).filter(c => c.id === id);
 function renderMentions(text) {
   return escape(text).replace(/@&lt;([^&\s]+@[^&\s]+)&gt;/g,(_,email)=>`<strong class="mention">@${escape(state.workspace.members.find(m=>(m.uniqueName || '').toLowerCase()===email.toLowerCase())?.displayName ?? email)}</strong>`);
@@ -1155,8 +1170,8 @@ function assigneeSelect(item) {
 function taskCard(item, inBacklog = false, next = null, assign = false) {
   const estimates = taskEstimates(item);
   const effort = estimates ? '' : item.points !== null ? `${number(item.points)} pts` : 'Sin estimar';
-  return `<article class="task-card ${item.modified ? 'modified' : ''}" draggable="${commentsOpen.has(item.id) ? 'false' : 'true'}" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
-    <div class="task-meta"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}<span class="card-actions">${commentButton(item)}${duplicateButton(item)}</span></div>
+  return `<article class="task-card ${item.modified ? 'modified' : ''} ${selectedTasks.has(item.id) ? 'selected' : ''}" draggable="${commentsOpen.has(item.id) ? 'false' : 'true'}" data-task="${item.id}" data-action="edit" data-focus="card:${item.id}" tabindex="0" role="button" aria-label="Editar #${item.id}: ${escape(item.title)}">
+    <div class="task-meta"><input type="checkbox" class="task-select" data-select-task="${item.id}" ${selectedTasks.has(item.id) ? 'checked' : ''} title="Seleccionar para comentar en varias a la vez" aria-label="Seleccionar #${item.id}"><span class="type-icon ${item.type === 'Bug' ? 'bug' : ''}">${item.type === 'Bug' ? '◆' : '▣'}</span><span>${taskId(item)}</span><span>· ${escape(item.type)}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}<span class="card-actions">${commentButton(item)}${duplicateButton(item)}</span></div>
     <p class="task-title">${item.project ? `<small class="pill">${escape(item.project)}</small> ` : ''}${escape(item.title)}</p>
     <div class="task-footer"><div class="task-tags">${item.tags.slice(0,2).map(t=>`<span class="tag">${escape(t)}</span>`).join('')}${item.priority === 1 ? '<span class="tag" style="background:#fceee3;color:#a6743e">P1</span>' : ''}</div>${effort ? `<span class="effort">${effort}</span>` : ''}</div>
     ${estimates}
@@ -1238,7 +1253,9 @@ function board(iteration, planned) {
   const quick=leftPanel==='backlog' ? `<div class="backlog-quick" role="group" aria-label="Filtros del backlog">${quickButton('overdue','Iteraciones pasadas','Tareas sin cerrar en iteraciones ya terminadas',backlog.filter(overdue).length)}${quickButton('childless','Sin hijos','Épicas, features e historias sin hijos',ws.effectiveItems.filter(childless).length)}</div>` : '';
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas por su nombre" aria-controls="backlog-tree" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   const extra=(title,note,items,cls='')=>items.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${filtered(items).map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';
-  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section></div>`;
+  // Only tasks still in the plan stay chosen (another iteration, a task moved away…).
+  for (const id of selectedTasks) if (!planned.some(i=>i.id===id)) selectedTasks.delete(id);
+  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count">${plural(planned.length,'tarea')}</span></div><div class="members-grid">${ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')}${extra('Otras personas','Responsables que no figuran en este equipo',outside)}</div></section>${bulkBar()}</div>`;
 }
 
 function render() {
@@ -1494,25 +1511,36 @@ async function downloadCapacity() {
   const differences=Object.keys(state.workspace.capacityDownloads?.[iteration.id]?.local ?? {}).length;
   toast(differences ? `Capacidad descargada. ${plural(differences,'diferencia','diferencias')} con tu copia local por validar.` : 'Capacidad descargada. Coincide con tu copia local.');
 }
+// The names picked with @ become @<email> (or @<asignado>), the longest first.
+const withMentions=(id,text)=>Object.entries(commentMentions[id] ?? {}).sort((a,b)=>b[0].length-a[0].length).reduce((result,[name,email])=>result.split(`@${name}`).join(`@<${email}>`),text);
+// `id`: a task, or «bulk» for the tasks chosen with their box.
 async function submitComment(id) {
-  let text=(commentDrafts[id] ?? '').trim();
+  if (id==='bulk') return submitBulkComment();
+  id=Number(id);
+  const text=(commentDrafts[id] ?? '').trim();
   if (!text) { $(`[data-comment-for="${id}"]`)?.focus(); return; }
-  for (const [name,email] of Object.entries(commentMentions[id] ?? {}).sort((a,b)=>b[0].length-a[0].length)) text=text.split(`@${name}`).join(`@<${email}>`);
-  await request('/api/comment',{id,text});
+  await request('/api/comment',{id,text:withMentions(id,text)});
   delete commentDrafts[id];delete commentMentions[id];mentionUi=null;review=null;render();
   $(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});
   toast('Comentario guardado. Se publicará al sincronizar.');
 }
-// @ offers the people in the sprint, filtered as the name is typed.
+async function submitBulkComment() {
+  const text=(commentDrafts.bulk ?? '').trim(), ids=[...selectedTasks];
+  if (!text || !ids.length) { $('[data-comment-for="bulk"]')?.focus(); return; }
+  await request('/api/comments',{ids,text:withMentions('bulk',text)});
+  delete commentDrafts.bulk;delete commentMentions.bulk;mentionUi=null;selectedTasks.clear();review=null;render();
+  toast(`Comentario guardado en ${plural(ids.length,'tarea')}. Se publicará al sincronizar.`);
+}
+// @ offers «Asignado» and the people in the sprint, filtered as the name is typed.
 function updateMentions(textarea) {
-  const id=Number(textarea.dataset.commentFor), before=textarea.value.slice(0,textarea.selectionStart), match=before.match(/(?:^|\s)@([^\s@<>]*)$/);
+  const id=textarea.dataset.commentFor, before=textarea.value.slice(0,textarea.selectionStart), match=before.match(/(?:^|\s)@([^\s@<>]*)$/);
   const list=textarea.parentElement.querySelector('.mention-list');
   if (!match) { mentionUi=null; list.hidden=true; return; }
-  const wanted=plain(match[1]), people=planningMembers().filter(m=>plain(`${m.displayName} ${m.uniqueName ?? ''}`).includes(wanted)).slice(0,8);
+  const wanted=plain(match[1]), people=[...(plain(ASSIGNEE.displayName).startsWith(wanted) ? [ASSIGNEE] : []),...planningMembers().filter(m=>plain(`${m.displayName} ${m.uniqueName ?? ''}`).includes(wanted))].slice(0,8);
   if (!people.length) { mentionUi=null; list.hidden=true; return; }
   const index=mentionUi?.id===id ? Math.min(mentionUi.index,people.length-1) : 0;
   mentionUi={id,start:before.length-match[1].length-1,end:textarea.selectionStart,people,index};
-  list.innerHTML=people.map((m,i)=>`<button type="button" role="option" class="mention-option" data-action="pick-mention" data-index="${i}" aria-selected="${i===index}"><span class="avatar c${state.workspace.members.indexOf(m)%4}">${escape(initials(m.displayName))}</span>${escape(m.displayName)}</button>`).join('');
+  list.innerHTML=people.map((m,i)=>`<button type="button" role="option" class="mention-option" data-action="pick-mention" data-index="${i}" aria-selected="${i===index}" ${m.assignee ? 'title="Quien tenga asignada cada tarea"' : ''}>${m.assignee ? '<span class="avatar assignee" aria-hidden="true">@</span>' : `<span class="avatar c${state.workspace.members.indexOf(m)%4}">${escape(initials(m.displayName))}</span>`}${escape(m.displayName)}</button>`).join('');
   list.hidden=false;
 }
 function pickMention(index) {
@@ -1521,7 +1549,7 @@ function pickMention(index) {
   const inserted=`@${person.displayName} `;
   textarea.value=textarea.value.slice(0,ui.start)+inserted+textarea.value.slice(ui.end);
   commentDrafts[ui.id]=textarea.value;
-  commentMentions[ui.id]={...commentMentions[ui.id],[person.displayName]:person.uniqueName || person.id};
+  commentMentions[ui.id]={...commentMentions[ui.id],[person.displayName]:person.assignee ? 'asignado' : person.uniqueName || person.id};
   const caret=ui.start+inserted.length;
   mentionUi=null;textarea.parentElement.querySelector('.mention-list').hidden=true;
   textarea.focus();textarea.setSelectionRange(caret,caret);
@@ -2123,7 +2151,8 @@ const actions = {
   'copy-capacity':copyCapacity,
   'download-hierarchy':downloadHierarchy,
   'toggle-comments':el=>{const id=Number(el.dataset.task);if(commentsOpen.has(id))commentsOpen.delete(id);else commentsOpen.add(id);updatePlanningView();if(commentsOpen.has(id))$(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});},
-  'add-comment':el=>submitComment(Number(el.dataset.task)),
+  'add-comment':el=>submitComment(el.dataset.task),
+  'clear-selection':()=>{for(const id of [...selectedTasks])selectTask(id,false);},
   'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
@@ -2208,7 +2237,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('a[href]')) return;
   const target = event.target.closest('[data-action]');
   // Fields and comments inside a card are edited in place; they do not open it.
-  if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments, .card-assignee')) return;
+  if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments, .card-assignee, .task-select')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
   if (event.target.closest('[data-assistant-cancel]')) { cancelAssistant(); return; }
   // The answer field of a stuck ticket is written in place, without opening it.
@@ -2231,7 +2260,7 @@ document.addEventListener('keydown', event => {
     commentBox.parentElement.querySelectorAll('.mention-option').forEach((option,i)=>option.setAttribute('aria-selected',String(i===mentionUi.index)));
     return;
   }
-  if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(Number(commentBox.dataset.commentFor)).catch(errorInModal); return; }
+  if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(commentBox.dataset.commentFor).catch(errorInModal); return; }
   if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell'](event.target).catch(errorInModal); return; }
   // Intro in the search updates what it leaves: a ticket's key brings that ticket.
   if (event.target.dataset?.maintenanceFilter === 'text' && event.key === 'Enter' && !event.isComposing && !pending && refreshTargets(state, tab === 'jira').jira) { event.preventDefault(); maintenanceRefresh().catch(errorInModal); return; }
@@ -2303,6 +2332,7 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
+  if ('selectTask' in el.dataset) { selectTask(Number(el.dataset.selectTask), el.checked); return; }
   if (el.dataset.maintenanceFilter) { if (el.tagName === 'SELECT') { filterMaintenance(el.dataset.maintenanceFilter, el.value, Number(el.dataset.index)); maintenanceFiltered(el); } return; }
   if ('maintenanceAdd' in el.dataset) { if (el.value) { const index = addMaintenanceCondition(el.value); maintenanceFiltered(); $(`[data-maintenance-filter="condition"][data-index="${index}"]`)?.focus(); } return; }
   if (el.dataset.testPlansFilter) { filterTestPlans(testPlansSnapshot, el.dataset.testPlansFilter, el.value); if (el.tagName === 'SELECT') el.classList.toggle('active', !!el.value); return; }

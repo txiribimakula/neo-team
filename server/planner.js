@@ -86,12 +86,29 @@ export function setDescription(workspace, id, text, field = 'System.Description'
 export const descriptionHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]).replace(/\r?\n/g, '<br>');
 // Comments are written locally and published in Azure DevOps when synchronizing.
 // Mentions are kept as @<email>, which Azure turns into a real mention.
-export function addComment(workspace, id, text) {
+// @<asignado> mentions whoever has each task assigned; a task without one loses it.
+export const ASSIGNEE_MENTION = '@<asignado>';
+function withAssignee(workspace, item, text) {
+  if (!text.includes(ASSIGNEE_MENTION)) return text;
+  const name = workspace.members.find(m => identityKey(m) === item.assignedTo)?.displayName ?? item.assigneeName;
+  const mention = item.assignedTo?.includes('@') ? `@<${item.assignedTo}>` : item.assignedTo && name ? `@${name}` : '';
+  return (mention ? text.split(ASSIGNEE_MENTION).join(mention) : text.split(`${ASSIGNEE_MENTION} `).join('').split(ASSIGNEE_MENTION).join('')).trim();
+}
+function newComment(workspace, id, text) {
   const item = workspace && effectiveItems(workspace).find(i => i.id === id);
   if (!item || item.contextOnly) throw new Error('La tarea no pertenece a esta planificación.');
-  const body = typeof text === 'string' ? text.trim() : '';
-  if (!body || body.length > 4000) throw new Error('Escribe un comentario de hasta 4000 caracteres.');
-  workspace.pendingComments = [...(workspace.pendingComments ?? []), { key: randomUUID(), id, text: body, createdAt: new Date().toISOString() }];
+  const body = typeof text === 'string' ? withAssignee(workspace, item, text.trim()) : '';
+  if (!body || body.length > 4000) throw new Error(`Escribe un comentario de hasta 4000 caracteres${text?.includes?.(ASSIGNEE_MENTION) ? ` (#${id} no tiene a nadie asignado)` : ''}.`);
+  return { key: randomUUID(), id, text: body, createdAt: new Date().toISOString() };
+}
+export function addComment(workspace, id, text) {
+  workspace.pendingComments = [...(workspace.pendingComments ?? []), newComment(workspace, id, text)];
+}
+// The same comment on several tasks: all of them or none.
+export function addComments(workspace, ids, text) {
+  if (!Array.isArray(ids) || !ids.length || ids.length > 500 || new Set(ids).size !== ids.length) throw new Error('Elige las tareas que comentar.');
+  const comments = ids.map(id => newComment(workspace, id, text));
+  workspace.pendingComments = [...(workspace.pendingComments ?? []), ...comments];
 }
 export function discardComment(workspace, key) {
   const before = workspace?.pendingComments?.length ?? 0;

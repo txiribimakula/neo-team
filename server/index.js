@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
+import { Planner, createLocalItem, duplicateItem, addComment, addComments, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, demoTestPlans, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
 import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
@@ -238,7 +238,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
+const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -981,9 +981,9 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/create') {
           const data=structuredClone(store.data);createLocalItem(data[data.mode],input);await store.save(data);planner.review=null;
-        } else if (path === '/api/comment' || path === '/api/comment-discard') {
+        } else if (path === '/api/comment' || path === '/api/comments' || path === '/api/comment-discard') {
           const data=structuredClone(store.data);
-          if(path==='/api/comment') addComment(data[data.mode],input.id,input.text); else discardComment(data[data.mode],input.key);
+          if(path==='/api/comment') addComment(data[data.mode],input.id,input.text); else if(path==='/api/comments') addComments(data[data.mode],input.ids,input.text); else discardComment(data[data.mode],input.key);
           await store.save(data);planner.review=null;
         } else if (path === '/api/duplicate') {
           const data=structuredClone(store.data);duplicateItem(data[data.mode],input.id);await store.save(data);planner.review=null;
