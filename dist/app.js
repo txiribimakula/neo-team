@@ -1,6 +1,6 @@
 import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
-import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, maintenanceViewName, setMaintenanceView, setMaintenanceOrigin, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState } from './maintenance.js';
+import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, maintenanceViewName, setMaintenanceView, setMaintenanceOrigin, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState, maintenanceSelection, isMaintenanceSelected, selectMaintenance, clearMaintenanceSelection } from './maintenance.js';
 import { myIterationView } from './my-iteration.js';
 import { testPlansView, filterTestPlans, toggleTestPlanOutcome, setTestPlansView, resetTestPlanFilters, rememberedTestPlan, chooseTestPlan, focusTestPlans, useTestPlansScope, testPlansScopeOf } from './test-plans.js';
 import { reviewsView, publishConfirmation, localFolder, loginSteps } from './reviews.js';
@@ -1326,8 +1326,9 @@ function render() {
   if (securitySnapshot?.scope !== JSON.stringify([state.config?.organization, state.config?.project])) securitySnapshot = null;
   if (maintenanceSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) maintenanceSnapshot = null;
   if (testPlansSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) testPlansSnapshot = null;
+  syncMaintenanceBar();
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
-  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSources(), state, { setup: maintenanceSetup, tools: jiraGear() }); syncJiraScope(); return; }
+  if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSources(), state, { setup: maintenanceSetup, tools: jiraGear() }); syncJiraScope(); syncMaintenanceBar(); return; }
   if (tab === 'my-iteration') { $('#app').innerHTML = myIterationView(myIterationSnapshot, state); return; }
   if (tab === 'test-plans') { $('#app').innerHTML = testPlansView(testPlansSnapshot, state); return; }
   if (tab === 'reviews') { $('#app').innerHTML = reviewsView(state, prUi); return; }
@@ -1748,13 +1749,51 @@ function renderJira() {
   // The head of Mantenimiento and its filters: the board shows, and Empezar takes, the tickets they leave.
   const sources = maintenanceSources(), scope = jiraUi.board?.tickets ? maintenanceScope(sources, state) : null;
   const head = tools => maintenanceHead(sources, state, { board: true, tools });
-  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread(), head, shown: scope?.keys ? boardKeys(sources, state) : null, filtered: scope?.keys?.length ?? null }, prUi.copilot);
+  $('#app').innerHTML = jiraView(state, { ...jiraUi, assistantClosed: jiraAssistantClosed, to, unread: jiraUnread(), head, shown: scope?.keys ? boardKeys(sources, state) : null, filtered: scope?.keys?.length ?? null, selected: new Set(maintenanceSelection()) }, prUi.copilot);
+  syncMaintenanceBar();
   const nextLog = $('#app .jira-activity ol');
   if (nextLog && logScroll > 0) nextLog.scrollTop = logScroll + nextLog.scrollHeight - logHeight;
   restoreJiraForm();
   if (focus) $(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
   askJiraComment();
   syncJiraScope();
+}
+// The bar that comments on every item chosen in Mantenimiento lives outside the page,
+// so the board redrawing while the agents work never touches what is being written.
+// The comment is published at once in Jira or Azure DevOps: Mantenimiento has no sync.
+function syncMaintenanceBar() {
+  const chosen = ['maintenance', 'jira'].includes(tab) ? maintenanceSelection() : [], count = chosen.length;
+  let bar = $('#maintenance-bulk');
+  if (!bar && !count) return;
+  if (!bar) {
+    document.body.insertAdjacentHTML('beforeend', `<div id="maintenance-bulk" class="bulk-bar" hidden><span class="bulk-count"></span><div class="comment-box"><textarea rows="2" maxlength="4000" data-maintenance-comment placeholder="Comentario…" aria-label="Comentario para los elementos seleccionados"></textarea></div><button type="button" class="button small primary" data-action="maintenance-comment" title="Publicar en cada uno (Ctrl+Enter)">Comentar</button><button type="button" class="close" data-action="maintenance-clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`);
+    bar = $('#maintenance-bulk');
+  }
+  bar.hidden = !count;
+  const all = $('#app [data-maintenance-select-all][data-partial]');
+  if (all) all.indeterminate = true;
+  $('.bulk-count', bar).textContent = plural(count, chosen.every(id => id.startsWith('jira:')) ? 'ticket' : 'elemento');
+}
+// Choosing a box only touches the boxes, their rows and the bar.
+function applyMaintenanceSelection() {
+  const boxes = [...document.querySelectorAll('#app [data-maintenance-select]')];
+  for (const box of boxes) { const on = isMaintenanceSelected(box.dataset.maintenanceSelect); box.checked = on; box.closest('.jira-card, tr, li')?.classList.toggle('selected', on); }
+  const all = $('#app [data-maintenance-select-all]');
+  if (all) { const on = boxes.filter(box => box.checked).length; all.checked = !!boxes.length && on === boxes.length; all.indeterminate = on > 0 && on < boxes.length; }
+  syncMaintenanceBar();
+}
+async function submitMaintenanceComment() {
+  const box = $('#maintenance-bulk textarea'), text = box.value.trim(), ids = maintenanceSelection();
+  if (!text || !ids.length) { box.focus(); return; }
+  const targets = ids.map(id => { const at = id.indexOf(':'), origin = id.slice(0, at), key = id.slice(at + 1); return { origin, key: origin === 'azure' ? Number(key) : key }; });
+  const data = await request('/api/maintenance-comment', { targets, text });
+  if (data.jira) jiraUi.board = data.jira;
+  for (const id of data.posted) selectMaintenance(id, false);
+  if (!data.failed.length) box.value = '';
+  render();
+  const simulated = state.mode === 'demo' ? ' (simulado)' : '';
+  if (data.failed.length) toast(`Publicado en ${data.posted.length} de ${ids.length}${simulated}. Sin publicar: ${data.failed.map(f => `${f.name}: ${f.error}`).join(' · ')}`, 'error');
+  else toast(`Comentario publicado en ${plural(data.posted.length, ids.every(id => id.startsWith('jira:')) ? 'ticket' : 'elemento')}${simulated}.`);
 }
 // What Mantenimiento shows: the Jira board and the Azure DevOps query, as far as each is there.
 const maintenanceSources = () => ({ azure: maintenanceSnapshot, jira: jiraUi.board?.tickets ? jiraUi.board : null });
@@ -2173,6 +2212,8 @@ const actions = {
   'toggle-comments':el=>{const id=Number(el.dataset.task);if(commentsOpen.has(id))commentsOpen.delete(id);else commentsOpen.add(id);updatePlanningView();if(commentsOpen.has(id))$(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});},
   'add-comment':el=>submitComment(el.dataset.task),
   'clear-selection':()=>{for(const id of [...selectedTasks])selectTask(id,false);},
+  'maintenance-comment':()=>submitMaintenanceComment(),
+  'maintenance-clear-selection':()=>{clearMaintenanceSelection();applyMaintenanceSelection();},
   'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
@@ -2260,6 +2301,8 @@ document.addEventListener('click', async event => {
   if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments, .card-assignee, .task-select')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
   if (event.target.closest('[data-assistant-cancel]')) { cancelAssistant(); return; }
+  // Choosing a ticket with its box does not open it.
+  if (event.target.closest('[data-maintenance-select]')) return;
   // The answer field of a stuck ticket is written in place, without opening it.
   if (event.target.closest('.jira-answer') && !event.target.closest('button')) return;
   // The list of what an agent lacks closes when clicking anywhere else.
@@ -2281,6 +2324,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (commentBox && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitComment(commentBox.dataset.commentFor).catch(errorInModal); return; }
+  if ('maintenanceComment' in (event.target.dataset ?? {}) && event.key==='Enter' && (event.metaKey || event.ctrlKey) && !pending) { event.preventDefault(); submitMaintenanceComment().catch(errorInModal); return; }
   if (event.target.dataset?.jiraTell !== undefined && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !pending) { event.preventDefault(); actions['jira-tell'](event.target).catch(errorInModal); return; }
   // Intro in the search updates what it leaves: a ticket's key brings that ticket.
   if (event.target.dataset?.maintenanceFilter === 'text' && event.key === 'Enter' && !event.isComposing && !pending && refreshTargets(state, tab === 'jira').jira) { event.preventDefault(); maintenanceRefresh().catch(errorInModal); return; }
@@ -2353,6 +2397,8 @@ document.addEventListener('change',async event=>{
   const el=event.target;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
   if ('selectTask' in el.dataset) { selectTask(Number(el.dataset.selectTask), el.checked); return; }
+  if ('maintenanceSelect' in el.dataset) { selectMaintenance(el.dataset.maintenanceSelect, el.checked); applyMaintenanceSelection(); return; }
+  if ('maintenanceSelectAll' in el.dataset) { for (const box of document.querySelectorAll('#app [data-maintenance-select]')) selectMaintenance(box.dataset.maintenanceSelect, el.checked); applyMaintenanceSelection(); return; }
   if (el.dataset.maintenanceFilter) { if (el.tagName === 'SELECT') { filterMaintenance(el.dataset.maintenanceFilter, el.value, Number(el.dataset.index)); maintenanceFiltered(el); } return; }
   if ('maintenanceAdd' in el.dataset) { if (el.value) { const index = addMaintenanceCondition(el.value); maintenanceFiltered(); $(`[data-maintenance-filter="condition"][data-index="${index}"]`)?.focus(); } return; }
   if (el.dataset.testPlansFilter) { filterTestPlans(testPlansSnapshot, el.dataset.testPlansFilter, el.value); if (el.tagName === 'SELECT') el.classList.toggle('active', !!el.value); return; }

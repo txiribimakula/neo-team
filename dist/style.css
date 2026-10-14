@@ -254,9 +254,14 @@ body.jira-fit .jira-main-board>:not(.jira-board){flex:none}
 .status-group.st-new .status-group-name{color:#55657c}.status-group.st-active .status-group-name{color:#2f5f9a}.status-group.st-verify .status-group-name{color:#8a6408}.status-group.st-closed .status-group-name{color:#2b6822}
 .status-key{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:white;border-radius:999px;padding:4px 11px 4px 9px;font-size:13px;color:var(--ink)}.status-key i{width:10px;height:10px;border-radius:50%;background:var(--st-bar)}.status-key b{font-weight:700;color:var(--st-fg)}
 .status-key:hover{border-color:var(--st-bar)}.status-key[aria-pressed=true]{background:var(--st-bg);border-color:var(--st-bar);color:var(--st-fg)}
-.maintenance-table td{vertical-align:top}.maintenance-table td:nth-child(1),.maintenance-table td:nth-child(5),.maintenance-table td:last-child{white-space:nowrap}
+.maintenance-table td{vertical-align:top}.maintenance-table td:nth-child(2),.maintenance-table td:nth-child(6),.maintenance-table td:last-child{white-space:nowrap}
 .maintenance-table tr.st>td:first-child{box-shadow:inset 4px 0 var(--st-bar)}.maintenance-table tr.st-closed .table-title{color:#5d6b62}
 .maintenance-table .task-tags{margin-top:6px}
+/* Items of Mantenimiento chosen with their box, for the bar that comments on all of them. */
+.maintenance-table .select-cell{width:30px;padding-right:0}.maintenance-table .select-cell .task-select{margin-top:2px}
+.maintenance-table tr.selected>td,.person-card li.selected{background:#f3f8ee}.person-card li .task-select{margin-top:3px}
+.jira-card.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}.jira-card header .task-select{margin-right:3px}
+body:has(#maintenance-bulk:not([hidden])) #app{padding-bottom:110px}
 .maintenance-people{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:14px;align-items:start}
 .person-card{background:white;border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
 .person-card header{display:flex;align-items:center;gap:10px}.person-card header strong{flex:1;min-width:0;overflow-wrap:anywhere;font-size:14px}.person-card .avatar{width:32px;height:32px;font-size:11px}.avatar.none{background:#eef1ec;color:var(--muted)}

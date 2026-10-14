@@ -271,4 +271,12 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.deepEqual([unbrought.data.result.collect.downloaded, unbrought.data.jira.tickets.some(t => t.key === 'NEO-103')], [0, false]);
   assert.ok((await post('/api/jira-refresh', { filters: { text: 'NEO-103' } })).data.jira.tickets.some(t => t.key === 'NEO-103'), 'filtering that one ticket brings it back');
   assert.equal((await post('/api/jira-delete', { key: 'NEO-999' })).status, 404);
+  // One comment from Mantenimiento goes at once to every item chosen (in the example,
+  // Jira keeps it in memory and Azure DevOps is simulated); the activity tells it.
+  const commented = await post('/api/maintenance-comment', { targets: [{ origin: 'jira', key: 'NEO-101' }, { origin: 'jira', key: 'NEO-102' }, { origin: 'azure', key: 2101 }], text: ' Revisado.\nSegunda línea. ' });
+  assert.equal(commented.status, 200);
+  assert.deepEqual([commented.data.posted, commented.data.failed], [['jira:NEO-101', 'jira:NEO-102', 'azure:2101'], []]);
+  const told = commented.data.jira.pipeline.feed.at(-1);
+  assert.deepEqual([told.family, told.title, told.meta, told.detail], ['person', 'Comentario publicado en Jira en 2 tickets', 'NEO-101, NEO-102', 'Revisado.\nSegunda línea.']);
+  for (const [input, why] of [[{ targets: [{ origin: 'jira', key: 'NEO-101' }], text: '  ' }, 'an empty comment'], [{ targets: [], text: 'Hola' }, 'nothing chosen'], [{ targets: [{ origin: 'azure', key: '2101' }], text: 'Hola' }, 'an id that is not a number'], [{ targets: [{ origin: 'jira', key: '../x' }], text: 'Hola' }, 'a key that is not one'], [{ targets: [{ origin: 'jira', key: 'NEO-101' }], text: 'x'.repeat(4001) }, 'a comment too long']]) assert.equal((await post('/api/maintenance-comment', input)).status, 400, why);
 });

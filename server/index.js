@@ -335,7 +335,7 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/maintenance-comment': 'Publicando el comentario', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
       operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pipelines', '/api/pipeline-review', '/api/assistant','/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
@@ -731,6 +731,36 @@ const server = http.createServer(async (req, res) => {
           await pipeline.tickets.update(key, t => ({ ...t, autoLock: input.locked }));
           if (!input.locked) pipeline.setAuto(pipeline.auto);
           return json(res, { jira: await jiraBoard() });
+        }
+        if (path === '/api/maintenance-comment') {
+          // One comment written by the person, published at once in each item chosen in
+          // Mantenimiento: Jira tickets by key and Azure DevOps items by id. Each one is
+          // tried; what fails is told without undoing the rest.
+          const text = typeof input.text === 'string' ? input.text.trim() : '';
+          if (!text || text.length > 4000) throw fail('Escribe el comentario (hasta 4000 caracteres).');
+          if (!Array.isArray(input.targets) || !input.targets.length || input.targets.length > 200) throw fail('Elige entre 1 y 200 elementos.');
+          const targets = input.targets.map(t => t?.origin === 'jira' ? { origin: 'jira', key: checkKey(t.key) }
+            : t?.origin === 'azure' && Number.isInteger(t.key) && t.key > 0 ? { origin: 'azure', key: t.key } : null);
+          if (targets.some(t => !t)) throw fail('Elemento no válido.');
+          const demo = store.data.mode === 'demo', wantsJira = targets.some(t => t.origin === 'jira'), wantsAzure = targets.some(t => t.origin === 'azure');
+          if (wantsJira && !jiraSettings()) throw fail('Configura Jira primero.');
+          if (wantsAzure && !demo && !store.data.config?.project) throw fail('Conecta un proyecto de Azure DevOps.');
+          const jira = wantsJira ? (demo ? new DemoJiraClient() : new JiraClient(jiraSettings(), await jiraToken())) : null;
+          const config = wantsAzure && !demo ? configFrom(store.data.config, false) : null;
+          if (config) { operation = { ...operation, message: 'Conectando con Azure DevOps…', updatedAt: Date.now() }; await azure.open(config); }
+          const posted = [], failed = [];
+          for (const [index, target] of targets.entries()) {
+            const id = `${target.origin}:${target.key}`, name = target.origin === 'jira' ? target.key : `#${target.key}`;
+            operation = { ...operation, message: `Publicando en ${name} (${index + 1} de ${targets.length})…`, counts: { done: index, total: targets.length }, updatedAt: Date.now() };
+            try {
+              if (target.origin === 'jira') await jira.addComment(target.key, text);
+              else if (config) await azure.addComment(config, target.key, text);
+              posted.push(id);
+            } catch (error) { failed.push({ id, name, error: error.message }); }
+          }
+          const keys = targets.filter(t => t.origin === 'jira' && posted.includes(`jira:${t.key}`)).map(t => t.key);
+          if (keys.length) jiraPipeline().feed.add({ family: 'person', ...(keys.length === 1 ? { key: keys[0] } : { meta: keys.join(', ') }), title: `Comentario publicado en Jira${keys.length > 1 ? ` en ${keys.length} tickets` : ''}`, detail: text });
+          return json(res, { posted, failed, ...(wantsJira ? { jira: await jiraBoard() } : {}) });
         }
         if (path === '/api/jira-comment') {
           // Only with the person's confirmation does a step's comment reach Jira.

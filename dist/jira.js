@@ -156,7 +156,7 @@ function pullRequestPill(review, demo) {
   return !demo && pr.url ? `<a class="pill jira-pr" href="${escape(pr.url)}" target="_blank" rel="noopener noreferrer" title="${escape(title)}">PR ${escape(pr.id)}${open ? ` · ${open}` : ''}</a>` : `<span class="pill jira-pr" title="${escape(title)}">PR ${escape(pr.id)}${open ? ` · ${open}` : ''}</span>`;
 }
 const newsText = news => `Desde Jira: ${[news.comments && `${news.comments} comentario${news.comments === 1 ? '' : 's'}`, news.attachments && `${news.attachments} adjunto${news.attachments === 1 ? '' : 's'}`].filter(Boolean).join(' y ')} nuevo${(news.comments ?? 0) + (news.attachments ?? 0) === 1 ? '' : 's'}. Ábrelo para verlo`;
-function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued = false, lacking = []) {
+function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued = false, lacking = [], selected = false) {
   const live = running?.key === ticket.key ? running : null;
   const status = live ? 'running' : ticket.status;
   const last = live?.activity?.at(-1);
@@ -174,9 +174,9 @@ function card(ticket, running, mode = 'auto', drafts = {}, demo = false, queued 
   const awaiting = !live && !lacking.length && mode === 'ask' && ticket.status === 'pending' && !ticket.locked;
   // The lock, ▶ (or ■) and sharing its state on the left, and ⏩ on the right.
   const actions = ticket.stage === 'done' ? '' : `${lockButton(ticket)}${run}${shareButtons(ticket, live)}${live ? '' : doneButton(ticket)}`;
-  return `<article class="jira-card type-${kindOf(ticket.type)} status-${escape(status)}${awaiting ? ' awaiting' : ''}${queued && !live ? ' queued' : ''}${ticket.locked ? ' locked' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
+  return `<article class="jira-card type-${kindOf(ticket.type)} status-${escape(status)}${awaiting ? ' awaiting' : ''}${queued && !live ? ' queued' : ''}${ticket.locked ? ' locked' : ''}${selected ? ' selected' : ''}" data-action="jira-open-ticket" data-key="${escape(ticket.key)}" tabindex="0" aria-label="${escape(ticket.key)} · ${escape(ticket.summary)}">
     <span class="jira-card-type" title="${escape(ticket.type || 'Sin tipo')}" aria-hidden="true"></span>
-    <header>${!demo && ticket.url ? `<a class="jira-key" href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">${escape(ticket.key)}<small aria-hidden="true">↗</small></a>` : `<strong>${escape(ticket.key)}</strong>`}${folder}<span class="jira-status" title="${escape(STATUS[status] ?? status)}">${live ? '<span class="spinner" aria-hidden="true"></span>' : ''}</span>${priorityIcon(ticket.priority)}</header>
+    <header><input type="checkbox" class="task-select" data-maintenance-select="jira:${escape(ticket.key)}" ${selected ? 'checked' : ''} title="Seleccionar para comentar en varios a la vez" aria-label="Seleccionar ${escape(ticket.key)}">${!demo && ticket.url ? `<a class="jira-key" href="${escape(ticket.url)}" target="_blank" rel="noopener noreferrer" title="Abrir en Jira">${escape(ticket.key)}<small aria-hidden="true">↗</small></a>` : `<strong>${escape(ticket.key)}</strong>`}${folder}<span class="jira-status" title="${escape(STATUS[status] ?? status)}">${live ? '<span class="spinner" aria-hidden="true"></span>' : ''}</span>${priorityIcon(ticket.priority)}</header>
     <span class="jira-card-title">${escape(ticket.summary)}</span>
     <span class="jira-card-foot">${assigneeView(ticket.assignee)}<span class="jira-card-end">${ticket.jiraStatus ? `<span class="tag jira-card-status" title="Estado en Jira: ${escape(ticket.jiraStatus)}">${escape(ticket.jiraStatus)}</span>` : ''}${easeView(ticket.ease)}</span></span>
     ${actions ? `<span class="jira-card-actions">${actions}</span>` : ''}
@@ -292,7 +292,7 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
 }
 
 // `shown`: the keys the filters of Mantenimiento leave (all, without it); `head`, its head.
-function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, warn = null, assistantClosed = false, head = null, feedOpen = new Set(), to = null, unread = 0, screens = null, filtered = null) {
+function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, warn = null, assistantClosed = false, head = null, feedOpen = new Set(), to = null, unread = 0, screens = null, filtered = null, selected = null) {
   const missing = missingOf(board, copilot);
   const visible = shown ? board.tickets.filter(t => shown.has(t.key)) : board.tickets;
   const columns = COLUMNS.map(column => {
@@ -303,7 +303,7 @@ function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, 
     // An agent that lacks something does not run.
     const lacking = lackingOf(column.id, missing);
     const warning = warnView(column.id, column.name, lackingOf(column.id, missing, true), warn === column.id);
-    return `<section class="jira-column${active ? ' is-active' : ''} mode-${mode}" aria-label="${escape(column.name)}"><header><h2><span class="jira-column-name">${escape(column.name)}<span class="count" title="Tickets en ${escape(column.name)}">${tickets.length}</span>${warning}</span>${column.tier ? `<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>` : ''}</h2><div class="jira-column-tools">${lights}${column.tier ? modelSelect(column, board.settings, board.defaults, copilot) : ''}</div></header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, mode, drafts, board.settings.demo, !!board.pipeline?.queue?.includes(t.key) || board.pipeline?.focus === t.key, lacking)).join('')}</div></section>`;
+    return `<section class="jira-column${active ? ' is-active' : ''} mode-${mode}" aria-label="${escape(column.name)}"><header><h2><span class="jira-column-name">${escape(column.name)}<span class="count" title="Tickets en ${escape(column.name)}">${tickets.length}</span>${warning}</span>${column.tier ? `<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>` : ''}</h2><div class="jira-column-tools">${lights}${column.tier ? modelSelect(column, board.settings, board.defaults, copilot) : ''}</div></header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, mode, drafts, board.settings.demo, !!board.pipeline?.queue?.includes(t.key) || board.pipeline?.focus === t.key, lacking, !!selected?.has(`jira:${t.key}`))).join('')}</div></section>`;
   }).join('');
   const error = board.pipeline?.error ? `<p class="inline-error">${escape(board.pipeline.error)}</p>` : '';
   // Without a Copilot session the agents cannot work: how to sign in, as in pull request reviews.
@@ -510,7 +510,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(`${ui.head ? ui.head('') : ''}${settingsView(state.jira)}`);
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.answers, ui.shown ?? null, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.head ?? null, ui.feedOpen, ui.to, ui.unread, ui.screens, ui.filtered ?? null));
+  return page(boardView(board, copilot, ui.answers, ui.shown ?? null, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.head ?? null, ui.feedOpen, ui.to, ui.unread, ui.screens, ui.filtered ?? null, ui.selected ?? null));
 }
 
 export function settingsFrom(form) {

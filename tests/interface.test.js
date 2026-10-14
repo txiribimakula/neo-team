@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reviewsView, publishConfirmation } from '../dist/reviews.js';
-import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, toggleMaintenanceState, addMaintenanceCondition, removeMaintenanceCondition, setMaintenanceView, setMaintenanceOrigin, setMaintenanceIncludeClosed } from '../dist/maintenance.js';
+import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, toggleMaintenanceState, addMaintenanceCondition, removeMaintenanceCondition, setMaintenanceView, setMaintenanceOrigin, setMaintenanceIncludeClosed, selectMaintenance, maintenanceSelection, clearMaintenanceSelection } from '../dist/maintenance.js';
 import { jiraItems, filterItems, filtersFrom } from '../dist/maintenance-items.js';
 
 const review = () => ({
@@ -66,7 +66,7 @@ test('maintenance colors states by group, filters by any field and groups by per
   const settings={type:'Issue',states,closedStates:['Closed'],verifyStates:['Ready for Test','Resolved']};
   const state={mode:'demo',maintenanceSettings:settings}, view=()=>maintenanceView({azure:snapshot},state);
   const html=view();
-  assert.match(html,/<tr class="st st-closed st-t0"><td>#5/);
+  assert.match(html,/<tr class="st st-closed st-t0"><td class="select-cell"><input type="checkbox" class="task-select" data-maintenance-select="azure:5" [^>]*><\/td><td>#5/);
   assert.match(html,/class="pill st st-verify st-t0"[^>]*>Ready for Test/);
   assert.match(html,/class="pill st st-verify st-t1"[^>]*>Resolved/,'states of a group get different tones');
   assert.match(html,/Verificación<b>2<\/b>/);
@@ -84,5 +84,28 @@ test('maintenance colors states by group, filters by any field and groups by per
   const people=view();
   assert.ok(people.indexOf('Ana García')<people.indexOf('Sin asignar')&&people.indexOf('Marcos Ruiz')<people.indexOf('Sin asignar'),'unassigned items go last');
   assert.equal((people.match(/class="person-card"/g)||[]).length,3);
+});
+test('items of Mantenimiento are chosen with their box to comment on all of them', t => {
+  t.after(()=>{clearMaintenanceSelection();resetMaintenanceFilters();setMaintenanceView('board');});
+  setMaintenanceView('list');
+  const states=[{name:'New',category:'proposed'},{name:'Active',category:'inprogress'}];
+  const snapshot={demo:true,type:'Issue',states,closedStates:[],verifyStates:[],fields:[],issues:[1,2,3].map(id=>({id,title:`Elemento ${id}`,state:'New',assignedTo:'',tags:[],values:{}}))};
+  const state={mode:'demo',maintenanceSettings:{type:'Issue',states,closedStates:[],verifyStates:[]}}, view=(azure=snapshot)=>maintenanceView({azure},state);
+  assert.match(view(),/data-maintenance-select-all(?![^>]*(checked|data-partial))/,'nothing chosen: the header box is clear');
+  selectMaintenance('azure:2',true);
+  const html=view();
+  assert.match(html,/<tr class="[^"]* selected"><td class="select-cell"><input type="checkbox" class="task-select" data-maintenance-select="azure:2" checked/);
+  assert.match(html,/data-maintenance-select-all\s+data-partial/,'some chosen: the header box is partial');
+  filterMaintenance('text','Elemento 1');
+  assert.doesNotMatch(view(),/azure:2/);
+  assert.deepEqual(maintenanceSelection(),['azure:2'],'filtering keeps what was chosen, to gather it from several searches');
+  filterMaintenance('text','');
+  setMaintenanceView('people');
+  assert.match(view(),/<li class="[^"]* selected"><input type="checkbox" class="task-select" data-maintenance-select="azure:2" checked/,'the people view chooses too');
+  view({...snapshot,issues:snapshot.issues.filter(i=>i.id!==2)});
+  assert.deepEqual(maintenanceSelection(),[],'an item that is gone is no longer chosen');
+  selectMaintenance('azure:1',true);
+  maintenanceView({azure:snapshot},{...state,mode:'azure'});
+  assert.deepEqual(maintenanceSelection(),[],'changing to real data starts over');
 });
 

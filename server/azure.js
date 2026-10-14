@@ -440,8 +440,10 @@ export class AzureGateway {
     if (!result || typeof result !== 'object' || Array.isArray(result) || Object.values(result).some(value => typeof value !== 'string')) throw new Error(`No se pudo leer la descripción de #${id}.`);
     return result;
   }
+  // In Markdown a lone line break joins the lines: each one is kept as a hard break, so
+  // a comment written in several lines reads as written.
   async addComment(config, id, text) {
-    return this.call('wit_work_item_comment_write', { action: 'add', project: config.project, workItemId: id, text, format: 'Markdown' });
+    return this.call('wit_work_item_comment_write', { action: 'add', project: config.project, workItemId: id, text: text.replace(/([^\n])\n(?!\n)/g, '$1  \n'), format: 'Markdown' });
   }
   async update(config, id, revision, fields) {
     const fieldNames = { title:'System.Title', assignedTo: 'System.AssignedTo', iterationPath: 'System.IterationPath', priority: 'Microsoft.VSTS.Common.Priority', remainingWork: 'Microsoft.VSTS.Scheduling.RemainingWork', originalEstimate: 'Microsoft.VSTS.Scheduling.OriginalEstimate', state: 'System.State' };

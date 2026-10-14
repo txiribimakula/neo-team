@@ -485,7 +485,7 @@ test('the ticket popup has a tab per completed step and the answer field while s
   assert.match(status, /<span class="jira-card-foot"><span class="jira-assignee"[\s\S]*?Lucía Martín<\/span><\/span><span class="jira-card-end"><span class="tag jira-card-status" title="Estado en Jira: Tareas por hacer">Tareas por hacer<\/span>/, 'the status in Jira goes beside who has the ticket');
   assert.doesNotMatch(status.match(/<span class="jira-card-meta">[\s\S]*?<\/article>/)[0], /Tareas por hacer/, 'and not in the bottom row');
   assert.doesNotMatch(at('review'), /jira-rewind/, 'there is no rewinding back');
-  assert.match(cardHtml, /<header><a class="jira-key"[^>]*>NEO-3<small[^>]*>↗<\/small><\/a><button class="icon-button jira-tool jira-card-folder" data-action="jira-open-folder" data-key="NEO-3" title="Abrir su carpeta"/, 'its folder opens from right after its key');
+  assert.match(cardHtml, /<header><input type="checkbox" class="task-select" data-maintenance-select="jira:NEO-3"[^>]*><a class="jira-key"[^>]*>NEO-3<small[^>]*>↗<\/small><\/a><button class="icon-button jira-tool jira-card-folder" data-action="jira-open-folder" data-key="NEO-3" title="Abrir su carpeta"/, 'its folder opens from right after its key');
   assert.match(cardHtml, /<span class="jira-card-tools">[\s\S]*?<button class="icon-button jira-tool" data-action="jira-delete" data-key="NEO-3" title="Borrar \(con su carpeta, su copia del código y su rama\)"/, 'it is deleted from its card');
   assert.match(ticketDetail(board, detail, false, {}, 'ticket'), /data-part="description" open/);
 });
@@ -742,7 +742,7 @@ test('tickets show their type and priority with icons like Jira', () => {
   const board = { settings: {}, pipeline: {}, tickets: [{ key: 'NEO-9', summary: 'x', stage: 'collect', status: 'pending', type: 'Bug', priority: 'High' }] };
   assert.doesNotMatch(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /jira-type/, 'the card has no type icon: for now every ticket is a bug');
   assert.match(ticketHead({ ...board, tickets: [{ ...board.tickets[0] }] }, 'NEO-9', true), /<svg class="jira-type"[^>]*aria-label="Bug"/, 'the ticket popup still says its type');
-  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><strong>NEO-9<\/strong><button class="icon-button jira-tool jira-card-folder"[\s\S]*?<\/button><span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
+  assert.match(jiraView({ mode: 'azure', jira: {} }, { view: 'board', board }), /<header><input type="checkbox" class="task-select" data-maintenance-select="jira:NEO-9"[^>]*><strong>NEO-9<\/strong><button class="icon-button jira-tool jira-card-folder"[\s\S]*?<\/button><span class="jira-status"[^>]*><\/span><svg class="jira-priority"[^>]*aria-label="Prioridad: High"[\s\S]*?<\/svg><\/header>/, 'the priority closes the header, on the right');
 });
 
 test('ticket texts, comments and reports are shown formatted and safe', () => {

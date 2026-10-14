@@ -25,12 +25,22 @@ function useScope(state) {
   const key = state.mode === 'demo' ? 'demo' : 'real';
   if (key === scopeKey) return;
   scopeKey = key;
+  chosen.clear();
   const legacy = state.mode === 'demo' ? null : `${state.config?.organization ?? ''}/${state.config?.project ?? ''}`.toLowerCase();
   try {
     const storage = globalThis.localStorage;
     filters = filtersFrom(JSON.parse(storage?.getItem(storageKey(key)) ?? (legacy ? storage?.getItem(storageKey(legacy)) : null) ?? 'null'));
   } catch { filters = defaultFilters(); }
 }
+// Items chosen with their box, to write one comment in all of them at once. They stay
+// chosen while filtering (to gather them from several searches) until they are gone;
+// changing between the example and real data clears them.
+const chosen = new Set();
+export const maintenanceSelection = () => [...chosen];
+export const isMaintenanceSelected = id => chosen.has(id);
+export function selectMaintenance(id, on) { if (on) chosen.add(id); else chosen.delete(id); }
+export function clearMaintenanceSelection() { chosen.clear(); }
+const selectBox = item => `<input type="checkbox" class="task-select" data-maintenance-select="${escape(item.id)}" ${chosen.has(item.id) ? 'checked' : ''} title="Seleccionar para comentar en varios a la vez" aria-label="Seleccionar ${escape(item.label)}">`;
 export const maintenanceViewName = () => view;
 export function setMaintenanceView(next) { view = VIEWS.some(([id]) => id === next) ? next : 'board'; }
 export function resetMaintenanceFilters() { filters = { ...defaultFilters(), includeClosed: filters.includeClosed }; save(); }
@@ -130,6 +140,8 @@ function refreshButton(scene) {
 }
 export function maintenanceHead(sources, state, { board = false, tools = '' } = {}) {
   const scene = sceneOf(sources, state, board);
+  const existing = new Set(maintenanceItems(sources).map(item => item.id));
+  for (const id of chosen) if (!existing.has(id)) chosen.delete(id);
   const both = !!state.jira && (!!state.config?.project || state.mode === 'demo');
   const pressed = on => on ? 'true' : 'false';
   const views = `<span class="segmented" role="group" aria-label="Vista">${VIEWS.map(([id, label]) => `<button type="button" data-action="maintenance-view" data-view="${id}" aria-pressed="${pressed(view === id)}">${label}</button>`).join('')}</span>`;
@@ -219,7 +231,8 @@ function cell(item, field) {
 function itemsTable(scene, rows) {
   const extra = scene.conditions.map(c => c.control.field).filter(f => !SHOWN.has(f.ref));
   const jira = rows.some(i => i.origin === 'jira'), area = rows.some(i => i.areaPath);
-  return `<div class="table-wrap"><table class="maintenance-table"><thead><tr><th>ID</th><th>Título</th><th>Estado</th>${jira ? '<th>Paso</th>' : ''}<th>Responsable</th><th>Prioridad</th>${area ? '<th>Área</th>' : ''}${extra.map(f => `<th>${escape(f.name)}</th>`).join('')}<th>Actualizado</th></tr></thead><tbody>${rows.map(i => `<tr class="${statusClass(scene, i.state)}${i.origin === 'jira' && !i.ticket ? ' not-downloaded' : ''}"><td>${label(i)}</td><td><span class="table-title">${itemLink(i)}</span>${i.tags.length ? `<span class="task-tags">${i.tags.slice(0, 3).map(t => `<span class="tag">${escape(t)}</span>`).join('')}</span>` : ''}</td><td>${statePill(scene, i)}</td>${jira ? `<td class="text-muted">${i.origin === 'jira' ? escape(valueOf(i, 'neo.stage')) : ''}</td>` : ''}<td>${i.assignedTo ? escape(i.assignedTo) : '<span class="text-muted">Sin asignar</span>'}</td><td>${escape(i.priority ?? '—')}</td>${area ? `<td class="text-muted">${escape(i.areaPath ?? '')}</td>` : ''}${extra.map(f => `<td>${cell(i, f)}</td>`).join('')}<td class="text-muted">${day(i.changedAt)}</td></tr>`).join('')}</tbody></table></div>`;
+  const all = rows.every(i => chosen.has(i.id)), some = !all && rows.some(i => chosen.has(i.id));
+  return `<div class="table-wrap"><table class="maintenance-table"><thead><tr><th class="select-cell"><input type="checkbox" class="task-select" data-maintenance-select-all ${all ? 'checked' : ''} ${some ? 'data-partial' : ''} title="Seleccionar todos los que dejan los filtros" aria-label="Seleccionar todos"></th><th>ID</th><th>Título</th><th>Estado</th>${jira ? '<th>Paso</th>' : ''}<th>Responsable</th><th>Prioridad</th>${area ? '<th>Área</th>' : ''}${extra.map(f => `<th>${escape(f.name)}</th>`).join('')}<th>Actualizado</th></tr></thead><tbody>${rows.map(i => `<tr class="${statusClass(scene, i.state)}${i.origin === 'jira' && !i.ticket ? ' not-downloaded' : ''}${chosen.has(i.id) ? ' selected' : ''}"><td class="select-cell">${selectBox(i)}</td><td>${label(i)}</td><td><span class="table-title">${itemLink(i)}</span>${i.tags.length ? `<span class="task-tags">${i.tags.slice(0, 3).map(t => `<span class="tag">${escape(t)}</span>`).join('')}</span>` : ''}</td><td>${statePill(scene, i)}</td>${jira ? `<td class="text-muted">${i.origin === 'jira' ? escape(valueOf(i, 'neo.stage')) : ''}</td>` : ''}<td>${i.assignedTo ? escape(i.assignedTo) : '<span class="text-muted">Sin asignar</span>'}</td><td>${escape(i.priority ?? '—')}</td>${area ? `<td class="text-muted">${escape(i.areaPath ?? '')}</td>` : ''}${extra.map(f => `<td>${cell(i, f)}</td>`).join('')}<td class="text-muted">${day(i.changedAt)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 // What each person has assigned, with the people with more items first and the
@@ -232,7 +245,7 @@ function peopleView(scene, rows) {
   return `<div class="maintenance-people">${[...groups].sort(([a, x], [b, y]) => (!a) - (!b) || y.length - x.length || a.localeCompare(b, 'es')).map(([name, items]) => {
     const sorted = [...items].sort((a, b) => (status.get(a.state)?.order ?? 0) - (status.get(b.state)?.order ?? 0));
     return `<section class="person-card"><header><span class="avatar${name ? ` c${tint(name)}` : ' none'}" aria-hidden="true">${name ? escape(initials(name)) : '?'}</span><strong>${name ? escape(name) : 'Sin asignar'}</strong><span class="count">${items.length}</span></header>${statusBar(scene, items, true)}
-      <ul>${sorted.map(i => `<li class="${statusClass(scene, i.state)}${i.origin === 'jira' && !i.ticket ? ' not-downloaded' : ''}">${statePill(scene, i)}<span><span class="text-muted">${escape(i.label)}</span> ${itemLink(i)}</span></li>`).join('')}</ul></section>`;
+      <ul>${sorted.map(i => `<li class="${statusClass(scene, i.state)}${i.origin === 'jira' && !i.ticket ? ' not-downloaded' : ''}${chosen.has(i.id) ? ' selected' : ''}">${selectBox(i)}${statePill(scene, i)}<span><span class="text-muted">${escape(i.label)}</span> ${itemLink(i)}</span></li>`).join('')}</ul></section>`;
   }).join('')}</div>`;
 }
 
