@@ -175,6 +175,27 @@ server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an ite
   const api = await (await connectionProvider()).getWorkApi();
   return { content: [{ type: 'text', text: JSON.stringify(await api.updateTeamDaysOff({ daysOff: asDates(daysOff) }, { project, team }, iterationId)) }] };
 });
+// A new iteration is created under the parent of the team's last one and added
+// to the team. One that already exists with that name and dates is reused, so
+// repeating the call after a lost answer does not fail or duplicate it.
+server.tool('neo_iteration_create_write', 'Create an iteration with its dates and add it to the team, or reuse the existing one with the same name and dates.', {
+  project: z.string().min(1), team: z.string().min(1), parentPath: z.string().max(4000), name: z.string().min(1).max(255),
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), finishDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+}, async ({ project, team, parentPath, name, startDate, finishDate }) => {
+  const connection = await connectionProvider(), wit = await connection.getWorkItemTrackingApi(), work = await connection.getWorkApi();
+  const segments = [...parentPath.split(/[\\/]/).filter(Boolean), name].map(encodeURIComponent);
+  const url = segment => `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations${segment}?api-version=7.1`;
+  const options = wit.createRequestOptions('application/json', '7.1');
+  let node = (await wit.rest.get(url(`/${segments.join('/')}`), options)).result;
+  const dates = value => String(value ?? '').slice(0, 10);
+  if (node && (dates(node.attributes?.startDate) !== startDate || dates(node.attributes?.finishDate) !== finishDate)) throw new Error(`Ya existe la iteración «${name}» en ${project} con otras fechas (${dates(node.attributes?.startDate) || 'sin fecha'} → ${dates(node.attributes?.finishDate) || 'sin fecha'}).`);
+  const reused = !!node;
+  if (!node) node = (await wit.rest.create(url(segments.length > 1 ? `/${segments.slice(0, -1).join('/')}` : ''), { name, attributes: { startDate: `${startDate}T00:00:00Z`, finishDate: `${finishDate}T00:00:00Z` } }, options)).result;
+  if (!node?.identifier) throw new Error('Azure DevOps no confirmó la iteración creada.');
+  await work.postTeamIteration({ id: node.identifier }, { project, team });
+  emit('info', `Iteración «${name}» ${reused ? 'ya existía' : 'creada'} y añadida al equipo ${team}.`);
+  return { content: [{ type: 'text', text: JSON.stringify({ id: node.identifier, name: node.name, path: node.path, attributes: node.attributes, reused }) }] };
+});
 // A query and the fields of its results in one tool call: batches of 200 are
 // read in parallel inside the MCP instead of one round trip per batch.
 server.tool('neo_query_work_items', 'Run a WIQL query and return the requested fields of the matching work items.', {

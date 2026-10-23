@@ -27,7 +27,7 @@ const toolNames = {
   wit_query: 'consulta WIQL', core_list_projects: 'lista de proyectos', core_list_project_teams: 'lista de equipos',
   neo_team_members: 'integrantes del equipo', neo_team_days_off: 'días libres del equipo', neo_team_capacity_write: 'escritura de capacidad',
   neo_team_days_off_write: 'escritura de días libres', neo_work_item_states: 'estados del tipo', neo_work_item_type_fields: 'campos del tipo', neo_security_read: 'seguridad',
-  neo_security_login: 'inicio de sesión', neo_create_item: 'creación de elemento',
+  neo_security_login: 'inicio de sesión', neo_create_item: 'creación de elemento', neo_iteration_create_write: 'creación de iteración',
   neo_git_repositories: 'repositorios', neo_pull_requests: 'pull requests', neo_pull_request: 'pull request',
   neo_pull_request_threads: 'comentarios del pull request', neo_pull_request_comment_write: 'publicación de comentario', neo_pull_request_create_write: 'creación del pull request', neo_pull_request_reply_write: 'respuesta a un comentario',
 };

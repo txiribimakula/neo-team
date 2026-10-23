@@ -1,5 +1,6 @@
 import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
+import { iterationPlan, createIteration, addDemoIteration } from './iterations.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
@@ -170,6 +171,8 @@ const myIterationScope = () => JSON.stringify([store.data.mode, store.data.confi
 const currentMyIteration = () => myIteration?.scope === myIterationScope() ? myIteration : null;
 // The last test plan query, kept only in memory like maintenance.
 let testPlans = null;
+// The name template of new iterations, remembered per team (or for the example data).
+const iterationTemplateKey = () => store.data.mode === 'demo' ? 'demo' : store.data.azure ? sourceId(store.data.azure.config) : '';
 const currentTestPlans = () => testPlans?.scope === maintenanceScope() ? testPlans : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 // Local steps after the Azure queries join the activity, so a failure shows
@@ -201,7 +204,7 @@ function requireSession(req) {
 const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 // The server keeps running the code it started with, while the interface is read
 // from disk on every request: after an update, it asks to be restarted.
-const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url), new URL('../dist/maintenance-items.js', import.meta.url), new URL('../dist/search.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
+const serverCode = () => [...readdirSync(fileURLToPath(new URL('./', import.meta.url))).filter(f => f.endsWith('.js')).map(f => new URL(`./${f}`, import.meta.url)), new URL('../dist/hierarchy.js', import.meta.url), new URL('../dist/maintenance-items.js', import.meta.url), new URL('../dist/search.js', import.meta.url), new URL('../dist/sprint-name.js', import.meta.url)].reduce((last, url) => Math.max(last, statSync(url).mtimeMs), 0);
 const startedCode = serverCode();
 let codeCheckedAt = 0, outdated = false;
 function serverOutdated() {
@@ -217,7 +220,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplate: store.data.iterationTemplates?.[iterationTemplateKey()] ?? null, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -335,7 +338,7 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/maintenance-comment': 'Publicando el comentario', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/create-iteration':'Creando la iteración', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/maintenance-comment': 'Publicando el comentario', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
       operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/pipelines', '/api/pipeline-review', '/api/assistant','/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
@@ -943,6 +946,15 @@ const server = http.createServer(async (req, res) => {
             if(error.stateReview) {error.stateReview={...error.stateReview,section:input.section};stateReview=error.stateReview;operation={...operation,stateReview};}
             throw error;
           }
+        } else if(path==='/api/create-iteration') {
+          // The name and the dates are checked before anything is sent to Azure.
+          let plan;
+          try { plan=iterationPlan(store.data[store.data.mode],input); } catch(error) { throw fail(error.message); }
+          let workspace;
+          if(store.data.mode==='demo') { workspace=structuredClone(store.data.demo); addDemoIteration(workspace,plan); }
+          else workspace=await createIteration(store.data.azure,plan,azure,store.data.stateRules ?? [],progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
+          const data=structuredClone(store.data);data[data.mode]=workspace;data.iterationTemplates={...data.iterationTemplates,[iterationTemplateKey()]:plan.template};
+          step('Guardando la copia local…');await store.save(data);planner.review=null;
         } else if(path==='/api/download-capacity') {
           const workspace=await downloadCapacity(store.data.azure,input.iterationId,azure,progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
           const data=structuredClone(store.data);data.azure=workspace;
@@ -1114,7 +1126,7 @@ const server = http.createServer(async (req, res) => {
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
     const route = /^\/(planificacion|mi-iteracion|planes-prueba|mantenimiento|revision-prs|pipelines|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'sprint-name.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

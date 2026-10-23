@@ -8,6 +8,7 @@ import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { matchesQuery, compileQuery } from './search.js';
+import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays } from './sprint-name.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -787,12 +788,44 @@ function iterationKinds(iterations) {
 const iterationKindLabel={past:'Anterior',current:'En curso',next:'Siguiente',future:'Futura',other:'Iteración'};
 function iterationView() {
   const ws=state.workspace, selectedOne=selected();
-  if (!selectedOne) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
+  if (!ws) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
   const iterations=planningIterations(), kinds=iterationKinds(iterations);
   return `<section class="iteration-step"><div class="iteration-options">${finishedIterations()}${iterations.map(i=>{
-    const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne.id;
+    const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne?.id;
     return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
-  }).join('')}</div></section>`;
+  }).join('')}${newIterationCard()}</div></section>`;
+}
+// A new iteration is written in its own card: the name template, with the name it
+// gives, and its dates. The template is remembered for the next one.
+let newIteration=null;
+const iterationsOfTeam=()=>state.workspace.sources?.[0]?.iterations ?? state.workspace.iterations;
+const newIterationName=()=>sprintName(newIteration.template,{startDate:newIteration.startDate,previousName:latestIteration(iterationsOfTeam())?.name});
+function openNewIteration() {
+  newIteration={template:state.iterationTemplate || guessTemplate(latestIteration(iterationsOfTeam())?.name),...nextDates(state.workspace.iterations),error:''};
+}
+function newIterationCard() {
+  if (!newIteration) return '<button type="button" class="iteration-option iteration-new" data-action="new-iteration" title="Nueva iteración" aria-label="Nueva iteración">+</button>';
+  const {template,startDate,finishDate,error}=newIteration;
+  return `<form class="iteration-option iteration-new open" id="new-iteration-form"><span class="iteration-tags"><span class="iteration-when">Nueva</span></span><strong class="iteration-preview" aria-live="polite">${escape(newIterationName()) || '—'}</strong><input name="template" data-new-iteration value="${escape(template)}" maxlength="255" required aria-label="Plantilla del nombre" title="{n} sigue la numeración de la última · {semana}, {mes}, {año} y {día} salen del inicio · admiten +1, -1…"><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span><span class="iteration-dates"><input type="date" name="startDate" data-new-iteration value="${startDate}" required aria-label="Inicio"><span aria-hidden="true">—</span><input type="date" name="finishDate" data-new-iteration value="${finishDate}" required aria-label="Fin"></span><small class="iteration-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</small><span class="iteration-new-actions"><button type="submit" class="button small primary">Crear</button><button type="button" class="button small" data-action="cancel-new-iteration">Cancelar</button></span></form>`;
+}
+function newIterationInput(el) {
+  // Moving the start keeps the length of the iteration.
+  if (el.name==='startDate' && el.value && newIteration.startDate && newIteration.finishDate) {
+    const length=Math.round((Date.parse(newIteration.finishDate)-Date.parse(newIteration.startDate))/86400000);
+    newIteration.finishDate=addDays(el.value,length);$('#new-iteration-form [name="finishDate"]').value=newIteration.finishDate;
+  }
+  newIteration[el.name]=el.value;newIteration.error='';
+  $('#new-iteration-form .iteration-error').hidden=true;
+  $('#new-iteration-form .iteration-preview').textContent=newIterationName() || '—';
+}
+async function submitNewIteration(form) {
+  const button=$('[type="submit"]',form), name=newIterationName(), {template,startDate,finishDate}=newIteration;
+  button.textContent='Creando…';
+  try { await request('/api/create-iteration',{template,startDate,finishDate}); }
+  catch (error) { newIteration.error=error.message;render();$('#new-iteration-form [name="template"]')?.focus();return; }
+  const created=planningIterations().find(i=>String(i.attributes?.startDate ?? '').slice(0,10)===startDate);
+  if (created) chooseIteration(created.id);
+  newIteration=null;render();toast(state.mode==='demo' ? `«${name}» creada en los datos de prueba.` : `«${name}» creada en Azure DevOps.`);
 }
 // The finished iteration whose open tasks are decided in Tareas comes first. It
 // is not planned; without it, its tasks can be downloaded from here.
@@ -2206,6 +2239,12 @@ const actions = {
     render();$(`[data-import-rule="${index}"]`)?.focus({preventScroll:true});
   },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
+  'new-iteration':()=>{openNewIteration();render();$('#new-iteration-form [name="template"]')?.focus();},
+  'cancel-new-iteration':()=>{newIteration=null;render();$('[data-action="new-iteration"]')?.focus();},
+  'iteration-token':el=>{
+    const input=$('#new-iteration-form [name="template"]'), start=input.selectionStart ?? input.value.length, end=input.selectionEnd ?? start;
+    input.setRangeText(el.dataset.token,start,end,'end');newIterationInput(input);input.focus();
+  },
   'download-capacity':downloadCapacity,
   'copy-capacity':copyCapacity,
   'download-hierarchy':downloadHierarchy,
@@ -2344,6 +2383,7 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
+    if (event.target.id === 'new-iteration-form') { await submitNewIteration(event.target); return; }
     if (event.target.id === 'maintenance-settings-form') {
       if ($('#maintenance-type').value.trim() !== event.target.dataset.type) throw new Error('Vuelve a cargar los estados del tipo de elemento antes de guardar.');
       const roles = [...event.target.querySelectorAll('input[type="radio"]:checked')], states = role => roles.filter(el => el.value === role).map(el => el.dataset.state);
@@ -2467,6 +2507,7 @@ document.addEventListener('input',event=>{
   if(event.target.form?.id==='jira-settings-form'){const {token,clearToken,...settings}=Object.fromEntries(new FormData(event.target.form));jiraUi.settingsDraft={...settings,token,clearToken:clearToken==='on'};if(event.target.name===jiraUi.settingsError){event.target.removeAttribute('aria-invalid');jiraUi.settingsError=null;}}
   if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
+  if('newIteration' in (event.target.dataset ?? {})) newIterationInput(event.target);
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;lanesToggled.clear();refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
