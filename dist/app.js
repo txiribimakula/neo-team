@@ -1390,6 +1390,10 @@ function render() {
   });
   // Inicio and Mantenimiento do not depend on Azure DevOps: only its sections ask to connect it.
   const connecting = needsConnection() && !['home', 'jira', 'maintenance'].includes(tab);
+  const planningActions=$('#planning-actions'), showPlanningActions=planning && ws?.mode==='azure' && !connecting;
+  const drafted=Object.keys(ws?.drafts ?? {}).length || Object.keys(ws?.capacityDrafts ?? {}).length;
+  planningActions.hidden=!showPlanningActions;
+  planningActions.innerHTML=showPlanningActions ? `<button class="button small" data-action="connect">+ Añadir proyecto</button><button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button>` : '';
   // Only the test mode is announced: the real one needs no notice.
   $('#mode-banner').hidden = connecting || !demo;
   if (connecting) {
@@ -1422,12 +1426,10 @@ function render() {
   if(!ws){
     $('#app').innerHTML=`<div class="empty-panel"><h1>Planifica tu iteración</h1><p>${state.config ? `Importa ${escape(state.config.project)} / ${escape(state.config.team)} para traer sus iteraciones, capacidad y tareas abiertas. Solo se lee Azure DevOps: nada se modifica hasta que revises y sincronices.` : 'Conecta tu organización de Azure DevOps para traer iteraciones, capacidad y tareas, o prueba antes con un ejemplo que nunca contacta con Azure.'}</p><div class="actions"><button class="button primary" data-action="${state.config ? 'import' : 'connect'}">${state.config ? 'Importar equipo' : 'Conectar Azure DevOps'}</button><button class="button" data-action="demo">Probar con un ejemplo</button></div></div>`;return;
   }
-  const drafted=Object.keys(ws.drafts).length || Object.keys(ws.capacityDrafts ?? {}).length;
   // Redrawing keeps the horizontal position of the capacity grid and the scroll of
   // each column that scrolls on its own.
   const gridScroll=$('.capacity-grid-wrap')?.scrollLeft ?? 0, scrolls=keptScrolls();
-  $('#app').innerHTML=`${ws.mode==='azure' ? `<div class="workspace-controls"><button class="button small" data-action="connect">+ Añadir proyecto</button><div class="workspace-data-actions"><button class="button small" data-action="import" ${drafted ? 'disabled' : ''} title="${drafted ? 'Sincroniza o descarta los cambios pendientes antes de actualizar' : 'Vuelve a leer todos los proyectos desde Azure DevOps'}">Actualizar toda la planificación</button></div></div>` : ''}
-  ${stepTabs()}
+  $('#app').innerHTML=`${stepTabs()}
   <div id="planning-view">${stepView()}</div>
   ${ws.warnings.length ? `<details class="import-notices"><summary>${ws.warnings.length} avisos de importación</summary>${ws.warnings.map(w=>`<p>${escape(w)}</p>`).join('')}</details>` : ''}`;
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;

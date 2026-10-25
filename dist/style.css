@@ -883,3 +883,11 @@ button.tp-cell:hover{border-color:#91ad81;background:#f6faf3}
 .iteration-dates{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:center;font-size:13px;color:var(--muted)}
 .iteration-new .iteration-error{color:#a33b2b;margin-top:0}
 .iteration-new-actions{display:flex;gap:6px;margin-top:4px}
+
+/* Planning actions sit beside the section name in the top bar. */
+.topbar{height:auto;min-height:58px;flex-wrap:wrap;padding-top:10px;padding-bottom:10px}
+.topbar-context{display:flex;align-items:center;gap:18px;flex-wrap:wrap;min-width:0}
+.topbar-context .product-name{flex-shrink:0}
+.planning-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.planning-actions[hidden]{display:none}
+@media(max-width:740px){.topbar-context{flex-basis:100%;gap:10px}.topbar-context .workspace-label,.topbar-context .divider{display:inline}.planning-actions{gap:6px}}
