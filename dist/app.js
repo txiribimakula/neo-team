@@ -35,8 +35,10 @@ let backlogQuery='';
 let backlogFilter='';
 const collapsed = new Set();
 // People in the team plan start collapsed: only their load bar until opened.
-const expandedLanes = new Set(), expandedPrevious = new Set();
-let previousGroupOrder = null;
+const expandedLanes = new Set();
+// The task of the previous iteration on screen ('done' once nothing is left), and
+// the side the next one slides in from.
+let previousShown = null, previousSlide = null;
 // Tareas works on the previous iteration (decide what is left) or the one being planned.
 let planningPeriod = null;
 const modal = $('#modal');
@@ -752,7 +754,7 @@ async function askAssistant(form) {
   try {
     const {assistant}=await request('/api/assistant',{tab:which,prompt,history:ui.history,iterationId:selectedIteration,operationId});
     Object.assign(ui,{draft:'',reply:assistant.reply,changes:assistant.changes,history:[...ui.history,{prompt,reply:assistant.reply}].slice(-4)});
-    if (assistant.select) { chooseIteration(assistant.select); planningPeriod=null; laneOrder=null; previousGroupOrder=null; }
+    if (assistant.select) { chooseIteration(assistant.select); planningPeriod=null; laneOrder=null; previousShown=null; }
     if (assistant.changes.length) review=null;
   } catch (error) { ui.error=error.message; }
   finally { stop(); ui.running=false; render(); }
@@ -858,40 +860,78 @@ function laterIterationSelect(item, iteration) {
   if (!later.length) return '';
   return `<select class="later-iteration" data-previous-move data-task="${item.id}" aria-label="Mandar #${item.id} a una iteración posterior"><option value="">Más adelante…</option>${later.map(i=>`<option value="${escape(i.path)}">${escape(i.name)}</option>`).join('')}</select>`;
 }
-function previousTaskRow({item,base,status},iteration) {
-  const effort=item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar';
+// One task at a time fills the screen, in the order of the team: each person's
+// tasks by priority, then those without owner and those outside the team.
+function previousOwner(item) {
+  const members=state.workspace.members, index=members.findIndex(m=>key(m)===item.assignedTo);
+  if (!item.assignedTo) return {id:'unassigned',rank:members.length,name:'Sin asignar'};
+  if (index<0) return {id:'outside',rank:members.length+1,name:memberName(item.assignedTo),note:'Fuera del equipo'};
+  return {id:item.assignedTo,rank:index,name:members[index].displayName,avatar:`c${index%4}`};
+}
+function previousSequence(iteration) {
+  const {previous,tasks}=previousTasks(iteration);
+  const owned=tasks.map(task=>({...task,owner:previousOwner(task.item)}));
+  return {previous,tasks:owned.sort((a,b)=>a.owner.rank-b.owner.rank || (a.item.priority ?? 5)-(b.item.priority ?? 5) || a.item.id-b.item.id)};
+}
+const nextUndecided=(tasks,id)=>{
+  const from=tasks.findIndex(t=>t.item.id===id);
+  return [...tasks.slice(from+1),...tasks.slice(0,from+1)].find(t=>t.status==='open')?.item.id ?? 'done';
+};
+function showPrevious(id, slide=null) {
+  if (id===previousShown) return;
+  const {tasks}=previousSequence(selected()), at=tasks.findIndex(t=>t.item.id===previousShown), to=tasks.findIndex(t=>t.item.id===id);
+  previousShown=id; previousSlide=slide ?? (to<at && to>=0 ? 'back' : 'next');
+  updatePlanningView();
+  $('.focus-card .focus-actions button')?.focus({preventScroll:true});
+}
+// The arrows go through every task; with everything decided, the summary closes the round.
+function stepPrevious(direction) {
+  const {tasks}=previousSequence(selected());
+  if (!tasks.length) return;
+  const stops=[...tasks.map(t=>t.item.id),...(tasks.some(t=>t.status==='open') ? [] : ['done'])];
+  const at=stops.indexOf(previousShown), index=at<0 ? (direction>0 ? 0 : stops.length-1) : (at+direction+stops.length)%stops.length;
+  showPrevious(stops[index],direction>0 ? 'next' : 'back');
+}
+const ownerAvatar=owner=>`<span class="avatar ${owner.avatar ?? 'c-none'}">${escape(initials(owner.name))}</span>`;
+// Where each task is: one mark per task, grouped by person, coloured once decided.
+function previousStrip(tasks, shown) {
+  const groups=[];
+  for (const task of tasks) (groups.at(-1)?.owner.id===task.owner.id ? groups.at(-1).tasks : (groups.push({owner:task.owner,tasks:[]}),groups.at(-1).tasks)).push(task);
+  return `<ol class="focus-strip" aria-label="Tareas de la iteración anterior">${groups.map(group=>`<li class="focus-strip-person ${group.tasks.some(t=>t===shown) ? 'current' : ''}" title="${escape(group.owner.name)}">${ownerAvatar(group.owner)}<span class="focus-marks">${group.tasks.map(t=>`<button type="button" class="focus-mark status-${t.status} ${t===shown ? 'current' : ''}" data-action="previous-go" data-task="${t.item.id}" aria-label="#${t.item.id} ${escape(t.item.title)}" ${t===shown ? 'aria-current="true"' : ''}></button>`).join('')}</span></li>`).join('')}</ol>`;
+}
+function previousCard(task, tasks, iteration) {
+  const {item,base,status,owner}=task, mine=tasks.filter(t=>t.owner.id===owner.id);
+  const path=ancestors(item.id,planningTree()).filter(Boolean);
   const decided=item.iterationPath!==base.iterationPath || item.state!==base.state;
   const outcome={completed:'✓ Completada',backlog:'↩ En el backlog, sin iteración',moved:`→ Pasa a ${escape(iteration.name)}`,elsewhere:`Movida a ${escape(iterationName(item.iterationPath))}`}[status];
   const actions=status==='open'
-    ? `<button class="button small primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} →</button><button class="button small" data-action="complete-task" data-task="${item.id}" title="Marcar como completada">✓ Completada</button><button class="button small" data-action="to-backlog" data-task="${item.id}" title="Mandar al backlog: quita la iteración y conserva el responsable">↩ Backlog</button>${laterIterationSelect(item,iteration)}`
-    : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button small subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
-  return `<li class="previous-task status-${status}" data-previous-task="${item.id}"><div class="previous-task-copy"><div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(item.state || 'Sin estado')}</span>${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></div><span class="effort">${effort}</span><div class="previous-task-actions">${actions}</div></li>`;
+    ? `<button class="button primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} → <kbd>1</kbd></button><button class="button" data-action="complete-task" data-task="${item.id}">✓ Completada <kbd>2</kbd></button><button class="button" data-action="to-backlog" data-task="${item.id}" title="Quita la iteración y conserva el responsable">↩ Backlog <kbd>3</kbd></button>${laterIterationSelect(item,iteration)}`
+    : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
+  return `<article class="focus-card status-${status}" data-previous-task="${item.id}">
+    <header class="focus-head"><span class="person">${ownerAvatar(owner)}<span class="person-detail"><strong>${escape(owner.name)}</strong><small>${owner.note ? `${owner.note} · ` : ''}${mine.indexOf(task)+1} de ${mine.length}</small></span></span><span class="focus-effort">${item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar'}</span></header>
+    <div class="focus-body">
+      ${path.length ? `<p class="focus-path">${path.map(parent=>`<span>${escape(parent.title)}</span>`).join('<span aria-hidden="true">›</span>')}</p>` : ''}
+      <h2 class="focus-title"><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></h2>
+      <div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(item.state || 'Sin estado')}</span>${item.tags.map(tag=>`<span class="tag">${escape(tag)}</span>`).join('')}${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div>
+    </div>
+    <div class="focus-actions">${actions}</div>
+  </article>`;
 }
-function previousPerson(group,iteration) {
-  const open=group.tasks.filter(t=>t.status==='open'), hours=open.reduce((sum,t)=>sum+(t.item.remainingWork ?? 0),0), decided=group.tasks.length-open.length;
-  const expanded=expandedPrevious.has(group.id), id=`previous-${group.id.replace(/[^a-z0-9]/gi,'-')}`;
-  const status=open.length ? `<span class="previous-pending">${open.length} sin decidir · ${number(hours)} h</span>` : '<span class="previous-done">✓ Todo decidido</span>';
-  return `<section class="previous-person ${open.length ? 'has-open' : 'all-decided'} ${expanded ? '' : 'collapsed'}"><button type="button" class="previous-toggle" data-action="toggle-previous" data-group="${escape(group.id)}" aria-expanded="${expanded}" aria-controls="${id}"><span class="person">${group.avatar ? `<span class="avatar ${group.avatar}">${escape(initials(group.name))}</span>` : ''}<span class="person-detail"><strong>${escape(group.name)}</strong><small>${plural(group.tasks.length,'tarea')}${decided ? ` · ${decided} decidida${decided===1 ? '' : 's'}` : ''}</small></span></span>${status}<span class="lane-chevron" aria-hidden="true">›</span></button><ul class="previous-tasks" id="${id}" ${expanded ? '' : 'hidden'}>${group.tasks.map(task=>previousTaskRow(task,iteration)).join('')}</ul></section>`;
+function previousDone(tasks, previous, iteration) {
+  const count=status=>tasks.filter(t=>t.status===status).length;
+  const tally=[['moved',`Pasan a ${iteration.name}`],['completed','Completadas'],['backlog','Al backlog'],['elsewhere','Otras iteraciones']].filter(([status])=>count(status));
+  return `<article class="focus-card focus-done"><span class="focus-done-mark" aria-hidden="true">✓</span><h2>${escape(previous.name)}</h2><ul class="focus-tally">${tally.map(([status,label])=>`<li class="outcome-${status}"><strong>${count(status)}</strong><span>${escape(label)}</span></li>`).join('')}</ul><button class="button primary" data-action="planning-period" data-period="current">Planificar ${escape(iteration.name)} →</button></article>`;
 }
 function previousView() {
   const ws=state.workspace, iteration=selected();
   if (!iteration) return '<div class="empty-result">Elige primero la iteración que vas a planificar.</div>';
-  const {previous,tasks}=previousTasks(iteration);
+  const {previous,tasks}=previousSequence(iteration);
   if (!previous) return `<div class="empty-panel"><h2>No hay iteración anterior</h2><p>${escape(iteration.name)} es la primera iteración importada.${ws.mode==='azure' ? ' Actualiza las tareas para traer la última iteración terminada.' : ''}</p></div>`;
-  const owned=member=>tasks.filter(t=>t.item.assignedTo===key(member));
-  const groups=[
-    ...ws.members.map((member,index)=>({id:key(member),name:member.displayName,avatar:`c${index%4}`,tasks:owned(member)})),
-    {id:'unassigned',name:'Sin asignar',tasks:tasks.filter(t=>!t.item.assignedTo)},
-    {id:'outside',name:'Fuera del equipo',tasks:tasks.filter(t=>t.item.assignedTo && !ws.members.some(m=>key(m)===t.item.assignedTo))},
-  ].filter(group=>group.tasks.length);
-  // People with everything decided go last. The order is kept while deciding and
-  // refreshed on entering the view or opening/closing someone, so rows never jump.
-  const orderKey=`${previous.id}|${groups.map(g=>g.id).join(',')}`;
-  if (previousGroupOrder?.key!==orderKey) previousGroupOrder={key:orderKey,ids:groups.map((g,index)=>({id:g.id,index,done:!g.tasks.some(t=>t.status==='open')})).sort((a,b)=>Number(a.done)-Number(b.done) || a.index-b.index).map(g=>g.id)};
-  groups.sort((a,b)=>previousGroupOrder.ids.indexOf(a.id)-previousGroupOrder.ids.indexOf(b.id));
-  const idle=ws.members.filter(member=>!owned(member).length);
-  return `<section class="previous-step">${groups.length ? `<div class="previous-people">${groups.map(group=>previousPerson(group,iteration)).join('')}</div>` : `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`}
-    ${groups.length && idle.length ? `<p class="local-note">Sin trabajo abierto en ${escape(previous.name)}: ${idle.map(m=>escape(m.displayName)).join(', ')}.</p>` : ''}</section>`;
+  if (!tasks.length) return `<div class="empty-result">No quedan tareas ni bugs abiertos en ${escape(previous.name)}.</div>`;
+  if (previousShown!=='done' && !tasks.some(t=>t.item.id===previousShown)) previousShown=tasks.find(t=>t.status==='open')?.item.id ?? 'done';
+  const shown=tasks.find(t=>t.item.id===previousShown), slide=previousSlide; previousSlide=null;
+  return `<section class="previous-focus ${slide ? `slide-${slide}` : ''}">${previousStrip(tasks,shown)}
+    <div class="focus-stage"><button type="button" class="focus-nav" data-action="previous-step" data-direction="-1" aria-label="Tarea anterior">‹</button>${shown ? previousCard(shown,tasks,iteration) : previousDone(tasks,previous,iteration)}<button type="button" class="focus-nav" data-action="previous-step" data-direction="1" aria-label="Tarea siguiente">›</button></div></section>`;
 }
 async function decidePrevious(id, decision, path) {
   const ws=state.workspace, item=ws.effectiveItems.find(i=>i.id===id), base=ws.items.find(i=>i.id===id), iteration=selected();
@@ -901,22 +941,10 @@ async function decidePrevious(id, decision, path) {
     await request('/api/complete-task',{id});
   }
   else await request('/api/stage',{edits:[{id,...(decision==='undo' ? {discardStates:true} : {}),changes:decision==='carry' ? {iterationPath:iteration.path} : decision==='move' ? {iterationPath:path} : decision==='backlog' ? {iterationPath:ws.settings.backlogIteration.path} : {iterationPath:base.iterationPath}}]});
-  // Deciding someone's last task sends them, closed, to the bottom of the list.
-  const groupOf=assignee=>!assignee ? 'unassigned' : state.workspace.members.some(m=>key(m)===assignee) ? assignee : 'outside';
-  const group=groupOf(item.assignedTo);
-  const finished=decision!=='undo' && !previousTasks(iteration).tasks.some(t=>t.status==='open' && groupOf(t.item.assignedTo)===group);
-  if (finished) { expandedPrevious.delete(group); previousGroupOrder=null; }
+  // Deciding brings the next task left to decide; undoing keeps the same one.
+  if (decision!=='undo' && previousShown===id) { previousShown=nextUndecided(previousSequence(iteration).tasks,id); previousSlide='next'; }
   review=null;render();
-  // ...and opens whoever is now first with tasks to decide, to keep reviewing there.
-  const next=finished && $('.previous-person.has-open .previous-toggle')?.dataset.group;
-  if (next && !expandedPrevious.has(next)) { expandedPrevious.add(next); updatePlanningView(); }
-  if (next) {
-    const toggle=$(`[data-action="toggle-previous"][data-group="${CSS.escape(next)}"]`);
-    toggle?.scrollIntoView({block:'nearest'});
-    (toggle?.closest('.previous-person').querySelector('.previous-task.status-open .previous-task-actions button') || toggle)?.focus({preventScroll:true});
-  }
-  else if (finished) $(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});
-  else document.querySelector(`[data-previous-task="${id}"] .previous-task-actions button`)?.focus({preventScroll:true});
+  $('.focus-card .focus-actions button')?.focus({preventScroll:true});
   // Allowed, but flagged: the owner has no capacity in the destination or is not in the team.
   const target=decision==='carry' ? iteration : decision==='move' ? ws.iterations.find(i=>i.path===path) : null, owner=item.assignedTo;
   if (target && owner) {
@@ -1159,6 +1187,9 @@ let fitFrame;
 function fitBoardColumns() {
   cancelAnimationFrame(fitFrame);
   fitFrame=requestAnimationFrame(()=>{
+    // The task of the previous iteration takes the rest of the window, without scrolling the page.
+    const focus=$('.previous-focus');
+    if(focus) focus.style.height=`${Math.max(360,window.innerHeight-focus.getBoundingClientRect().top-window.scrollY-20)}px`;
     const board=$('.board');
     if(!board) return;
     const top=Math.max(12,board.getBoundingClientRect().top);
@@ -1167,6 +1198,8 @@ function fitBoardColumns() {
 }
 window.addEventListener('scroll',fitBoardColumns,{passive:true});
 window.addEventListener('resize',fitBoardColumns);
+// The web fonts change the height of what is above once they arrive.
+document.fonts?.ready.then(fitBoardColumns);
 const keptScrolls = () => Object.fromEntries([...document.querySelectorAll('[data-keep-scroll]')].map(el=>[el.dataset.keepScroll,el.scrollTop]));
 function restoreScrolls(scrolls) { for (const el of document.querySelectorAll('[data-keep-scroll]')) if (scrolls[el.dataset.keepScroll]) el.scrollTop=scrolls[el.dataset.keepScroll]; }
 function updatePlanningView() {
@@ -2039,7 +2072,7 @@ async function switchMode(mode) {
   await request('/api/mode', { mode });
   selectedIteration = ''; review = null;
   changesUi = { loading:false, syncing:false, error:'', notice:'', confirmAll:false };
-  planningPeriod = null; previousGroupOrder = null;
+  planningPeriod = null; previousShown = null;
   lastPlanningTab = 'configuration'; tab = 'home';
   render();
   toast(mode === 'demo' ? 'Modo de prueba activado. Tus datos reales se conservan.' : 'Modo real activado. Tus pruebas se conservan por separado.');
@@ -2297,8 +2330,9 @@ const actions = {
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   'choose-iteration': el=>{chooseIteration(el.dataset.iteration);planningPeriod=null;render();$(`[data-action="choose-iteration"][data-iteration="${CSS.escape(selectedIteration)}"]`)?.focus({preventScroll:true});},
-  'planning-period': el=>{planningPeriod=el.dataset.period;previousGroupOrder=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
-  'toggle-previous': el=>{const group=el.dataset.group;if(expandedPrevious.has(group))expandedPrevious.delete(group);else expandedPrevious.add(group);previousGroupOrder=null;updatePlanningView();$(`[data-action="toggle-previous"][data-group="${CSS.escape(group)}"]`)?.focus({preventScroll:true});},
+  'planning-period': el=>{planningPeriod=el.dataset.period;previousShown=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
+  'previous-go': el=>showPrevious(Number(el.dataset.task)),
+  'previous-step': el=>stepPrevious(Number(el.dataset.direction)),
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
@@ -2316,7 +2350,7 @@ const actions = {
   'toggle-lane': el=>{const member=el.dataset.member;if(compileQuery(backlogQuery)){if(!lanesToggled.delete(member))lanesToggled.add(member);}else if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
   'expand-tree': el=>{collapsed.clear();updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="expand-tree"]')?.focus({preventScroll:true});},
   'collapse-tree': el=>{state.workspace.effectiveItems.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="collapse-tree"]')?.focus({preventScroll:true});},
-  tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousGroupOrder=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
+  tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousShown=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
   review: reviewChanges, sync:synchronize, 'close-sync':closeSyncPanel,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
@@ -2390,6 +2424,13 @@ document.addEventListener('keydown', event => {
   if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
   const card = event.target.closest('.task-card');
   if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)).catch(errorInModal); }
+  // Reviewing the previous iteration: the arrows go through its tasks and 1, 2 and 3 decide the one on screen.
+  const typing = event.target.closest?.('input, textarea, select, [contenteditable="true"]');
+  if ($('.previous-focus') && !typing && !modal.open && !event.metaKey && !event.ctrlKey && !event.altKey && !pending) {
+    if (['ArrowLeft','ArrowRight'].includes(event.key) && !event.target.closest('.step-tab')) { event.preventDefault(); stepPrevious(event.key==='ArrowRight' ? 1 : -1); return; }
+    const decide = { 1: 'carry-over', 2: 'complete-task', 3: 'to-backlog' }[event.key], button = decide && $(`.focus-card [data-action="${decide}"]`);
+    if (button) { event.preventDefault(); button.click(); return; }
+  }
   // Arrow keys move between the planning steps; Enter or Space opens one.
   const step = event.target.closest('.step-tab');
   if (step && ['ArrowLeft','ArrowRight'].includes(event.key)) {
