@@ -331,7 +331,6 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .cg-team-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#eef5e3;color:#4f7040;font-size:15px;flex-shrink:0}
 .capacity-grid .cg-team th,.capacity-grid .cg-team td{background:#f6f9f1;border-bottom:2px solid #dfe8d1}
 .capacity-grid .cg-hours{padding:6px 10px;min-width:84px;border-right:1px solid #edf0ec}
-.capacity-grid .cg-total{padding:8px 14px;font-weight:700;color:var(--green);white-space:nowrap;border-left:1px solid #edf0ec;text-align:right;min-width:70px}
 .capacity-grid .cg-project{padding:8px 12px;border-left:1px solid #edf0ec;text-align:right;overflow-wrap:anywhere}
 .cg-project strong{display:block;color:var(--green);white-space:nowrap;font-variant-numeric:tabular-nums}
 .cg-project small{display:block;margin-top:3px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
@@ -343,7 +342,7 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .cg-toggle.shared{background:repeating-linear-gradient(135deg,#eee1ca 0 4px,#f7efe0 4px 8px);cursor:not-allowed;opacity:1}
 .cg-team .cg-toggle{background:#cfe1b4}.cg-team .cg-toggle.off{background:#e6c98f}
 .capacity-grid tr.changed .cg-person{box-shadow:inset 3px 0 0 #8daf53}
-.capacity-grid tr.zero-capacity>*>*{opacity:.45;transition:opacity .15s}.capacity-grid tr.zero-capacity .cg-total{color:#aab3ac}.capacity-grid tr.zero-capacity:hover>*>*,.capacity-grid tr.zero-capacity:focus-within>*>*{opacity:1}
+.capacity-grid tr.zero-capacity>*>*{opacity:.45;transition:opacity .15s}.capacity-grid tr.zero-capacity .cg-project strong{color:#aab3ac}.capacity-grid tr.zero-capacity:hover>*>*,.capacity-grid tr.zero-capacity:focus-within>*>*{opacity:1}
 .capacity-inline-hours{display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--muted)}.capacity-inline-hours+.capacity-inline-hours{margin-top:4px}
 .capacity-inline-hours input{width:64px;padding:6px 8px;text-align:right;font-weight:600;font-size:14px}
 .capacity-grid .cg-note td{text-align:left;padding:4px 14px 12px;border-top:0}.capacity-grid .cg-note .capacity-download-diff{margin-top:0;max-width:640px}
@@ -352,13 +351,13 @@ textarea:focus-visible{outline:3px solid #82b74a;outline-offset:2px}textarea:dis
 .cg-name>span:nth-child(2){flex:1}.cg-undo{flex-shrink:0;width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:1px solid #d5dfce;border-radius:7px;background:white;color:#47772f;cursor:pointer}.cg-undo:hover{background:#eef3ed}.cg-undo[hidden]{display:block;visibility:hidden}.cg-undo:disabled{opacity:.4;cursor:default;background:white}
 .cg-history{display:flex;gap:6px}
 /* Fixed columns and row heights: nothing in the grid moves when values change. */
-.capacity-grid{table-layout:fixed;min-width:calc(230px + 96px + 84px + var(--days) * 34px + var(--projects,0) * 120px)}
-.cg-col-person{width:230px}.cg-col-hours{width:96px}.cg-col-total{width:84px}.cg-col-day{width:auto}
-.capacity-grid .cg-person{min-width:0;max-width:none;overflow:hidden}.capacity-grid .cg-day,.capacity-grid .cg-hours,.capacity-grid .cg-total{min-width:0}
+.capacity-grid{table-layout:fixed;min-width:calc(230px + 96px + var(--days) * 34px + var(--projects,0) * 120px)}
+.cg-col-person{width:230px}.cg-col-hours{width:96px}.cg-col-day{width:auto}
+.capacity-grid .cg-person{min-width:0;max-width:none;overflow:hidden}.capacity-grid .cg-day,.capacity-grid .cg-hours{min-width:0}
 .capacity-grid tbody tr:not(.cg-note)>*{height:56px}
 .cg-name strong,.cg-name small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
-.capacity-grid .cg-total,.capacity-inline-hours input,.step-tab small{font-variant-numeric:tabular-nums}
-@media(max-width:740px){.capacity-grid{min-width:calc(160px + 88px + 72px + var(--days) * 32px + var(--projects,0) * 120px)}.cg-col-person{width:160px}.cg-col-hours{width:88px}.cg-col-total{width:72px}}
+.capacity-inline-hours input,.step-tab small{font-variant-numeric:tabular-nums}
+@media(max-width:740px){.capacity-grid{min-width:calc(160px + 88px + var(--days) * 32px + var(--projects,0) * 120px)}.cg-col-person{width:160px}.cg-col-hours{width:88px}}
 .step-tab small{display:inline-block;min-width:22px;text-align:center;box-sizing:border-box}
 /* Iteration kinds: current, already under way (amber, dimmed); the next one to plan (green); later ones (grey). */
 .iteration-option{--kind:#8b9690;--kind-bg:#f1f3f2;--kind-text:#5f6b64;position:relative;overflow:hidden;border-top:4px solid var(--kind);padding-top:18px}
