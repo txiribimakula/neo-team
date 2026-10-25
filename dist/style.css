@@ -892,18 +892,22 @@ button.tp-cell:hover{border-color:#91ad81;background:#f6faf3}
 .planning-actions[hidden]{display:none}
 @media(max-width:740px){.topbar-context{flex-basis:100%;gap:10px}.topbar-context .workspace-label,.topbar-context .divider{display:inline}.planning-actions{gap:6px}}
 
-/* Everyone stays visible above the current plan; selection opens their work below. */
+/* The backlog fills the left column; compact people cards head the right one. */
 .current-plan{display:flex;flex-direction:column;gap:16px;min-width:0}
-.current-plan>.section-heading{margin:0}
-.planning-people{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:10px}
-.planning-person{display:block;min-width:0;text-align:left;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:white;color:var(--ink);transition:border-color .15s,background .15s}
+.planning-team-column{display:flex;flex-direction:column;gap:12px}
+.planning-team-column>.section-heading{margin:0}
+.planning-people{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(170px,100%),1fr));gap:8px}
+.planning-person{display:block;min-width:0;text-align:left;border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:white;color:var(--ink);transition:border-color .15s,background .15s}
 .planning-person:hover{border-color:#91ad81;background:#f9fcf6}
 .planning-person.active{border-color:var(--green);background:#f1f7e9;box-shadow:inset 0 0 0 1px var(--green)}
-.planning-person .person-detail{display:flex;flex-direction:column;gap:4px}
-.planning-person .person-detail strong{font-size:14px;overflow-wrap:anywhere}
-.planning-person .person-detail small{color:var(--muted);font-size:12px}
-.planning-person .capacity-line{margin:12px 0 7px;gap:8px;flex-wrap:wrap}
+.planning-person .person{gap:7px}
+.planning-person .avatar{width:26px;height:26px;font-size:10px}
+.planning-person .person-detail{display:flex;flex-direction:column;gap:2px}
+.planning-person .person-detail strong{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
+.planning-person .person-detail small{color:var(--muted);font-size:11px}
+.planning-person .capacity-line{margin:6px 0 4px;gap:4px;flex-wrap:wrap;font-size:11px}
 .planning-person .capacity-track,.planning-person .capacity-fill{display:block}
+.planning-person .capacity-track{height:3px}
 .planning-person.no-capacity{border-style:dashed}
 .planning-person.drop-active{background:#e4f2d3;border-color:var(--green);outline:2px dashed var(--green);outline-offset:2px}
 .planning-person-empty{min-height:240px}
@@ -915,7 +919,7 @@ button.tp-cell:hover{border-color:#91ad81;background:#f6faf3}
 .board.short-columns .backlog .hierarchy-branch>summary{position:static}
 .board.short-columns .backlog .hierarchy-leaf{scroll-margin-top:10px}
 .assign-active{white-space:normal;text-align:center;flex-shrink:0}
-@media(max-width:740px){.planning-people{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.planning-person{padding:12px 10px}.planning-person .person{align-items:flex-start;gap:7px}.planning-person .avatar{width:28px;height:28px;font-size:10px}.planning-person .capacity-line{font-size:11px}.assign-active{flex-basis:100%}}
+@media(max-width:740px){.planning-people{grid-template-columns:repeat(2,minmax(0,1fr))}.planning-person .person{align-items:flex-start}.assign-active{flex-basis:100%}}
 
 /* The name criterion of each project, with what it gives to the previous, current and next iterations. */
 .iteration-naming{display:flex;flex-direction:column;gap:12px;background:white;border:1px solid var(--line);border-radius:12px;padding:16px 18px}

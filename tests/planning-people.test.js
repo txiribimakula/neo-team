@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createDemo } from '../server/demo.js';
-import { planningWorkspace, stageChanges } from '../server/planner.js';
+import { planningWorkspace, stageChanges, stageCapacity } from '../server/planner.js';
 
 const source = await readFile(new URL('../dist/app.js', import.meta.url), 'utf8');
 // Exercise the browser's selection and drop handlers with the actual local planner.
@@ -66,6 +66,25 @@ test('direct assignment moves backlog work into the chosen iteration and avoids 
   assert.equal(assigned.iterationPath, iteration.path);
   assert.equal(context.activePlanningMember, 'ana@example.test');
   assert.equal(context.assignActiveButton(assigned), '');
+});
+
+test('people without available capacity are hidden and their existing work stays accessible', () => {
+  const { context, workspace, iteration } = fixture();
+  stageCapacity(workspace, iteration.id, { key: 'ana', activities: [{ name: 'Development', capacityPerDay: 0 }] });
+  workspace.capacities[iteration.id].teamMembers = workspace.capacities[iteration.id].teamMembers.filter(record => record.teamMember.id !== 'marcos');
+  context.state.workspace = planningWorkspace(workspace);
+  const planned = context.state.workspace.effectiveItems.filter(i => i.iterationPath === iteration.path);
+  const cards = context.planPeople(iteration, planned);
+  assert.doesNotMatch(cards, /data-member="ana@example.test"|data-member="marcos@example.test"/);
+  assert.match(cards, /data-member="lucia@example.test"/);
+  assert.match(cards, /Fuera del reparto/);
+  context.activePlanningMember = 'ana@example.test';
+  assert.equal(context.activePlanningPerson(), null);
+  assert.equal(context.assignActiveButton(context.state.workspace.effectiveItems.find(i => i.id === 1053)), '');
+  context.activePlanningMember = '__outside__';
+  const detail = context.planLanes(iteration, planned);
+  assert.match(detail, /data-id="1042"/);
+  assert.match(detail, /data-id="1038"/);
 });
 
 test('a drop uses its target person with no active person or a different active person', async () => {

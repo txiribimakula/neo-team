@@ -1343,8 +1343,12 @@ function planningPersonCard(member, allItems, index, iteration) {
   const active=activePlanningMember===key(member);
   return `<button type="button" class="planning-person ${active ? 'active' : ''} ${capacity===0 ? 'no-capacity' : ''}" data-action="select-planning-person" data-member="${escape(key(member))}" data-drop="${escape(key(member))}" aria-pressed="${active}" aria-controls="plan-lanes"><span class="person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong>${escape(member.displayName)}</strong><small>${backlogQuery.trim() ? `${shown.length} de ` : ''}${plural(owned.length,'tarea')}${capacity===0 ? ' · Sin capacidad' : ''}</small></span></span><span class="capacity-line ${capacity!==null && hours>capacity ? 'over' : ''}"><span>${number(hours)} h${unknown ? ` + ${unknown} sin estimar` : ''}</span><span>${capacity===null ? 'Sin capacidad definida' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity===null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span></button>`;
 }
+function planningPeople(iteration=selected()) {
+  const ws=state.workspace;
+  return ws?.members.filter(member=>(ws.capacityHours?.[iteration?.id]?.[member.id] ?? 0)>0) ?? [];
+}
 function activePlanningPerson() {
-  return state.workspace?.members.find(member=>key(member)===activePlanningMember) ?? null;
+  return planningPeople().find(member=>key(member)===activePlanningMember) ?? null;
 }
 function assignActiveButton(item) {
   const member=activePlanningPerson(), iteration=selected();
@@ -1400,18 +1404,21 @@ function leftPanelCount() {
   const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : quick ? state.workspace.effectiveItems.filter(i=>quick(i) && matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
   return `${shown} de ${total}`;
 }
-// All team cards stay visible while only the selected person's tasks are shown.
+// Only people with available capacity get a card; their tasks open below it.
 const outsidePlanningMember='__outside__';
-const outsidePlanningTasks=planned=>planned.filter(item=>item.assignedTo && !state.workspace.members.some(member=>key(member)===item.assignedTo));
+const outsidePlanningTasks=planned=>{
+  const available=new Set(planningPeople().map(key));
+  return planned.filter(item=>item.assignedTo && !available.has(item.assignedTo));
+};
 function planPeople(iteration, planned) {
-  const outside=outsidePlanningTasks(planned);
-  return state.workspace.members.map((member,index)=>planningPersonCard(member,planned,index,iteration)).join('')+(outside.length ? `<button type="button" class="planning-person ${activePlanningMember===outsidePlanningMember ? 'active' : ''}" data-action="select-planning-person" data-member="${outsidePlanningMember}" aria-pressed="${activePlanningMember===outsidePlanningMember}" aria-controls="plan-lanes"><span class="person"><span class="avatar">…</span><span class="person-detail"><strong>Otras personas</strong><small>${plural(outside.length,'tarea')} · Fuera del equipo</small></span></span></button>` : '');
+  const outside=outsidePlanningTasks(planned), available=new Set(planningPeople(iteration).map(key));
+  return state.workspace.members.map((member,index)=>available.has(key(member)) ? planningPersonCard(member,planned,index,iteration) : '').join('')+(outside.length ? `<button type="button" class="planning-person ${activePlanningMember===outsidePlanningMember ? 'active' : ''}" data-action="select-planning-person" data-member="${outsidePlanningMember}" aria-pressed="${activePlanningMember===outsidePlanningMember}" aria-controls="plan-lanes"><span class="person"><span class="avatar">…</span><span class="person-detail"><strong>Fuera del reparto</strong><small>${plural(outside.length,'tarea')}</small></span></span></button>` : '');
 }
 function planLanes(iteration, planned) {
   const member=activePlanningPerson(), outside=activePlanningMember===outsidePlanningMember;
   if (!member && !outside) return '<div class="empty-panel planning-person-empty"><h2>Selecciona una persona</h2><p>Verás sus tareas aquí. Para asignar trabajo, usa su botón en el backlog o arrastra una tarea a la tarjeta de la persona.</p></div>';
   const owned=outside ? outsidePlanningTasks(planned) : planned.filter(item=>item.assignedTo===key(member)), shown=filtered(owned);
-  const title=outside ? 'Otras personas' : member.displayName;
+  const title=outside ? 'Fuera del reparto' : member.displayName;
   const note=member?.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : '';
   return `<section class="member planning-person-tasks" ${member ? `data-drop="${escape(key(member))}"` : ''}><div class="member-header"><div class="section-heading"><h2>${escape(title)}</h2><span class="count">${backlogQuery.trim() ? `${shown.length} de ` : ''}${plural(owned.length,'tarea')}</span></div></div>${note}<div class="member-items planning-task-grid">${shown.map(item=>taskCard(item,false,nextIteration(iteration),true)).join('') || `<div class="drop-hint">${owned.length ? 'Ninguna tarea coincide con el filtro' : 'Sin tareas en esta iteración. Asigna desde el backlog o arrastra una tarea a su tarjeta.'}</div>`}</div></section>`;
 }
@@ -1432,7 +1439,7 @@ function board(iteration, planned) {
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas del backlog y del plan: espacios o AND, OR, paréntesis, &quot;frase&quot; y -excluir" title="Espacio o AND: todas · OR o |: alguna · ( ) agrupa · &quot;frase&quot; · -palabra excluye" aria-controls="backlog-tree plan-lanes" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   // Only tasks still in the plan stay chosen (another iteration, a task moved away…).
   for (const id of selectedTasks) if (!planned.some(i=>i.id===id)) selectedTasks.delete(id);
-  return `<section class="current-plan"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count" id="plan-count">${planCount(planned)}</span></div><div class="planning-people" id="plan-people" role="group" aria-label="Personas de la iteración">${planPeople(iteration,planned)}</div><div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people" id="plan-lanes" aria-label="Tareas de la persona seleccionada">${planLanes(iteration,planned)}</section>${bulkBar()}</div></section>`;
+  return `<section class="current-plan"><div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column planning-team-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count" id="plan-count">${planCount(planned)}</span></div><div class="planning-people" id="plan-people" role="group" aria-label="Personas de la iteración">${planPeople(iteration,planned)}</div><div id="plan-lanes" aria-label="Tareas de la persona seleccionada">${planLanes(iteration,planned)}</div></section>${bulkBar()}</div></section>`;
 }
 
 function render() {
