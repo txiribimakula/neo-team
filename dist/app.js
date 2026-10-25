@@ -951,7 +951,6 @@ async function decidePrevious(id, decision, path) {
     const member=state.workspace.members.find(m=>key(m)===owner);
     if (!member || state.workspace.capacityHours?.[target.id]?.[member.id]===0) { toast(`#${id} pasa a ${target.name}, pero ${member ? `${member.displayName} tiene 0 h de capacidad` : `${memberName(owner)} no está en el equipo`} en esa iteración.`,'warning'); return; }
   }
-  toast(decision==='carry' ? `#${id} pasa a ${iteration.name}. Pendiente de sincronizar.` : decision==='move' ? `#${id} pasa a ${iterationName(path)}. Pendiente de sincronizar.` : decision==='backlog' ? `#${id} vuelve al backlog. Pendiente de sincronizar.` :decision==='complete' ? `#${id} marcada como completada en local.` : `Decisión sobre #${id} deshecha.`);
 }
 // Step 1: the capacity and days off that the rest of the planning is measured
 // against. Every edit is a local draft until the review writes it to Azure.
