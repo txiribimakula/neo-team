@@ -1050,12 +1050,12 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours) {
   const projectCells=member=>projects.map(source=>{
     const plan=projectCapacity(source,member);
     const title=plan ? `${source.config.project}: ${dailyNumber.format(plan.daily)} h/día de capacidad${ws.sources ? ` · ${number(plan.ratio*100)} % de las horas de tareas asignadas` : ''}` : `${source.config.project}: no disponible para esta persona en esta iteración`;
-    return `<td class="cg-project" title="${escape(title)}">${plan ? `<strong>${dailyNumber.format(plan.daily)} h/día</strong><small>${number(plan.ratio*100)} %</small>` : '—'}</td>`;
+    return `<td class="cg-project" title="${escape(title)}">${plan ? `<strong>${dailyNumber.format(plan.daily)}</strong><small>${number(plan.ratio*100)} %</small>` : '—'}</td>`;
   }).join('');
-  const projectTotals=projects.map(source=>`<td class="cg-project"><strong>${dailyNumber.format(ws.members.reduce((sum,member)=>sum+(projectCapacity(source,member)?.daily ?? 0),0))} h/día</strong></td>`).join('');
+  const projectTotals=projects.map(source=>`<td class="cg-project"><strong>${dailyNumber.format(ws.members.reduce((sum,member)=>sum+(projectCapacity(source,member)?.daily ?? 0),0))}</strong></td>`).join('');
   const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+2+projects.length, teamOff=capacityOf(iteration.id,'team').daysOff;
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
-  const head=`<tr><th class="cg-person" scope="col">${capacityHistoryButtons(iteration.id)}</th><th class="cg-hours" scope="col">h / día</th>${projects.map(source=>`<th class="cg-project" scope="col">${escape(source.config.project)}</th>`).join('')}${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}</tr>`;
+  const head=`<tr><th class="cg-person" scope="col">${capacityHistoryButtons(iteration.id)}</th><th class="cg-hours" scope="col">h / día</th>${projects.map(source=>`<th class="cg-project" scope="col">${escape(source.config.project)}<small>h / día</small></th>`).join('')}${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}</tr>`;
   const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todos</strong></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${projectTotals}${capacityDayCells('team','Todos',days,teamOff,teamOff)}</tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
   // Available people first; then those off every day, those with 0 h and, last,
   // those without capacity in Azure. Everyone without hours is dimmed.
