@@ -891,3 +891,28 @@ button.tp-cell:hover{border-color:#91ad81;background:#f6faf3}
 .planning-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .planning-actions[hidden]{display:none}
 @media(max-width:740px){.topbar-context{flex-basis:100%;gap:10px}.topbar-context .workspace-label,.topbar-context .divider{display:inline}.planning-actions{gap:6px}}
+
+/* The name criterion of each project, with what it gives to the previous, current and next iterations. */
+.iteration-naming{display:flex;flex-direction:column;gap:12px;background:white;border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.naming-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.naming-head h3{margin:0;font:700 15px 'Manrope',sans-serif}
+.naming-project{display:flex;flex-direction:column;gap:8px}
+.naming-template{display:flex;align-items:center;gap:10px}
+.naming-template span{font-weight:700;font-size:13px;min-width:0;overflow-wrap:anywhere}
+.naming-template input{flex:1;min-width:0;font:inherit;font-size:14px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:white;color:var(--ink)}
+.naming-rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.naming-row{--kind:#8b9690;--kind-bg:#f1f3f2;--kind-text:#5f6b64;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.naming-row.kind-current{--kind-bg:#fbf1d9;--kind-text:#8a6412}
+.naming-row.kind-future{--kind-bg:#e6f2e4;--kind-text:#2f6b41}
+.naming-row .iteration-when{background:var(--kind-bg);color:var(--kind-text);min-width:72px;text-align:center}
+.naming-row strong{font-weight:600;color:var(--muted);overflow-wrap:anywhere}
+.naming-row.changed strong{color:var(--ink)}
+.naming-from{text-decoration:line-through;overflow-wrap:anywhere}
+.naming-row.invalid strong{color:#a33b2b}
+.naming-row small{color:#a33b2b;flex-basis:100%;padding-left:80px}
+.naming-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.naming-actions small{color:var(--muted);font-size:12px}
+.naming-shared{flex-basis:100%;margin:0 0 4px;padding-left:18px;font-size:13px;color:#8a6412}
+.iteration-preview span{display:block}
+.iteration-preview small{font:600 12px 'Inter',sans-serif;color:var(--muted)}
+@media(max-width:740px){.naming-template{flex-direction:column;align-items:stretch;gap:4px}.naming-row small{padding-left:0}}

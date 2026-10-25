@@ -76,7 +76,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write', 'neo_test_plans', 'neo_test_plan_points', 'neo_iteration_create_write']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write', 'neo_test_plans', 'neo_test_plan_points', 'neo_iteration_create_write', 'neo_iteration_rename_write', 'neo_iteration_teams']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -253,6 +253,19 @@ export class AzureGateway {
     const result = await this.call('neo_iteration_create_write', { project: config.project, team: config.team, parentPath, name, startDate, finishDate });
     if (typeof result?.id !== 'string') throw new Error('Azure DevOps no confirmó la iteración creada.');
     return result;
+  }
+  // A new name or folder for an iteration of the project, found by its identifier.
+  async renameIteration(config, { id, path, parentPath, name }) {
+    const result = await this.call('neo_iteration_rename_write', { project: config.project, id, path, parentPath, name });
+    if (result?.id !== id) throw new Error('Azure DevOps no confirmó el nuevo nombre de la iteración.');
+    return result;
+  }
+  // The other teams of the project that use each iteration.
+  async iterationTeams(config, ids) {
+    const result = await this.call('neo_iteration_teams', { project: config.project, team: config.team, ids });
+    if (!result?.shared || typeof result.shared !== 'object') throw new Error('Azure DevOps no devolvió los equipos de las iteraciones.');
+    if (result.unreadable) this.report('info', `No se pudieron leer las iteraciones de ${result.unreadable} equipo${result.unreadable === 1 ? '' : 's'} de ${config.project}.`);
+    return result.shared;
   }
   async updateMemberCapacity(config, iterationId, teamMemberId, activities, daysOff) {
     const raw = await this.call('neo_team_capacity_write', { project: config.project, team: config.team, iterationId, teamMemberId, activities, daysOff });

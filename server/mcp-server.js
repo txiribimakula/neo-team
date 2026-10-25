@@ -175,26 +175,104 @@ server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an ite
   const api = await (await connectionProvider()).getWorkApi();
   return { content: [{ type: 'text', text: JSON.stringify(await api.updateTeamDaysOff({ daysOff: asDates(daysOff) }, { project, team }, iterationId)) }] };
 });
-// A new iteration is created under the parent of the team's last one and added
-// to the team. One that already exists with that name and dates is reused, so
-// repeating the call after a lost answer does not fail or duplicate it.
+// The iteration tree of a project, by path segments under the root ("" for the root).
+// The REST client resolves a 404 as null, so a missing node reads as null.
+async function iterationNodes(project) {
+  const wit = await (await connectionProvider()).getWorkItemTrackingApi(), options = wit.createRequestOptions('application/json', '7.1');
+  const url = segments => `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations${segments.map(s => `/${encodeURIComponent(s)}`).join('')}?api-version=7.1`;
+  const nodes = {
+    get: async segments => (await wit.rest.get(url(segments), options)).result,
+    create: async (parent, body) => (await wit.rest.create(url(parent), body, options)).result,
+    rename: async (segments, name) => (await wit.rest.update(url(segments), { name }, options)).result,
+    // Folders without dates, created where they are missing.
+    folders: async segments => {
+      for (let depth = 1; depth <= segments.length; depth++) if (!await nodes.get(segments.slice(0, depth))) {
+        await nodes.create(segments.slice(0, depth - 1), { name: segments[depth - 1] });
+        emit('info', `Carpeta «${segments.slice(0, depth).join('\\')}» creada en ${project}.`);
+      }
+    },
+  };
+  return nodes;
+}
+const segmentsOf = path => path.split(/[\\/]/).filter(Boolean);
+const lower = segments => segments.join('\\').toLowerCase();
+// A new iteration is created under the parent of the team's last one (or in the
+// template's folders, created if missing) and added to the team. One that already
+// exists with that name and dates is reused, so repeating the call after a lost
+// answer does not fail or duplicate it.
 server.tool('neo_iteration_create_write', 'Create an iteration with its dates and add it to the team, or reuse the existing one with the same name and dates.', {
   project: z.string().min(1), team: z.string().min(1), parentPath: z.string().max(4000), name: z.string().min(1).max(255),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), finishDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 }, async ({ project, team, parentPath, name, startDate, finishDate }) => {
-  const connection = await connectionProvider(), wit = await connection.getWorkItemTrackingApi(), work = await connection.getWorkApi();
-  const segments = [...parentPath.split(/[\\/]/).filter(Boolean), name].map(encodeURIComponent);
-  const url = segment => `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations${segment}?api-version=7.1`;
-  const options = wit.createRequestOptions('application/json', '7.1');
-  let node = (await wit.rest.get(url(`/${segments.join('/')}`), options)).result;
+  const work = await (await connectionProvider()).getWorkApi(), nodes = await iterationNodes(project), parent = segmentsOf(parentPath);
+  let node = await nodes.get([...parent, name]);
   const dates = value => String(value ?? '').slice(0, 10);
   if (node && (dates(node.attributes?.startDate) !== startDate || dates(node.attributes?.finishDate) !== finishDate)) throw new Error(`Ya existe la iteración «${name}» en ${project} con otras fechas (${dates(node.attributes?.startDate) || 'sin fecha'} → ${dates(node.attributes?.finishDate) || 'sin fecha'}).`);
   const reused = !!node;
-  if (!node) node = (await wit.rest.create(url(segments.length > 1 ? `/${segments.slice(0, -1).join('/')}` : ''), { name, attributes: { startDate: `${startDate}T00:00:00Z`, finishDate: `${finishDate}T00:00:00Z` } }, options)).result;
+  if (!node) {
+    await nodes.folders(parent);
+    node = await nodes.create(parent, { name, attributes: { startDate: `${startDate}T00:00:00Z`, finishDate: `${finishDate}T00:00:00Z` } });
+  }
   if (!node?.identifier) throw new Error('Azure DevOps no confirmó la iteración creada.');
   await work.postTeamIteration({ id: node.identifier }, { project, team });
   emit('info', `Iteración «${name}» ${reused ? 'ya existía' : 'creada'} y añadida al equipo ${team}.`);
   return { content: [{ type: 'text', text: JSON.stringify({ id: node.identifier, name: node.name, path: node.path, attributes: node.attributes, reused }) }] };
+});
+// Renaming or moving a node keeps its identifier: its dates, the teams that use it,
+// their capacity and the work items in it stay with it, and Azure shows the new
+// path in those items. The node is checked by its identifier before anything
+// changes, and a call that already took effect returns without changing anything.
+server.tool('neo_iteration_rename_write', 'Rename an iteration or move it to another folder (created if missing), keeping its identifier, dates, teams and work items.', {
+  project: z.string().min(1), id: z.string().min(1).max(100), path: z.string().min(1).max(4000), parentPath: z.string().max(4000), name: z.string().min(1).max(255),
+}, async ({ project, id, path, parentPath, name }) => {
+  const nodes = await iterationNodes(project), from = segmentsOf(path), parent = segmentsOf(parentPath), to = [...parent, name];
+  const done = node => ({ content: [{ type: 'text', text: JSON.stringify({ id: node.identifier, name: node.name, path: node.path }) }] });
+  let target = await nodes.get(to);
+  if (target?.identifier === id && target.name === name) return done(target);
+  if (target && target.identifier !== id) throw new Error(`Ya existe «${to.join('\\')}» en ${project}. Elige otro nombre.`);
+  const node = await nodes.get(from);
+  if (node?.identifier !== id) throw new Error(`«${from.join('\\')}» ya no es la misma iteración en ${project}. Actualiza las iteraciones.`);
+  const oldParent = from.slice(0, -1);
+  if (lower(oldParent) === lower(parent)) await nodes.rename(from, name);
+  else {
+    await nodes.folders(parent);
+    // Moved with its current name and renamed there, or the other way round when
+    // the destination already has a node with the current name.
+    if (!await nodes.get([...parent, node.name])) {
+      await nodes.create(parent, { id: node.id });
+      if (node.name !== name) await nodes.rename([...parent, node.name], name);
+    } else if (!await nodes.get([...oldParent, name])) {
+      await nodes.rename(from, name);
+      await nodes.create(parent, { id: node.id });
+    } else throw new Error(`No se puede mover «${from.join('\\')}» a «${to.join('\\')}» en ${project}: hay nombres repetidos en las dos carpetas.`);
+  }
+  target = await nodes.get(to);
+  if (target?.identifier !== id) throw new Error('Azure DevOps no confirmó el nuevo nombre de la iteración.');
+  emit('info', `«${from.join('\\')}» → «${to.join('\\')}» en ${project}.`);
+  return done(target);
+});
+// Which other teams of the project use some iterations: renaming them reaches those
+// teams too. Teams whose iterations cannot be read are counted apart.
+server.tool('neo_iteration_teams', 'List the other teams of the project that use the given iterations.', {
+  project: z.string().min(1), team: z.string().min(1), ids: z.array(z.string().min(1).max(100)).min(1).max(500),
+}, async ({ project, team, ids }) => {
+  const connection = await connectionProvider(), core = await connection.getCoreApi(), work = await connection.getWorkApi();
+  const teams = [];
+  for (let skip = 0; ; skip += 500) {
+    const page = await core.getTeams(project, false, 500, skip);
+    teams.push(...page);
+    if (page.length < 500) break;
+  }
+  const others = teams.filter(t => t.name.toLowerCase() !== team.toLowerCase()), wanted = new Set(ids), shared = Object.fromEntries(ids.map(i => [i, []]));
+  let unreadable = 0;
+  for (let offset = 0; offset < others.length; offset += 4) {
+    await Promise.all(others.slice(offset, offset + 4).map(async other => {
+      try { for (const iteration of await work.getTeamIterations({ project, team: other.name }) ?? []) if (wanted.has(iteration.id)) shared[iteration.id].push(other.name); }
+      catch { unreadable++; }
+    }));
+    emit('info', `${Math.min(offset + 4, others.length)} / ${others.length} equipos revisados.`);
+  }
+  return { content: [{ type: 'text', text: JSON.stringify({ shared, unreadable }) }] };
 });
 // A query and the fields of its results in one tool call: batches of 200 are
 // read in parallel inside the MCP instead of one round trip per batch.

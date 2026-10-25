@@ -1,6 +1,6 @@
 import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
-import { iterationPlan, createIteration, addDemoIteration } from './iterations.js';
+import { iterationPlan, createIteration, addDemoIteration, templatesFor, iterationRenames, sharedIterations, renameIterations, renameLocally } from './iterations.js';
 import { mergeProjects, sourcesOf, sourceId } from './multi-project.js';
 import http from 'node:http';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
@@ -171,8 +171,15 @@ const myIterationScope = () => JSON.stringify([store.data.mode, store.data.confi
 const currentMyIteration = () => myIteration?.scope === myIterationScope() ? myIteration : null;
 // The last test plan query, kept only in memory like maintenance.
 let testPlans = null;
-// The name template of new iterations, remembered per team (or for the example data).
-const iterationTemplateKey = () => store.data.mode === 'demo' ? 'demo' : store.data.azure ? sourceId(store.data.azure.config) : '';
+// The name template of iterations, remembered per project and team (apart for the
+// example data). Before there was one per planning, kept under its first team.
+const iterationTemplateKey = id => store.data.mode === 'demo' ? `demo:${id}` : id;
+function iterationTemplates() {
+  const workspace = store.data[store.data.mode], saved = store.data.iterationTemplates ?? {};
+  const legacy = saved[store.data.mode === 'demo' ? 'demo' : store.data.azure ? sourceId(store.data.azure.config) : ''];
+  return Object.fromEntries(sourcesOf(workspace).map((source, index) => [source.id, saved[iterationTemplateKey(source.id)] ?? (index ? null : legacy ?? null)]).filter(([, template]) => template));
+}
+const withTemplates = (data, templates) => { data.iterationTemplates = { ...data.iterationTemplates, ...Object.fromEntries(Object.entries(templates).map(([id, template]) => [iterationTemplateKey(id), template])) }; return data; };
 const currentTestPlans = () => testPlans?.scope === maintenanceScope() ? testPlans : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 // Local steps after the Azure queries join the activity, so a failure shows
@@ -220,7 +227,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplate: store.data.iterationTemplates?.[iterationTemplateKey()] ?? null, copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -241,7 +248,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
+const LOCAL_PATHS = new Set(['/api/iteration-templates', '/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -338,7 +345,7 @@ const server = http.createServer(async (req, res) => {
       if (busy) throw fail('Hay una operación en curso. Espera a que termine.', 409);
       if (input.version !== store.data.version) throw fail('La planificación cambió en otra ventana. Recarga para ver la versión actual.', 409);
       busy = true;
-      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/create-iteration':'Creando la iteración', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/maintenance-comment': 'Publicando el comentario', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
+      const labels = { '/api/maintenance': 'Consultando mantenimiento', '/api/my-iteration': 'Consultando mi iteración', '/api/test-plans': 'Consultando planes de prueba', '/api/maintenance-states': 'Consultando estados', '/api/security-groups': 'Consultando grupos de permisos', '/api/security-audit': 'Analizando permisos del grupo', '/api/refresh-section':'Actualizando sección', '/api/create-iteration':'Creando la iteración', '/api/iteration-rename-check':'Comprobando las iteraciones', '/api/iteration-rename':'Renombrando iteraciones', '/api/download-capacity':'Descargando capacidad', '/api/upload-capacity':'Subiendo capacidad', '/api/import': 'Importando equipo', '/api/projects': 'Buscando proyectos', '/api/teams': 'Buscando equipos', '/api/review': 'Revisando cambios', '/api/work-item-states': 'Consultando estados', '/api/sync': 'Sincronizando cambios', '/api/pr-repositories': 'Buscando repositorios', '/api/pr-list': 'Buscando pull requests', '/api/pr-mine': 'Buscando tus pull requests', '/api/pr-review': 'Revisando el pull request con GitHub Copilot', '/api/pr-publish': 'Publicando comentarios en Azure DevOps', '/api/maintenance-comment': 'Publicando el comentario', '/api/copilot-status': 'Comprobando GitHub Copilot', '/api/jira-settings': 'Conectando con Jira', '/api/jira-refresh': 'Actualizando desde Jira', '/api/assistant': 'Consultando a GitHub Copilot', '/api/pipelines': 'Consultando los pipelines', '/api/pipeline-review': 'Revisando el pipeline con GitHub Copilot' };
       operation = { id: typeof input.operationId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(input.operationId) ? input.operationId : randomBytes(16).toString('hex'), path, status: 'running', title: labels[path] || 'Guardando cambios locales', phase: 'connection', message: 'Preparando la operación…', counts: {}, startedAt: Date.now(), updatedAt: Date.now(), cancellable: ['/api/review', '/api/pipelines', '/api/pipeline-review', '/api/assistant','/api/jira-refresh', '/api/pr-repositories', '/api/pr-list', '/api/pr-mine', '/api/pr-review', '/api/copilot-status', '/api/refresh-section', '/api/import', '/api/projects', '/api/teams', '/api/security-groups', '/api/security-audit', '/api/maintenance', '/api/my-iteration', '/api/test-plans', '/api/maintenance-states', '/api/work-item-states'].includes(path) };
       try {
         // Load the available task states on demand for the local editor.
@@ -953,8 +960,28 @@ const server = http.createServer(async (req, res) => {
           let workspace;
           if(store.data.mode==='demo') { workspace=structuredClone(store.data.demo); addDemoIteration(workspace,plan); }
           else workspace=await createIteration(store.data.azure,plan,azure,store.data.stateRules ?? [],progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
-          const data=structuredClone(store.data);data[data.mode]=workspace;data.iterationTemplates={...data.iterationTemplates,[iterationTemplateKey()]:plan.template};
+          const data=withTemplates(structuredClone(store.data),plan.templates);data[data.mode]=workspace;
           step('Guardando la copia local…');await store.save(data);planner.review=null;
+        } else if(path==='/api/iteration-templates') {
+          // The criterion for new iterations; existing ones keep their names.
+          const templates=templatesFor(store.data[store.data.mode],input);
+          if(!Object.keys(templates).length) throw fail('Escribe el nombre de la iteración.');
+          await store.save(withTemplates(structuredClone(store.data),templates));
+        } else if(path==='/api/iteration-rename-check') {
+          // Before renaming: the other teams that use these iterations.
+          let plan;
+          try { plan=iterationRenames(store.data[store.data.mode],input); } catch(error) { throw fail(error.message); }
+          const shared=store.data.mode==='demo' ? {} : await sharedIterations(plan,azure,progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
+          return json(res,{result:{shared},state:publicState({operationComplete:true})});
+        } else if(path==='/api/iteration-rename') {
+          let plan;
+          try { plan=iterationRenames(store.data[store.data.mode],input); } catch(error) { throw fail(error.message); }
+          let result;
+          if(store.data.mode==='demo') result={workspace:renameLocally(structuredClone(store.data.demo),plan.sources.flatMap(({source,renames})=>renames.map(rename=>({source,rename})))),failure:null};
+          else result=await renameIterations(store.data.azure,plan,azure,store.data.stateRules ?? [],progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
+          const data=withTemplates(structuredClone(store.data),plan.templates);data[data.mode]=result.workspace;
+          step('Guardando la copia local…');await store.save(data);planner.review=null;
+          if(result.failure) throw result.failure;
         } else if(path==='/api/download-capacity') {
           const workspace=await downloadCapacity(store.data.azure,input.iterationId,azure,progress=>{operation={...operation,...progress,step:null,updatedAt:Date.now()};});
           const data=structuredClone(store.data);data.azure=workspace;

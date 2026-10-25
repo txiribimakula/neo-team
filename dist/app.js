@@ -8,8 +8,8 @@ import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { matchesQuery, compileQuery } from './search.js';
-import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays } from './sprint-name.js';
-import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot } from './hierarchy.js';
+import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf } from './sprint-name.js';
+import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot, localDay } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -795,20 +795,78 @@ function iterationView() {
   return `<section class="iteration-step"><div class="iteration-options">${finishedIterations()}${iterations.map(i=>{
     const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne?.id;
     return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
-  }).join('')}${newIterationCard()}</div></section>`;
+  }).join('')}${newIterationCard()}</div>${namingSection()}</section>`;
 }
-// A new iteration is written in its own card: the name template, with the name it
-// gives, and its dates. The template is remembered for the next one.
+// The name criterion of each project: its template, remembered for new iterations,
+// and what it gives to the previous, current and next ones. Applying it renames
+// those in Azure DevOps after a confirmation on the same page.
+const namingSources=()=>state.workspace.sources ?? [{id:null,config:state.workspace.config,iterations:state.workspace.iterations,settings:state.workspace.settings}];
+const namingId=source=>source.id ?? 'single';
+let namingDrafts={}, namingFocus=null, renameCheck=null;
+// With one project the server knows its key; with several, each goes by its own.
+const savedTemplate=source=>(source.id ? state.iterationTemplates?.[source.id] : Object.values(state.iterationTemplates ?? {})[0]) ?? null;
+const namingTemplate=source=>namingDrafts[namingId(source)] ?? savedTemplate(source) ?? guessTemplate(latestIteration(source.iterations)?.name,sequence(source.iterations).position);
+const namingTemplates=()=>state.workspace.sources ? {templates:Object.fromEntries(namingSources().map(source=>[source.id,namingTemplate(source)]))} : {template:namingTemplate(namingSources()[0])};
+const namingPlans=()=>namingSources().map(source=>({source,plan:renamePlan(source.iterations,namingTemplate(source),localDay())}));
+const namingKind={past:'Anterior',current:'En curso',next:'Siguiente'};
+function namingRows(plan) {
+  return plan.rows.map(row=>`<li class="naming-row kind-${row.kind==='next' ? 'future' : row.kind} ${row.changed ? 'changed' : ''} ${row.problem ? 'invalid' : ''}" title="${date(row.startDate)} — ${date(row.finishDate)}"><span class="iteration-when">${namingKind[row.kind]}</span>${row.changed ? `<span class="naming-from">${escape(row.from)}</span><span aria-hidden="true">→</span>` : ''}<strong>${escape(row.to) || '—'}</strong>${row.problem ? `<small role="alert">${escape(row.problem)}</small>` : ''}</li>`).join('');
+}
+function namingSection() {
+  const plans=namingPlans(), many=plans.length>1, changes=plans.reduce((sum,{plan})=>sum+plan.renames.length,0), problem=plans.find(({plan})=>plan.problem);
+  const unsaved=namingSources().some(source=>namingDrafts[namingId(source)]!==undefined && namingDrafts[namingId(source)]!==savedTemplate(source));
+  const pending=pendingCount()>0;
+  const projects=plans.map(({source,plan})=>`<div class="naming-project"><label class="naming-template">${many ? `<span>${escape(source.config.project)}</span>` : ''}<input data-naming="${escape(namingId(source))}" value="${escape(namingTemplate(source))}" maxlength="255" aria-label="Criterio de nombre${many ? ` de ${escape(source.config.project)}` : ''}" title="{n} conserva el número de cada iteración · {semana}, {mes}, {año} y {día} salen del inicio · \\ separa carpetas desde el proyecto"></label><ol class="naming-rows">${namingRows(plan)}</ol></div>`).join('');
+  const shared=renameCheck ? Object.entries(renameCheck.shared).flatMap(([id,iterations])=>Object.entries(iterations).map(([iteration,teams])=>{
+    const source=namingSources().find(s=>(s.id ?? '')===id || !s.id), name=source?.iterations.find(i=>i.id===iteration)?.name ?? iteration;
+    return `<li>«${escape(name)}» · ${teams.map(escape).join(', ')}</li>`;
+  })) : [];
+  const actions=renameCheck
+    ? `${shared.length ? `<ul class="naming-shared" aria-label="También usadas por">${shared.join('')}</ul>` : ''}<button type="button" class="button small primary" data-action="naming-confirm">${state.mode==='demo' ? 'Renombrar en el ejemplo' : 'Renombrar en Azure DevOps'}</button><button type="button" class="button small" data-action="naming-cancel">Cancelar</button>`
+    : `<button type="button" class="button small" data-action="naming-save" ${unsaved && !problem ? '' : 'disabled'}>Fijar</button><button type="button" class="button small primary" data-action="naming-apply" ${changes && !problem && !pending ? '' : 'disabled'}>Renombrar${changes ? ` ${changes}` : ''}</button>${pending && changes ? '<small>Sincroniza o descarta los cambios pendientes para renombrar.</small>' : ''}`;
+  return `<section class="iteration-naming" aria-label="Nombre de las iteraciones"><div class="naming-head"><h3>Nombres</h3><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span></div>${projects}<div class="naming-actions" id="naming-actions">${actions}</div></section>`;
+}
+function namingInput(el) {
+  namingDrafts[el.dataset.naming]=el.value;namingFocus=el.dataset.naming;renameCheck=null;
+  const position=el.selectionStart;
+  render();
+  const input=$(`[data-naming="${CSS.escape(namingFocus)}"]`);
+  input?.focus();input?.setSelectionRange(position,position);
+}
+async function saveNaming() {
+  await request('/api/iteration-templates',namingTemplates());
+  namingDrafts={};render();toast('Criterio fijado para las nuevas iteraciones.');
+}
+async function checkNaming() {
+  const {result}=await request('/api/iteration-rename-check',namingTemplates());
+  renameCheck={payload:namingTemplates(),shared:result.shared};render();$('[data-action="naming-confirm"]')?.focus();
+}
+async function confirmNaming() {
+  const {payload}=renameCheck, count=namingPlans().reduce((sum,{plan})=>sum+plan.renames.length,0);
+  renameCheck=null;
+  try { await request('/api/iteration-rename',payload); }
+  catch (error) { render();toast(error.message,'error');return; }
+  const renamed=count===1 ? '1 iteración renombrada' : `${count} iteraciones renombradas`;
+  namingDrafts={};render();toast(`${renamed} ${state.mode==='demo' ? 'en el ejemplo' : 'en Azure DevOps'}.`);
+}
+// A new iteration is written in its own card: the name each project's criterion
+// gives it, and its dates.
 let newIteration=null;
-const iterationsOfTeam=()=>state.workspace.sources?.[0]?.iterations ?? state.workspace.iterations;
-const newIterationName=()=>sprintName(newIteration.template,{startDate:newIteration.startDate,previousName:latestIteration(iterationsOfTeam())?.name});
+function newIterationNames() {
+  return namingSources().map(source=>{
+    const template=namingTemplate(source), last=latestIteration(source.iterations);
+    const name=sprintName(template,{startDate:newIteration.startDate,number:last ? sequence(source.iterations).numbers.get(last.id)+1 : 1});
+    return {project:source.config.project,path:name && placeName(template,name,last ? folderOf(relativePath(last.path)) : relativePath(source.settings?.backlogIteration?.path))};
+  });
+}
+const newIterationPreview=()=>{const names=newIterationNames();return names.map(({project,path})=>`<span>${names.length>1 ? `<small>${escape(project)}</small> ` : ''}${escape(path) || '—'}</span>`).join('');};
 function openNewIteration() {
-  newIteration={template:state.iterationTemplate || guessTemplate(latestIteration(iterationsOfTeam())?.name),...nextDates(state.workspace.iterations),error:''};
+  newIteration={...nextDates(state.workspace.iterations),error:''};
 }
 function newIterationCard() {
   if (!newIteration) return '<button type="button" class="iteration-option iteration-new" data-action="new-iteration" title="Nueva iteración" aria-label="Nueva iteración">+</button>';
-  const {template,startDate,finishDate,error}=newIteration;
-  return `<form class="iteration-option iteration-new open" id="new-iteration-form"><span class="iteration-tags"><span class="iteration-when">Nueva</span></span><strong class="iteration-preview" aria-live="polite">${escape(newIterationName()) || '—'}</strong><input name="template" data-new-iteration value="${escape(template)}" maxlength="255" required aria-label="Plantilla del nombre" title="{n} sigue la numeración de la última · {semana}, {mes}, {año} y {día} salen del inicio · admiten +1, -1…"><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span><span class="iteration-dates"><input type="date" name="startDate" data-new-iteration value="${startDate}" required aria-label="Inicio"><span aria-hidden="true">—</span><input type="date" name="finishDate" data-new-iteration value="${finishDate}" required aria-label="Fin"></span><small class="iteration-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</small><span class="iteration-new-actions"><button type="submit" class="button small primary">Crear</button><button type="button" class="button small" data-action="cancel-new-iteration">Cancelar</button></span></form>`;
+  const {startDate,finishDate,error}=newIteration;
+  return `<form class="iteration-option iteration-new open" id="new-iteration-form"><span class="iteration-tags"><span class="iteration-when">Nueva</span></span><strong class="iteration-preview" aria-live="polite">${newIterationPreview()}</strong><span class="iteration-dates"><input type="date" name="startDate" data-new-iteration value="${startDate}" required aria-label="Inicio"><span aria-hidden="true">—</span><input type="date" name="finishDate" data-new-iteration value="${finishDate}" required aria-label="Fin"></span><small class="iteration-error" role="alert" ${error ? '' : 'hidden'}>${escape(error)}</small><span class="iteration-new-actions"><button type="submit" class="button small primary">Crear</button><button type="button" class="button small" data-action="cancel-new-iteration">Cancelar</button></span></form>`;
 }
 function newIterationInput(el) {
   // Moving the start keeps the length of the iteration.
@@ -818,16 +876,16 @@ function newIterationInput(el) {
   }
   newIteration[el.name]=el.value;newIteration.error='';
   $('#new-iteration-form .iteration-error').hidden=true;
-  $('#new-iteration-form .iteration-preview').textContent=newIterationName() || '—';
+  $('#new-iteration-form .iteration-preview').innerHTML=newIterationPreview();
 }
 async function submitNewIteration(form) {
-  const button=$('[type="submit"]',form), name=newIterationName(), {template,startDate,finishDate}=newIteration;
+  const button=$('[type="submit"]',form), names=newIterationNames().map(n=>n.path), {startDate,finishDate}=newIteration;
   button.textContent='Creando…';
-  try { await request('/api/create-iteration',{template,startDate,finishDate}); }
-  catch (error) { newIteration.error=error.message;render();$('#new-iteration-form [name="template"]')?.focus();return; }
+  try { await request('/api/create-iteration',{...namingTemplates(),startDate,finishDate}); }
+  catch (error) { newIteration.error=error.message;render();$('#new-iteration-form [name="startDate"]')?.focus();return; }
   const created=planningIterations().find(i=>String(i.attributes?.startDate ?? '').slice(0,10)===startDate);
   if (created) chooseIteration(created.id);
-  newIteration=null;render();toast(state.mode==='demo' ? `«${name}» creada en los datos de prueba.` : `«${name}» creada en Azure DevOps.`);
+  namingDrafts={};newIteration=null;render();toast(state.mode==='demo' ? `«${names.join('», «')}» creada en los datos de prueba.` : `«${names.join('», «')}» creada en Azure DevOps.`);
 }
 // The finished iteration whose open tasks are decided in Tareas comes first. It
 // is not planned; without it, its tasks can be downloaded from here.
@@ -2305,12 +2363,16 @@ const actions = {
     render();$(`[data-import-rule="${index}"]`)?.focus({preventScroll:true});
   },
   'refresh-section':el=>refreshPlanningSection(el.dataset.section),
-  'new-iteration':()=>{openNewIteration();render();$('#new-iteration-form [name="template"]')?.focus();},
+  'new-iteration':()=>{openNewIteration();render();$('#new-iteration-form [name="startDate"]')?.focus();},
   'cancel-new-iteration':()=>{newIteration=null;render();$('[data-action="new-iteration"]')?.focus();},
   'iteration-token':el=>{
-    const input=$('#new-iteration-form [name="template"]'), start=input.selectionStart ?? input.value.length, end=input.selectionEnd ?? start;
-    input.setRangeText(el.dataset.token,start,end,'end');newIterationInput(input);input.focus();
+    const input=(namingFocus && $(`[data-naming="${CSS.escape(namingFocus)}"]`)) || $('[data-naming]'), start=input.selectionStart ?? input.value.length, end=input.selectionEnd ?? start;
+    input.setRangeText(el.dataset.token,start,end,'end');namingInput(input);
   },
+  'naming-save':saveNaming,
+  'naming-apply':checkNaming,
+  'naming-confirm':confirmNaming,
+  'naming-cancel':()=>{renameCheck=null;render();$('[data-action="naming-apply"]')?.focus();},
   'download-capacity':downloadCapacity,
   'copy-capacity':copyCapacity,
   'download-hierarchy':downloadHierarchy,
@@ -2583,6 +2645,7 @@ document.addEventListener('input',event=>{
   if(event.target.dataset.jiraTell!==undefined){const id=jiraChatId(jiraChatTarget(event.target));if(id)jiraUi.tells[id]=event.target.value;else jiraUi.tell=event.target.value;document.querySelectorAll(`[data-focus="${CSS.escape(event.target.dataset.focus)}"]`).forEach(other=>{if(other!==event.target)other.value=event.target.value;});}
   if(event.target.dataset.jiraAnswer){jiraUi.answers[event.target.dataset.jiraAnswer]=event.target.value;}
   if('newIteration' in (event.target.dataset ?? {})) newIterationInput(event.target);
+  if(event.target.dataset?.naming) namingInput(event.target);
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;lanesToggled.clear();refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}

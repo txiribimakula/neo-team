@@ -186,6 +186,18 @@ Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar c
 
 **Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior.
 
+### Nombres de las iteraciones
+
+En **2 · Iteración**, el recuadro **Nombres** tiene el criterio de cada proyecto importado y, debajo, lo que da a su iteración anterior, la actual y las siguientes (`nombre actual → nombre nuevo`).
+
+- **Criterio:** texto libre con `{n}`, `{semana}`, `{año}`, `{mes}` y `{día}` (las fechas salen del inicio de cada iteración y admiten `+1`, `-1`…). `\` separa carpetas: con alguna, la ruta empieza en el proyecto (`{año}\Sprint {n}` → `Proyecto\2026\Sprint 14`; `\Sprint {n}` va a la raíz); sin ninguna, cada iteración se queda en su carpeta. El proyecto es siempre el primer nivel y no forma parte del nombre.
+- **`{n}`:** en las existentes es el número que ya tiene cada una; en una nueva, el siguiente al de la última. Si el nombre tiene varios números, cuenta el que sube de uno en uno entre iteraciones y no coincide con su año, semana, mes o día.
+- **Fijar** guarda el criterio de cada proyecto para las iteraciones nuevas (el **+** de las tarjetas lo usa). No cambia las existentes.
+- **Renombrar N** lo aplica a las existentes que no lo siguen. Antes se comprueba qué otros equipos del proyecto usan esas iteraciones, porque el cambio también les llega, y se pide confirmación. En Azure DevOps cada iteración se renombra o se mueve por su identificador: conserva fechas, equipos, capacidad y elementos, que pasan a mostrar la ruta nueva. Las carpetas que falten se crean sin fechas; las que queden vacías no se borran.
+- **Condiciones:** no puede haber cambios pendientes de sincronizar, dos iteraciones no pueden acabar con el mismo nombre y, si los nombres se intercambian entre ellas, hay que hacerlo en dos pasos. Si una falla (por ejemplo, sin permiso para editar iteraciones), las ya renombradas se conservan y volver a aplicar sigue con el resto. Los enlaces guardados al taskboard llevan el nombre en la dirección y dejan de funcionar.
+
+En Prueba solo se cambia el ejemplo.
+
 ### Buscar
 
 Todos los buscadores (Filtrar tareas, el backlog, Mantenimiento y sus campos de texto, Planes de prueba, Pipelines y Permisos) entienden la misma sintaxis, sin distinguir mayúsculas ni acentos:
