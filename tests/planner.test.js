@@ -48,6 +48,14 @@ test('capacity honors working days, overlapping holidays and zero capacity',()=>
   assert.equal(workingCapacity(iteration,capacity,'missing'),null);
   capacity.teamMembers[0].activities=[];assert.equal(workingCapacity(iteration,capacity,'a'),0);
 });
+test('a cancelled comparison saves nothing and leaves no review',async t=>{
+  const f=await fixture(t);await f.stage(1042,{remainingWork:18});
+  f.remote.set(1042,{...f.remote.get(1042),title:'New remote title',rev:7});
+  const version=f.store.data.version;
+  await assert.rejects(()=>f.planner.prepareReview({cancelled:()=>true}),/cancelada/);
+  assert.equal(f.store.data.version,version);assert.equal(f.planner.review,null);
+  assert.notEqual(f.workspace().items.find(i=>i.id===1042).title,'New remote title');
+});
 test('unrelated remote changes are merged; synchronization sends only edited fields',async t=>{
   const f=await fixture(t);await f.stage(1042,{remainingWork:18});
   f.remote.set(1042,{...f.remote.get(1042),title:'New remote title',priority:1,rev:7});

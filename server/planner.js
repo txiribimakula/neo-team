@@ -498,7 +498,8 @@ export class Planner {
     }
     return result;
   }
-  async prepareReview() {
+  // A cancelled comparison (Descartar todo does not wait for it) saves nothing.
+  async prepareReview({ cancelled = () => false } = {}) {
     let workspace = this.workspace();
     if (!workspace) throw new Error('Importa una planificación primero.');
     const ids = Object.keys(workspace.drafts).map(Number);
@@ -540,6 +541,7 @@ export class Planner {
     }
     if (workspace.mode === 'azure') for (const plan of plans.filter(p => p.creation && !workspace.creationAttempts?.[p.id])) await this.validateCreation(workspace, plan);
     const { capacityPlans, incompleteAllocations } = await this.reviewCapacity(workspace, unreadable);
+    if (cancelled()) throw new Error('Comparación cancelada.');
     const data = reconciled;
     data[data.mode].conflicts = Object.fromEntries(plans.filter(p => p.conflicts.length).map(p => [p.id, p]));
     data[data.mode].capacityConflicts = capacityPlans.filter(p => p.conflict).reduce((all, plan) => ({ ...all, [plan.iterationId]: { ...all[plan.iterationId], [plan.key]: plan.remote } }), {});

@@ -145,7 +145,7 @@ async function request(path, input = {}) {
   if (pending) throw new Error('Espera a que termine la operación en curso.');
   pending = true;
   let recover = false;
-  const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]):not([data-action="close-sync"]), input:not(:disabled), select:not(:disabled)')];
+  const enabled = [...document.querySelectorAll('button:not(:disabled):not([data-cancel-operation]):not([data-action="close-sync"]):not([data-while-busy]), input:not(:disabled), select:not(:disabled)')];
   // Local saves answer in a few milliseconds: controls are only disabled when a
   // request takes longer, so quick edits never make the screen flash.
   const busy = setTimeout(() => { enabled.forEach(el => el.disabled = true); $('#save-status').textContent = 'Procesando…'; }, 250);
@@ -1459,7 +1459,7 @@ async function stage(id, changes) {
 function renderSyncPanel() {
   if (!syncPanel.open) return;
   // Keep the progress target mounted while its operation updates it.
-  if ((changesUi.loading || changesUi.syncing) && $('#changes-progress')) return;
+  if ((changesUi.loading || changesUi.syncing) && $('#changes-progress')) { const head=$('#changes-head'); if (head) head.outerHTML=changesHead(); return; }
   const content=$('#sync-content'), scroll=content.scrollTop;
   content.innerHTML=changesView();
   content.scrollTop=scroll;
@@ -1514,10 +1514,26 @@ async function loadReview() {
   try {
     review=(await importWithProgress($('#changes-progress'), null, { path: '/api/review', input: {}, title: state.mode==='demo' ? 'Revisando los cambios del ejemplo' : 'Comparando con Azure DevOps' })).review;
   } catch (error) {
-    changesUi.error=error.message;
+    if (!changesUi.discarding) changesUi.error=error.message;
   } finally {
-    changesUi.loading=false; render();
+    changesUi.loading=false;
+    if (changesUi.discarding) await discardAllChanges().catch(errorInModal); else render();
   }
+}
+// Descartar todo only changes the local copy, so it does not wait for the comparison
+// with Azure: a running one is cancelled and everything is discarded when it stops.
+async function discardAllChanges() {
+  changesUi={...changesUi,confirmAll:false,notice:''};
+  if (changesUi.loading) { changesUi.discarding=true; renderSyncPanel(); $('#changes-progress [data-cancel-operation]')?.click(); return; }
+  changesUi={...changesUi,discarding:false,error:''};
+  try { await request('/api/discard'); } finally { review=null; render(); }
+  toast('Cambios locales descartados.');
+}
+function changesHead(summary='', sync='') {
+  const discard=changesUi.discarding ? '<button class="button danger" disabled>Descartando…</button>'
+    : changesUi.confirmAll ? `<span class="changes-confirm">¿Descartar ${plural(pendingCount(),'cambio')}? Se recuperan los valores importados.</span><button class="button" data-action="cancel-discard-all" data-while-busy>Cancelar</button><button class="button danger" data-action="confirm-discard" data-while-busy>Sí, descartar todo</button>`
+    : '<button class="button danger" data-action="discard-all" data-while-busy>Descartar todo</button>';
+  return `<header class="changes-heading" id="changes-head"><div><h2>${state.mode==='demo' ? 'Cambios del ejemplo' : 'Cambios pendientes'}</h2><p>${escape(summary || plural(pendingCount(),'cambio'))}</p></div><div class="changes-actions">${discard}${changesUi.confirmAll || changesUi.discarding ? '' : sync}</div></header>`;
 }
 function capacityText(entry, owner) {
   const hours=owner==='team' ? '' : entry.activities?.length ? entry.activities.map(a=>`${number(a.capacityPerDay)} h/día${a.name ? ` · ${a.name}` : ''}`).join(' + ') : '0 h/día';
@@ -1560,21 +1576,19 @@ function reviewPlan(p) {
 }
 function changesView() {
   const notice=changesUi.notice;
-  if (changesUi.loading || changesUi.syncing) return `${notice}<div id="changes-progress"></div>`;
+  if (changesUi.syncing) return `${notice}<div id="changes-progress"></div>`;
+  if (changesUi.loading) return `${notice}${changesHead()}<div id="changes-progress"></div>`;
   if (!pendingCount()) return `${notice}<div class="empty-panel"><h2>Sin cambios pendientes</h2><p>La copia local coincide con lo último importado o sincronizado.</p><div class="actions"><button class="button" data-action="close-sync">Cerrar</button></div></div>`;
-  if (changesUi.error) return `${notice}<div class="notice error">No se pudieron comparar los cambios con Azure DevOps: ${escape(changesUi.error)}</div><div class="actions changes-retry"><button class="button" data-action="retry-review">Reintentar</button></div>`;
-  if (!reviewFresh()) { setTimeout(loadReview,0); return `${notice}<div id="changes-progress"></div>`; }
+  if (changesUi.error) return `${notice}${changesHead()}<div class="notice error">No se pudieron comparar los cambios con Azure DevOps: ${escape(changesUi.error)}</div><div class="actions changes-retry"><button class="button" data-action="retry-review">Reintentar</button></div>`;
+  if (!reviewFresh()) { setTimeout(loadReview,0); return `${notice}${changesHead()}<div id="changes-progress"></div>`; }
   const demo=state.mode==='demo', plans=review.plans, capacity=review.capacityPlans ?? [];
   const conflicts=plans.reduce((sum,p)=>sum+p.conflicts.length,0)+capacity.filter(p=>p.conflict).length;
   const summary=[plural(plans.length,'tarea'),...(capacity.length ? [plural(capacity.length,'ajuste de capacidad','ajustes de capacidad')] : []),...(review.comments?.length ? [plural(review.comments.length,'comentario')] : []),demo ? 'datos de ejemplo' : 'comparados con la versión actual de Azure DevOps'].join(' · ');
   const unreadable=review.unreadable?.length ? `<div class="notice warning">No se pudo leer parte de Azure DevOps para compararla: ${review.unreadable.map(escape).join('; ')}. Antes de escribirlo se vuelve a comprobar, para no sobrescribir lo que otra persona haya cambiado desde la importación.</div>` : '';
   const conflictNotice=conflicts ? `<div class="notice warning"><strong>${plural(conflicts,'conflicto')}.</strong> Algo ha cambiado en Azure DevOps desde tu importación. Elige qué versión conservar en cada caso; si sincronizas sin elegir, se enviará tu versión local.</div>` : '';
   const syncLabel=demo ? 'Confirmar simulación' : conflicts ? `Sincronizar y sobrescribir ${plural(conflicts,'conflicto')}` : 'Sincronizar con Azure DevOps';
-  const discardAll=changesUi.confirmAll
-    ? `<span class="changes-confirm">¿Descartar ${plural(pendingCount(),'cambio')}? Se recuperan los valores importados.</span><button class="button" data-action="cancel-discard-all">Cancelar</button><button class="button danger" data-action="confirm-discard">Sí, descartar todo</button>`
-    : '<button class="button danger" data-action="discard-all">Descartar todo</button>';
-  const actions=`<div class="changes-actions">${discardAll}${review.token && !changesUi.confirmAll ? `<button class="button primary ${conflicts && !demo ? 'danger' : ''}" data-action="sync">${escape(syncLabel)} ↗</button>` : ''}</div>`;
-  return `${notice}<section class="changes-page"><header class="changes-heading"><div><h2>${demo ? 'Cambios del ejemplo' : 'Cambios pendientes'}</h2><p>${escape(summary)}</p></div>${actions}</header><p class="local-note">Se envían las asignaciones, iteraciones, prioridades, horas y estados que has cambiado. Los comentarios se publican en cada tarea. Descartar un cambio lo deshace solo en local.</p>${unreadable}${conflictNotice}<div class="changes-list">${plans.map(reviewPlan).join('')}${incompleteAllocationsNotice()}${capacityReview()}${commentsReview()}</div></section>`;
+  const sync=review.token ? `<button class="button primary ${conflicts && !demo ? 'danger' : ''}" data-action="sync">${escape(syncLabel)} ↗</button>` : '';
+  return `${notice}<section class="changes-page">${changesHead(summary,sync)}<p class="local-note">Se envían las asignaciones, iteraciones, prioridades, horas y estados que has cambiado. Los comentarios se publican en cada tarea. Descartar un cambio lo deshace solo en local.</p>${unreadable}${conflictNotice}<div class="changes-list">${plans.map(reviewPlan).join('')}${incompleteAllocationsNotice()}${capacityReview()}${commentsReview()}</div></section>`;
 }
 async function synchronize() {
   const token=review.token, title=state.mode==='demo' ? 'Simulando sincronización' : 'Sincronizando cambios';
@@ -2356,7 +2370,7 @@ const actions = {
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
   'cancel-discard-all':()=>{changesUi.confirmAll=false;render();},
-  'confirm-discard':async()=>{changesUi={...changesUi,confirmAll:false,notice:''};await request('/api/discard');review=null;render();toast('Cambios locales descartados.');},
+  'confirm-discard':discardAllChanges,
   'discard-change':async el=>{changesUi.notice='';await request('/api/discard',{id:Number(el.dataset.task)});review=null;render();toast('Cambio descartado en local.');},
   'discard-capacity-change':async el=>{
     changesUi.notice='';
@@ -2392,6 +2406,7 @@ document.addEventListener('click', async event => {
   // Fields and comments inside a card are edited in place; they do not open it.
   if (target?.classList.contains('task-card') && event.target.closest('.task-estimates, .task-comments, .card-assignee, .task-select')) return;
   if (target?.dataset.action==='close-sync') { closeSyncPanel(); return; }
+  if (target && 'whileBusy' in target.dataset && !target.disabled) { actions[target.dataset.action](target)?.catch?.(errorInModal); return; }
   if (event.target.closest('[data-assistant-cancel]')) { cancelAssistant(); return; }
   // Choosing a ticket with its box does not open it.
   if (event.target.closest('[data-maintenance-select]')) return;
