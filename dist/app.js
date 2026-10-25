@@ -776,7 +776,7 @@ function stepContent() {
 function stepTabs() {
   const open=previousTasks().tasks.filter(t=>t.status==='open').length;
   const steps=[['configuration','Configuración'],['iteration','Iteración'],['capacity','Capacidad'],['planning','Tareas',open]];
-  return `<nav class="step-tabs" aria-label="Pasos de planificación">${steps.map(([id,label,count],index)=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="step"' : ''}><span>${index+1}</span>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}</nav>`;
+  return `<nav class="step-tabs" aria-label="Planificación">${steps.map(([id,label,count])=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="page"' : ''}>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}</nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
 // Finished, current, the one right after it, and later ones, each with its own colour.
@@ -1007,10 +1007,25 @@ function toggleDay(ranges, day) {
 }
 let capacityOrder=null;
 function capacityGrid(ws,iteration,drafts,conflicts,hours,total) {
-  const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3, teamOff=capacityOf(iteration.id,'team').daysOff;
+  const projects=ws.sources ?? (ws.config?.project ? [{id:'',config:ws.config}] : []);
+  const allocations=new Map(projects.map(source=>[source.id,new Map()]));
+  for (const plan of ws.projectAllocations ?? []) if (plan.iterationId===iteration.id) allocations.get(plan.sourceId)?.set(plan.key,plan);
+  const projectCapacity=(source,member)=>{
+    if (hours[member.id]==null) return null;
+    if (!ws.sources) return {allocated:hours[member.id],ratio:hours[member.id]>0 ? 1 : 0};
+    if (!iteration.sourceIterations?.[source.id] || !source.members.some(m=>m.id===member.id)) return null;
+    return allocations.get(source.id).get(member.id) ?? {allocated:0,ratio:0};
+  };
+  const projectCells=member=>projects.map(source=>{
+    const plan=projectCapacity(source,member);
+    const title=plan ? `${source.config.project}: ${number(plan.allocated)} h de capacidad${ws.sources ? ` · ${number(plan.ratio*100)} % de las horas de tareas asignadas` : ''}` : `${source.config.project}: no disponible para esta persona en esta iteración`;
+    return `<td class="cg-project" title="${escape(title)}">${plan ? `<strong>${number(plan.allocated)} h</strong><small>${number(plan.ratio*100)} %</small>` : '—'}</td>`;
+  }).join('');
+  const projectTotals=projects.map(source=>`<td class="cg-project"><strong>${number(ws.members.reduce((sum,member)=>sum+(projectCapacity(source,member)?.allocated ?? 0),0))} h</strong></td>`).join('');
+  const days=capacityDates(iteration).filter(isWorkingDay), columns=days.length+3+projects.length, teamOff=capacityOf(iteration.id,'team').daysOff;
   if (!days.length) return '<p class="notice warning">La iteración no tiene fechas definidas. Añade fechas en Azure DevOps para gestionar los días libres.</p>';
-  const head=`<tr><th class="cg-person" scope="col">${capacityHistoryButtons(iteration.id)}</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th></tr>`;
-  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todos</strong></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todos',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td></tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
+  const head=`<tr><th class="cg-person" scope="col">${capacityHistoryButtons(iteration.id)}</th><th class="cg-hours" scope="col">h / día</th>${days.map((day,index)=>`<th class="cg-day ${weekStart(day,index,days) ? 'week-start' : ''}" scope="col"><span>${weekdayLetter(day)}</span>${Number(day.slice(8))}</th>`).join('')}<th class="cg-total" scope="col">Total</th>${projects.map(source=>`<th class="cg-project" scope="col">${escape(source.config.project)}</th>`).join('')}</tr>`;
+  const teamRow=`<tr class="cg-team ${drafts.team ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="cg-team-icon" aria-hidden="true">☀</span><span><strong>Todos</strong></span>${capacityUndo('team',drafts)}</span></th><td class="cg-hours"></td>${capacityDayCells('team','Todos',days,teamOff,teamOff)}<td class="cg-total">${number(total)} h</td>${projectTotals}</tr>${capacityNoteRow('team',drafts,conflicts,columns)}`;
   // Available people first; then those off every day, those with 0 h and, last,
   // those without capacity in Azure. Everyone without hours is dimmed.
   const rank=member=>{
@@ -1024,10 +1039,10 @@ function capacityGrid(ws,iteration,drafts,conflicts,hours,total) {
   if (capacityOrder?.key!==orderKey) capacityOrder={key:orderKey,ids:ws.members.map((member,index)=>({id:member.id,index,rank:rank(member)})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(p=>p.id)};
   const rows=capacityOrder.ids.map(id=>ws.members.findIndex(m=>m.id===id)).filter(index=>index>=0).map(index=>({member:ws.members[index],index,rank:rank(ws.members[index])})).map(({member,index,rank})=>{
     const entry=capacityOf(iteration.id,member.id), person=hours[member.id];
-    return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td></tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
+    return `<tr class="${rank ? 'zero-capacity' : ''} ${drafts[member.id] ? 'changed' : ''}"><th class="cg-person" scope="row"><span class="cg-name"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span><strong>${escape(member.displayName)}</strong></span>${capacityUndo(member.id,drafts)}</span></th><td class="cg-hours">${capacityHoursField(member,entry)}</td>${capacityDayCells(member.id,member.displayName,days,entry.daysOff,teamOff)}<td class="cg-total">${person==null ? '—' : `${number(person)} h`}</td>${projectCells(member)}</tr>${capacityNoteRow(member.id,drafts,conflicts,columns)}`;
   }).join('');
-  const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total"></colgroup>`;
-  return `<div class="capacity-grid-wrap" tabindex="0" role="region" aria-label="Calendario de capacidad; desplázate horizontalmente para ver todos los días"><table class="capacity-grid" style="--days:${days.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
+  const cols=`<colgroup><col class="cg-col-person"><col class="cg-col-hours">${days.map(()=>'<col class="cg-col-day">').join('')}<col class="cg-col-total">${projects.map(()=>'<col class="cg-col-project">').join('')}</colgroup>`;
+  return `<div class="capacity-grid-wrap" tabindex="0" role="region" aria-label="Calendario de capacidad; desplázate horizontalmente para ver todos los días y proyectos"><table class="capacity-grid" style="--days:${days.length};--projects:${projects.length}">${cols}<thead>${head}</thead><tbody>${teamRow}${rows}</tbody></table></div>`;
 }
 // Like coordinates, the person and the day of the cell under the pointer (or,
 // without it, the focused one) are marked in the headers.
@@ -1052,6 +1067,7 @@ function capacityView() {
   const known=ws.members.filter(m=>hours[m.id]!=null), total=known.reduce((sum,m)=>sum+hours[m.id],0);
   return `<section class="capacity-step">
     ${capacityGrid(ws,iteration,drafts,conflicts,hours,total)}
+    ${ws.sources ? '<p class="local-note">La capacidad por proyecto se reparte automáticamente según el porcentaje de horas pendientes de las tareas asignadas a cada persona en esta iteración. Sin horas estimadas, queda sin repartir.</p>' : ''}
   </section>`;
 }
 // 'change' fires before focus moves on: wait for it to land on the next control.
