@@ -966,11 +966,12 @@ function previousCard(task, tasks, iteration) {
     ? `<button class="button primary" data-action="carry-over" data-task="${item.id}">Pasar a ${escape(iteration.name)} → <kbd>1</kbd></button><button class="button" data-action="complete-task" data-task="${item.id}">✓ Completada <kbd>2</kbd></button><button class="button" data-action="to-backlog" data-task="${item.id}" title="Quita la iteración y conserva el responsable">↩ Backlog <kbd>3</kbd></button>${laterIterationSelect(item,iteration)}`
     : `<span class="previous-outcome outcome-${status}">${outcome}</span>${decided ? `<button class="button subtle" data-action="undo-previous" data-task="${item.id}">Deshacer</button>` : ''}`;
   return `<article class="focus-card status-${status}" data-previous-task="${item.id}">
-    <header class="focus-head"><span class="person">${ownerAvatar(owner)}<span class="person-detail"><strong>${escape(owner.name)}</strong><small>${owner.note ? `${owner.note} · ` : ''}${mine.indexOf(task)+1} de ${mine.length}</small></span></span><span class="focus-effort">${item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar'}</span></header>
+    <header class="focus-head"><span class="person">${ownerAvatar(owner)}<span class="person-detail"><strong>${escape(owner.name)}</strong><small>${owner.note ? `${owner.note} · ` : ''}${mine.indexOf(task)+1} de ${mine.length}</small></span></span><span class="focus-side"><span class="focus-effort">${item.remainingWork!==null ? `${number(item.remainingWork)} h` : 'Sin estimar'}</span><span class="card-actions">${commentButton(item)}<button type="button" class="icon-button" data-action="edit" data-task="${item.id}" title="Editar" aria-label="Editar #${item.id}">✎</button></span></span></header>
     <div class="focus-body">
       ${path.length ? `<p class="focus-path">${path.map(parent=>`<span>${escape(parent.title)}</span>`).join('<span aria-hidden="true">›</span>')}</p>` : ''}
-      <h2 class="focus-title"><button class="leaf-title" data-action="edit" data-task="${item.id}">${escape(item.title)}</button></h2>
+      <h2 class="focus-title"><textarea class="leaf-title" rows="2" maxlength="255" data-title-task="${item.id}" data-focus="title:${item.id}" aria-label="Título de #${item.id}" spellcheck="true">${escape(item.title)}</textarea></h2>
       <div class="leaf-meta"><span class="node-type kind-${typeRank(item)}">${escape(item.type)}</span><span>${taskId(item)}</span><span class="pill">${escape(item.state || 'Sin estado')}</span>${item.tags.map(tag=>`<span class="tag">${escape(tag)}</span>`).join('')}${item.modified ? `<span class="pill changed">${pendingLabel(item)}</span>` : ''}</div>
+      ${taskComments(item)}
     </div>
     <div class="focus-actions">${actions}</div>
   </article>`;
@@ -2502,6 +2503,10 @@ document.addEventListener('keydown', event => {
   if (jiraCard && (event.key === 'Enter' || event.key === ' ') && !pending) { event.preventDefault(); actions['jira-open-ticket'](jiraCard).catch(errorInModal); return; }
   const card = event.target.closest('.task-card');
   if (card && event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); if (!pending) editTask(Number(card.dataset.task)).catch(errorInModal); }
+  if (event.target.dataset?.titleTask!==undefined && !event.isComposing) {
+    if (event.key==='Enter') { event.preventDefault(); event.target.blur(); return; }
+    if (event.key==='Escape') { event.target.value=state.workspace.effectiveItems.find(i=>i.id===Number(event.target.dataset.titleTask))?.title ?? event.target.value; event.target.blur(); return; }
+  }
   // Reviewing the previous iteration: the arrows go through its tasks and 1, 2 and 3 decide the one on screen.
   const typing = event.target.closest?.('input, textarea, select, [contenteditable="true"]');
   if ($('.previous-focus') && !typing && !modal.open && !event.metaKey && !event.ctrlKey && !event.altKey && !pending) {
@@ -2622,6 +2627,13 @@ document.addEventListener('change',async event=>{
       if(value===null || !Number.isFinite(value) || value<0){render();throw new Error('Indica un número de horas válido.');}
       await request('/api/stage',{edits:[{id:Number(el.dataset.task),changes:{[el.dataset.taskField]:value}}]});review=null;render();
       restoreFocus(next);return;
+    }
+    // The title of a task under review is edited in place and saved as a local change.
+    if(el.dataset.titleTask!==undefined){
+      const id=Number(el.dataset.titleTask), title=el.value.replace(/\s+/g,' ').trim(), item=state.workspace.effectiveItems.find(i=>i.id===id);
+      if(!title){render();throw new Error('Indica un título válido.');}
+      if(item && title!==item.title){await stage(id,{title});toast('Título guardado en local. Se publicará al sincronizar.');}
+      return;
     }
     if(el.dataset.previousMove!==undefined){if(el.value)await decidePrevious(Number(el.dataset.task),'move',el.value);return;}
   }catch(error){render();errorInModal(error);}

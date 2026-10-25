@@ -186,6 +186,8 @@ Los filtros de mantenimiento admiten búsquedas sin tildes y se pueden limpiar c
 
 **Añadir proyecto** conserva los proyectos importados y, antes de unir el nuevo, vuelve a leer de Azure las iteraciones de los ya importados para comparar siempre con sus fechas actuales. **Actualizar toda la planificación** refresca todos; si falla uno, conserva la copia completa anterior.
 
+Al revisar las tareas de la iteración anterior, el título de la tarea en pantalla se edita en el sitio (Enter guarda, Escape lo deja como estaba) y 💬 escribe un comentario, con @ para mencionar. ✎ abre el resto de campos. Como cualquier otro cambio, los dos quedan en local y se publican al sincronizar.
+
 ### Nombres de las iteraciones
 
 En **2 · Iteración**, el recuadro **Nombres** tiene el criterio de cada proyecto importado y, debajo, lo que da a su iteración anterior, la actual y las siguientes (`nombre actual → nombre nuevo`).

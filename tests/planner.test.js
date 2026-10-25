@@ -399,3 +399,14 @@ test('dragging a backlog task to a person and back leaves nothing pending', () =
   stageChanges(ws, item.id, { iterationPath: item.iterationPath, assignedTo: item.assignedTo || '' });
   assert.equal(ws.drafts[item.id], undefined);
 });
+
+test('a task of the previous iteration can be renamed and commented on, both pending until synchronizing', () => {
+  const workspace = createDemo(), item = workspace.items.find(i => i.id === 1030);
+  assert.equal(workspace.iterations.find(i => i.path === item.iterationPath)?.past, true);
+  stageChanges(workspace, 1030, { title: 'Migrar la auditoría al almacén nuevo' });
+  addComment(workspace, 1030, 'Queda la parte de exportación.');
+  assert.deepEqual(workspace.drafts[1030], { title: 'Migrar la auditoría al almacén nuevo' });
+  assert.equal(item.title, 'Migrar el registro de auditoría al nuevo almacén', 'Azure’s copy stays as it is until synchronizing');
+  assert.deepEqual(workspace.pendingComments.map(c => [c.id, c.text]), [[1030, 'Queda la parte de exportación.']]);
+  assert.throws(() => stageChanges(workspace, 1030, { title: '  ' }), /título válido/);
+});

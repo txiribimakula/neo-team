@@ -916,3 +916,12 @@ button.tp-cell:hover{border-color:#91ad81;background:#f6faf3}
 .iteration-preview span{display:block}
 .iteration-preview small{font:600 12px 'Inter',sans-serif;color:var(--muted)}
 @media(max-width:740px){.naming-template{flex-direction:column;align-items:stretch;gap:4px}.naming-row small{padding-left:0}}
+
+/* The task under review: its title is edited in place and it can be commented on. */
+.focus-side{display:flex;align-items:center;gap:12px}
+.focus-title textarea.leaf-title{display:block;width:100%;margin:0;padding:4px 8px;margin-left:-9px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--ink);resize:none;field-sizing:content;min-height:1.2em;overflow:hidden}
+.focus-title textarea.leaf-title:hover{border-color:var(--line)}
+.focus-title textarea.leaf-title:focus{outline:none;border-color:var(--green);background:white}
+.focus-body .task-comments{max-width:720px}
+/* With the comments open the card is taller than its space: it scrolls from the top. */
+.focus-body{justify-content:safe center}
