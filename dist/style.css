@@ -500,7 +500,9 @@ textarea:focus-visible,summary:focus-visible,.capacity-grid-wrap:focus-visible{o
 .import-state-option[aria-pressed="true"]:hover:not(:disabled){background:#326347}
 
 /* Global synchronization drawer, above the current page. */
-.sync-button{width:38px;height:38px;padding:8px;flex-shrink:0}
+.sync-button{position:relative;width:38px;height:38px;padding:8px;flex-shrink:0}
+.sync-count{position:absolute;top:-7px;right:-7px;display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 4px;border:2px solid white;border-radius:12px;background:var(--green);color:white;font-size:10px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sync-count[hidden]{display:none}
 /* With changes pending, the whole button wiggles every few seconds asking to be
    pressed; the icon itself does not turn, so it never looks like a live refresh. */
 /* It also turns lime while pending and flashes green on each wiggle. */

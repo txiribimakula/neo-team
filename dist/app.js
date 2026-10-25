@@ -1456,6 +1456,9 @@ function render() {
   if (changes>shownPending) { syncButton.classList.remove('has-pending'); void syncButton.offsetWidth; }
   shownPending=changes;
   syncButton.classList.toggle('has-pending',changes>0);
+  const syncCount=$('#sync-count');
+  syncCount.textContent=String(changes);
+  syncCount.hidden=changes===0;
   syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
   syncButton.title=`Sincronización: ${savedStatus()}`;
   renderSyncPanel();
