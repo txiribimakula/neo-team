@@ -968,7 +968,8 @@ const server = http.createServer(async (req, res) => {
         } else if (path === '/api/import') {
           if (!store.data.config) throw fail('Configura Azure DevOps primero.');
           if (Object.keys(store.data.azure?.drafts ?? {}).length || Object.keys(store.data.azure?.capacityDrafts ?? {}).length) throw fail('Sincroniza o descarta los cambios pendientes antes de importar proyectos.');
-          const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : randomBytes(16).toString('hex');
+          // The id the page follows: importId from the first import, operationId (already set) from Actualizar.
+          const id = typeof input.importId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(input.importId) ? input.importId : operation.id;
           operation = { ...operation, id, message: 'Iniciando importación…' };
           stateReview = null;
           importProgress = operation;

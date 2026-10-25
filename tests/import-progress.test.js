@@ -84,4 +84,12 @@ test('import progress is readable during work, isolated by id, and retained on f
   await waitForProgress('fourth','saving');
   assert.equal((await post('/api/cancel-operation',{id:'fourth'})).status,409,'saving cannot be cancelled');
   assert.equal((await retry).status,200,'a cancelled operation does not keep the server locked');
+  // Actualizar toda la planificación sends operationId and follows /api/operation with it.
+  state=await (await fetch(url+'/api/state')).json();
+  const refreshing=post('/api/import',{operationId:'fifth',refreshAll:true});
+  let followed=null;
+  for(let i=0;i<100 && followed?.phase!=='members';i++){followed=(await (await fetch(url+'/api/operation?id=fifth',{headers})).json()).operation;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(followed?.phase,'members','the page sees the progress of the update it started');
+  assert.equal((await post('/api/cancel-operation',{id:'fifth'})).status,200,'and can cancel it');
+  assert.equal((await refreshing).status,400);
 });
