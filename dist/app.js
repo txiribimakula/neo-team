@@ -34,8 +34,8 @@ let backlogQuery='';
 // have children (epics, features, stories) and have none.
 let backlogFilter='';
 const collapsed = new Set();
-// People in the team plan start collapsed: only their load bar until opened.
-const expandedLanes = new Set();
+// The current plan shows one person’s tasks below the team cards.
+let activePlanningMember=null, planningMemberScope=null;
 // The task of the previous iteration on screen ('done' once nothing is left), and
 // the side the next one slides in from.
 let previousShown = null, previousSlide = null;
@@ -688,7 +688,7 @@ function treeView({ availableOnly = false, search = query, filter = '' } = {}) {
     const effort=node.remainingWork !== null ? `${number(node.remainingWork)} h` : node.points !== null ? `${number(node.points)} pts` : 'Sin estimar';
     const planned=availableOnly && iteration && node.iterationPath===iteration.path;
     const status=planned ? (node.assignedTo ? `Asignada a ${memberName(node.assignedTo)}` : `En ${iteration.name}, sin responsable`) : iterationName(node.iterationPath);
-    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${!planned && node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${duplicateButton(node)}`;
+    const contents=`<div class="leaf-copy"><div class="leaf-meta">${type}<span>${taskId(node)}</span>${node.project ? `<span class="pill">${escape(node.project)}</span>` : ''}${node.modified ? `<span class="pill changed">${pendingLabel(node)}</span>` : ''}</div><button class="leaf-title" data-action="edit" data-task="${node.id}">${escape(node.title)}</button><span class="leaf-status">${escape(status)}${!planned && node.assignedTo ? ` · ${escape(memberName(node.assignedTo))}` : ''}</span></div><span class="effort">${effort}</span>${duplicateButton(node)}${availableOnly ? assignActiveButton(node) : ''}`;
     const leaf=`<div class="hierarchy-leaf ${planned ? 'planned-local' : ''}" draggable="true" data-drag-task="${node.id}">${contents}</div>`;
     return leaf + (node.children.length ? `<div class="hierarchy-children">${node.children.map(child=>nodeHtml(child,depth+1)).join('')}</div>` : '');
   }
@@ -754,7 +754,7 @@ async function askAssistant(form) {
   try {
     const {assistant}=await request('/api/assistant',{tab:which,prompt,history:ui.history,iterationId:selectedIteration,operationId});
     Object.assign(ui,{draft:'',reply:assistant.reply,changes:assistant.changes,history:[...ui.history,{prompt,reply:assistant.reply}].slice(-4)});
-    if (assistant.select) { chooseIteration(assistant.select); planningPeriod=null; laneOrder=null; previousShown=null; }
+    if (assistant.select) { chooseIteration(assistant.select); planningPeriod=null; activePlanningMember=null; previousShown=null; }
     if (assistant.changes.length) review=null;
   } catch (error) { ui.error=error.message; }
   finally { stop(); ui.running=false; render(); }
@@ -1227,7 +1227,7 @@ function plannerView() {
   if (planningPeriod==='previous') return periods+previousView();
   return periods+board(iteration,plannedItems(iteration));
 }
-// The filter applies as the person types, redrawing only the backlog and the lanes so
+// The filter applies as the person types, redrawing the backlog, team cards and tasks so
 // the search box and any draft keep their place.
 function refreshBacklog() {
   const tree=$('#backlog-tree');if(!tree)return;
@@ -1236,6 +1236,7 @@ function refreshBacklog() {
   const lanes=$('#plan-lanes'), iteration=selected();
   if (!lanes || !iteration) return;
   const planned=plannedItems(iteration);
+  $('#plan-people').innerHTML=planPeople(iteration,planned);
   lanes.innerHTML=planLanes(iteration,planned);
   $('#plan-count').textContent=planCount(planned);
 }
@@ -1251,7 +1252,9 @@ function fitBoardColumns() {
     const board=$('.board');
     if(!board) return;
     const top=Math.max(12,board.getBoundingClientRect().top);
-    board.style.setProperty('--column-height',`${Math.max(240,window.innerHeight-top-12)}px`);
+    const height=Math.max(240,window.innerHeight-top-12);
+    board.style.setProperty('--column-height',`${height}px`);
+    board.classList.toggle('short-columns',height<440);
   });
 }
 window.addEventListener('scroll',fitBoardColumns,{passive:true});
@@ -1328,29 +1331,37 @@ function taskCard(item, inBacklog = false, next = null, assign = false) {
     ${estimates}
     ${taskComments(item)}
     ${inBacklog && item.iterationPath !== state.workspace.settings.backlogIteration.path ? `<div class="local-note">${escape(iterationName(item.iterationPath))}</div>` : ''}
-    ${next || assign ? `<div class="card-move">${assign ? assigneeSelect(item) : ''}${next ? `<button type="button" class="button small" data-action="to-next-iteration" data-task="${item.id}">Pasar a ${escape(next.name)} →</button>` : ''}</div>` : ''}
+    ${next || assign ? `<div class="card-move">${assign ? assigneeSelect(item)+assignActiveButton(item) : ''}${next ? `<button type="button" class="button small" data-action="to-next-iteration" data-task="${item.id}">Pasar a ${escape(next.name)} →</button>` : ''}</div>` : ''}
   </article>`;
 }
-function lane(member, allItems, index, iteration) {
-  const owned = allItems.filter(i => i.assignedTo === key(member));
-  const hours = owned.reduce((sum,i) => sum + (i.remainingWork || 0),0);
-  const capacity = state.workspace.capacityHours[iteration.id]?.[member.id] ?? null;
-  const unknown = owned.filter(i=>i.canEstimateHours && i.remainingWork === null).length;
-  const percent = capacity === null ? 0 : capacity === 0 ? (hours > 0 ? 100 : 0) : Math.min(100, Math.round(hours / capacity * 100));
-  // While filtering, the people with matching tasks open and the rest fold; each can
-  // still be toggled until the filter changes.
-  const searching=!!compileQuery(backlogQuery), shown=filtered(owned);
-  const open=searching ? !!shown.length!==lanesToggled.has(key(member)) : expandedLanes.has(key(member)), id=`lane-${index}`, noCapacity=!capacity;
-  const meter=`<span class="capacity-line ${capacity !== null && hours > capacity ? 'over' : ''}"><span>${number(hours)} h ${unknown ? `+ ${unknown} sin estimar` : 'asignadas'}</span><span>${capacity === null ? 'Capacidad sin definir' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity === null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span>`;
-  return `<section class="member ${open ? '' : 'collapsed'} ${noCapacity ? 'no-capacity' : ''}" data-drop="${escape(key(member))}"><button type="button" class="member-header member-toggle" data-action="toggle-lane" data-member="${escape(key(member))}" data-focus="lane:${escape(key(member))}" aria-expanded="${open}" aria-controls="${id}"><span class="person"><span class="avatar c${index % 4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong class="member-name">${escape(member.displayName)}${noCapacity ? `<span class="no-capacity-badge">${capacity===0 ? 'Sin capacidad' : 'Capacidad sin definir'}</span>` : ''}</strong><small>${searching ? `${shown.length} de ` : ''}${owned.length} ${owned.length === 1 ? 'tarea' : 'tareas'} en la iteración</small></span><span class="lane-chevron" aria-hidden="true">›</span></span>${meter}</button>${member.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : ''}<div id="${id}" ${open ? '' : 'hidden'}><div class="member-items">${shown.map(i=>taskCard(i,false,nextIteration(iteration),true)).join('') || (owned.length ? '<div class="drop-hint">Ninguna coincide con el filtro</div>' : '<div class="drop-hint">Arrastra una tarea aquí<br>o ábrela para asignarla</div>')}</div></div></section>`;
+function planningPersonCard(member, allItems, index, iteration) {
+  const owned=allItems.filter(item=>item.assignedTo===key(member)), shown=filtered(owned);
+  const hours=owned.reduce((sum,item)=>sum+(item.remainingWork ?? 0),0);
+  const capacity=state.workspace.capacityHours[iteration.id]?.[member.id] ?? null;
+  const unknown=owned.filter(item=>item.canEstimateHours && item.remainingWork===null).length;
+  const percent=capacity ? Math.min(100,Math.round(hours/capacity*100)) : hours>0 ? 100 : 0;
+  const active=activePlanningMember===key(member);
+  return `<button type="button" class="planning-person ${active ? 'active' : ''} ${capacity===0 ? 'no-capacity' : ''}" data-action="select-planning-person" data-member="${escape(key(member))}" data-drop="${escape(key(member))}" aria-pressed="${active}" aria-controls="plan-lanes"><span class="person"><span class="avatar c${index%4}">${escape(initials(member.displayName))}</span><span class="person-detail"><strong>${escape(member.displayName)}</strong><small>${backlogQuery.trim() ? `${shown.length} de ` : ''}${plural(owned.length,'tarea')}${capacity===0 ? ' · Sin capacidad' : ''}</small></span></span><span class="capacity-line ${capacity!==null && hours>capacity ? 'over' : ''}"><span>${number(hours)} h${unknown ? ` + ${unknown} sin estimar` : ''}</span><span>${capacity===null ? 'Sin capacidad definida' : `${number(capacity)} h disponibles`}</span></span><span class="capacity-track" role="meter" aria-label="Carga de ${escape(member.displayName)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${number(hours)} horas asignadas; capacidad ${capacity===null ? 'desconocida' : number(capacity)}"><span class="capacity-fill" style="--load:${percent}%"></span></span></button>`;
 }
-// Lanes opened or folded by hand while filtering; a new filter starts over.
-const lanesToggled = new Set();
+function activePlanningPerson() {
+  return state.workspace?.members.find(member=>key(member)===activePlanningMember) ?? null;
+}
+function assignActiveButton(item) {
+  const member=activePlanningPerson(), iteration=selected();
+  if (!member || !iteration || item.assignedTo===key(member) && item.iterationPath===iteration.path) return '';
+  return `<button type="button" class="button small assign-active" data-action="assign-active" data-task="${item.id}" aria-label="Asignar #${item.id} a ${escape(member.displayName)}">Asignar a ${escape(member.displayName)}</button>`;
+}
+async function assignToPlanningPerson(id, owner) {
+  const iteration=selected();
+  if (!iteration) return;
+  await stage(id,{assignedTo:owner,iterationPath:iteration.path});
+  const warning=capacityWarning(owner,iteration);
+  if (warning) toast(warning,'warning');
+}
 // What is typed in a note survives a redraw (such as opening the lane) until it is saved.
 const noteDrafts={};
-// The left panel alternates between the available backlog and the sprint's
-// unassigned tasks; people take one row each on the right.
-let leftPanel='backlog', laneOrder=null;
+// The left panel alternates between the backlog and the unassigned sprint tasks.
+let leftPanel='backlog';
 // The backlog can take most of the width to read it better; the choice is remembered.
 let backlogWide=false;
 try { backlogWide=localStorage.getItem('neo-team:backlog-wide')==='1'; } catch { /* Without storage it starts narrow. */ }
@@ -1389,23 +1400,27 @@ function leftPanelCount() {
   const shown=leftPanel==='unassigned' ? unassignedTasks(iteration).filter(i=>matchesTask(i,backlogQuery)).length : quick ? state.workspace.effectiveItems.filter(i=>quick(i) && matchesTask(i,backlogQuery)).length : $('#backlog-tree')?.querySelectorAll('.hierarchy-leaf').length ?? 0;
   return `${shown} de ${total}`;
 }
-// The people of the plan, each with the tasks the filter leaves.
+// All team cards stay visible while only the selected person's tasks are shown.
+const outsidePlanningMember='__outside__';
+const outsidePlanningTasks=planned=>planned.filter(item=>item.assignedTo && !state.workspace.members.some(member=>key(member)===item.assignedTo));
+function planPeople(iteration, planned) {
+  const outside=outsidePlanningTasks(planned);
+  return state.workspace.members.map((member,index)=>planningPersonCard(member,planned,index,iteration)).join('')+(outside.length ? `<button type="button" class="planning-person ${activePlanningMember===outsidePlanningMember ? 'active' : ''}" data-action="select-planning-person" data-member="${outsidePlanningMember}" aria-pressed="${activePlanningMember===outsidePlanningMember}" aria-controls="plan-lanes"><span class="person"><span class="avatar">…</span><span class="person-detail"><strong>Otras personas</strong><small>${plural(outside.length,'tarea')} · Fuera del equipo</small></span></span></button>` : '');
+}
 function planLanes(iteration, planned) {
-  const ws = state.workspace, members=ws.members, available=new Set(planningMembers(iteration.id).map(key));
-  const outside = planned.filter(i=>i.assignedTo && !ws.members.some(m=>key(m) === i.assignedTo));
-  // People whose hours are all assigned go last. The order holds while assigning and
-  // is refreshed on entering the step or closing someone, so rows never jump.
-  const full=member=>{const capacity=ws.capacityHours[iteration.id]?.[member.id] ?? null, hours=planned.filter(i=>i.assignedTo===key(member)).reduce((sum,i)=>sum+(i.remainingWork || 0),0);return capacity!==null && capacity>0 && hours>=capacity-0.005;};
-  const orderKey=`${iteration.id}|${members.map(key).join(',')}`;
-  // Available first, then those with every hour assigned, then those without capacity.
-  if (laneOrder?.key!==orderKey) laneOrder={key:orderKey,ids:members.map((m,index)=>({id:key(m),index,rank:!available.has(key(m)) || ws.capacityHours[iteration.id]?.[m.id]==null ? 2 : full(m) ? 1 : 0})).sort((a,b)=>a.rank-b.rank || a.index-b.index).map(m=>m.id)};
-  const ordered=members.map((member,index)=>({member,index})).sort((a,b)=>laneOrder.ids.indexOf(key(a.member))-laneOrder.ids.indexOf(key(b.member)));
-  const extra=(title,note,items,cls='')=>{const shown=filtered(items);return shown.length ? `<section class="member ${cls}"><div class="member-header"><h3>${title}</h3><p class="section-meta" style="margin:0">${note}</p></div><div class="member-items">${shown.map(i=>taskCard(i,false,nextIteration(),true)).join('')}</div></section>` : '';};
-  return ordered.map(({member,index})=>lane(member,planned,index,iteration)).join('')+extra('Otras personas','Responsables que no figuran en este equipo',outside);
+  const member=activePlanningPerson(), outside=activePlanningMember===outsidePlanningMember;
+  if (!member && !outside) return '<div class="empty-panel planning-person-empty"><h2>Selecciona una persona</h2><p>Verás sus tareas aquí. Para asignar trabajo, usa su botón en el backlog o arrastra una tarea a la tarjeta de la persona.</p></div>';
+  const owned=outside ? outsidePlanningTasks(planned) : planned.filter(item=>item.assignedTo===key(member)), shown=filtered(owned);
+  const title=outside ? 'Otras personas' : member.displayName;
+  const note=member?.id ? `<textarea class="person-note" rows="1" maxlength="4000" data-person-note="${escape(member.id)}" placeholder="Nota…" aria-label="Nota para ti sobre ${escape(member.displayName)}">${escape(noteDrafts[member.id] ?? state.workspace.personNotes?.[member.id] ?? '')}</textarea>` : '';
+  return `<section class="member planning-person-tasks" ${member ? `data-drop="${escape(key(member))}"` : ''}><div class="member-header"><div class="section-heading"><h2>${escape(title)}</h2><span class="count">${backlogQuery.trim() ? `${shown.length} de ` : ''}${plural(owned.length,'tarea')}</span></div></div>${note}<div class="member-items planning-task-grid">${shown.map(item=>taskCard(item,false,nextIteration(iteration),true)).join('') || `<div class="drop-hint">${owned.length ? 'Ninguna tarea coincide con el filtro' : 'Sin tareas en esta iteración. Asigna desde el backlog o arrastra una tarea a su tarjeta.'}</div>`}</div></section>`;
 }
 const planCount = planned => compileQuery(backlogQuery) ? `${planned.filter(i=>matchesTask(i,backlogQuery)).length} de ${plural(planned.length,'tarea')}` : plural(planned.length,'tarea');
 const plannedItems = iteration => state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path);
 function board(iteration, planned) {
+  const scope=JSON.stringify([state.mode,state.workspace.config?.organization,state.workspace.config?.project,iteration.id]);
+  if (planningMemberScope!==scope) { activePlanningMember=null;planningMemberScope=scope; }
+  if (activePlanningMember===outsidePlanningMember ? !outsidePlanningTasks(planned).length : !activePlanningPerson()) activePlanningMember=null;
   const ws = state.workspace, backlog = ws.effectiveItems.filter(i=>inAvailableBacklog(i,iteration)), unassigned=unassignedTasks(iteration);
   const panelButton=(panel,label,count)=>`<button type="button" data-action="left-panel" data-panel="${panel}" aria-pressed="${leftPanel===panel}"><span>${label}</span><span class="count" ${leftPanel===panel ? 'id="backlog-count"' : ''}>${count}</span></button>`;
   const download=leftPanel==='backlog' && ws.mode==='azure' ? `<button class="button small backlog-download" data-action="download-hierarchy" title="Trae de Azure DevOps las tareas y la jerarquía. Tus cambios locales se conservan y siguen pendientes de sincronizar.">Descargar jerarquía</button><div id="backlog-progress" hidden></div>` : '';
@@ -1417,7 +1432,7 @@ function board(iteration, planned) {
   const left=`<section class="backlog board-column" data-keep-scroll="tasks" data-drop="${leftPanel==='backlog' ? 'backlog' : ''}"><div class="backlog-head"><div class="panel-switch" role="group" aria-label="Tareas por repartir">${panelButton('backlog','Backlog',backlog.length)}${panelButton('unassigned','Sin asignar',unassigned.length)}</div>${widen}</div>${download}<div class="backlog-filter"><input class="search backlog-search" id="backlog-search" type="search" placeholder="Filtrar tareas" aria-label="Filtrar las tareas del backlog y del plan: espacios o AND, OR, paréntesis, &quot;frase&quot; y -excluir" title="Espacio o AND: todas · OR o |: alguna · ( ) agrupa · &quot;frase&quot; · -palabra excluye" aria-controls="backlog-tree plan-lanes" value="${escape(backlogQuery)}" autocomplete="off">${fold}</div>${quick}<div id="backlog-tree" class="${leftPanel==='unassigned' ? 'unassigned-list' : ''}">${leftPanelContent()}</div></section>`;
   // Only tasks still in the plan stay chosen (another iteration, a task moved away…).
   for (const id of selectedTasks) if (!planned.some(i=>i.id===id)) selectedTasks.delete(id);
-  return `<div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count" id="plan-count">${planCount(planned)}</span></div><div class="members-grid" id="plan-lanes">${planLanes(iteration,planned)}</div></section>${bulkBar()}</div>`;
+  return `<section class="current-plan"><div class="section-heading"><h2>Plan de la iteración</h2><span class="count" id="plan-count">${planCount(planned)}</span></div><div class="planning-people" id="plan-people" role="group" aria-label="Personas de la iteración">${planPeople(iteration,planned)}</div><div class="board ${backlogWide ? 'backlog-wide' : ''}">${left}<section class="board-column" data-keep-scroll="people" id="plan-lanes" aria-label="Tareas de la persona seleccionada">${planLanes(iteration,planned)}</section>${bulkBar()}</div></section>`;
 }
 
 function render() {
@@ -2385,7 +2400,7 @@ const actions = {
   'discard-comment':async el=>{await request('/api/comment-discard',{key:el.dataset.key});review=null;render();toast('Comentario quitado.');},
   'pick-mention':el=>pickMention(Number(el.dataset.index)),
   duplicate:async el=>{await request('/api/duplicate',{id:Number(el.dataset.task)});review=null;render();toast(`#${el.dataset.task} duplicada en local. Pendiente de sincronizar.`);},
-  'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';lanesToggled.clear();$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
+  'clear-task-search':el=>{if(el.dataset.search==='backlog'){backlogQuery='';$('#backlog-search').value='';refreshBacklog();$('#backlog-search').focus();}else{query='';updatePlanningView();$('#search')?.focus();}},
   'backlog-filter':el=>{backlogFilter=backlogFilter===el.dataset.filter ? '' : el.dataset.filter;updatePlanningView();$(`.backlog-quick [data-filter="${el.dataset.filter}"]`)?.focus({preventScroll:true});},
   'toggle-backlog-width':()=>{backlogWide=!backlogWide;try{localStorage.setItem('neo-team:backlog-wide',backlogWide ? '1' : '0');}catch{/* Kept for this visit only. */}updatePlanningView();$('[data-action="toggle-backlog-width"]')?.focus({preventScroll:true});},
   'assistant-clear':()=>{const ui=assistantOf(tab);Object.assign(ui,{asked:'',reply:'',changes:[],error:''});updateAssistant(tab);$('#assistant-prompt')?.focus({preventScroll:true});},
@@ -2408,27 +2423,27 @@ const actions = {
   create: el=>createItem(Number(el.dataset.parent)),
   edit: el=>editTask(Number(el.dataset.task)),
   'choose-iteration': el=>{chooseIteration(el.dataset.iteration);planningPeriod=null;render();$(`[data-action="choose-iteration"][data-iteration="${CSS.escape(selectedIteration)}"]`)?.focus({preventScroll:true});},
-  'planning-period': el=>{planningPeriod=el.dataset.period;previousShown=null;laneOrder=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
+  'planning-period': el=>{planningPeriod=el.dataset.period;previousShown=null;activePlanningMember=null;render();$(`[data-action="planning-period"][data-period="${planningPeriod}"]`)?.focus({preventScroll:true});},
   'previous-go': el=>showPrevious(Number(el.dataset.task)),
   'previous-step': el=>stepPrevious(Number(el.dataset.direction)),
   'carry-over': el=>decidePrevious(Number(el.dataset.task),'carry'),
   'complete-task': el=>decidePrevious(Number(el.dataset.task),'complete'),
   'to-backlog': el=>decidePrevious(Number(el.dataset.task),'backlog'),
   'to-next-iteration': async el=>{
-    const id=Number(el.dataset.task), next=nextIteration(), lane=el.closest('.member')?.querySelector('[data-action="toggle-lane"]')?.dataset.member;
+    const id=Number(el.dataset.task), next=nextIteration(), inPlan=!!el.closest('#plan-lanes');
     if (!next) return;
     await request('/api/stage',{edits:[{id,changes:{iterationPath:next.path}}]});review=null;render();
-    // Focus stays in the same list: its next task, or the list itself once empty.
-    const list=lane===undefined ? '.unassigned-list' : `.member:has([data-action="toggle-lane"][data-member="${CSS.escape(lane)}"])`;
-    ($(`${list} [data-action="to-next-iteration"]`) ?? (lane===undefined ? $('[data-action="left-panel"][data-panel="unassigned"]') : $(`[data-action="toggle-lane"][data-member="${CSS.escape(lane)}"]`)))?.focus({preventScroll:true});
+    const list=inPlan ? '#plan-lanes' : '.unassigned-list';
+    ($(`${list} [data-action="to-next-iteration"]`) ?? $('[data-action="select-planning-person"][aria-pressed="true"]') ?? $('[data-action="left-panel"][data-panel="unassigned"]'))?.focus({preventScroll:true});
     toast(`#${id} pasa a ${next.name}. Pendiente de sincronizar.`);
   },
   'refresh-task-states': el => editTask(Number(el.dataset.task), true),
   'undo-previous': el=>decidePrevious(Number(el.dataset.task),'undo'),
-  'toggle-lane': el=>{const member=el.dataset.member;if(compileQuery(backlogQuery)){if(!lanesToggled.delete(member))lanesToggled.add(member);}else if(expandedLanes.has(member)){expandedLanes.delete(member);laneOrder=null;}else expandedLanes.add(member);updatePlanningView();$(`[data-action="toggle-lane"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
+  'select-planning-person':el=>{const member=el.dataset.member;activePlanningMember=activePlanningMember===member ? null : member;updatePlanningView();$(`[data-action="select-planning-person"][data-member="${CSS.escape(member)}"]`)?.focus({preventScroll:true});},
+  'assign-active':async el=>{const member=activePlanningPerson();if(member)await assignToPlanningPerson(Number(el.dataset.task),key(member));},
   'expand-tree': el=>{collapsed.clear();updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="expand-tree"]')?.focus({preventScroll:true});},
   'collapse-tree': el=>{state.workspace.effectiveItems.filter(i=>!isExecutable(i)).forEach(i=>collapsed.add(i.id));updatePlanningView();if(el.classList.contains('backlog-fold'))$('.backlog-fold[data-action="collapse-tree"]')?.focus({preventScroll:true});},
-  tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousShown=null;laneOrder=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
+  tab: el=>{if(el.dataset.tab==='changes'){reviewChanges();return;}tab=el.dataset.tab;if(tab==='capacity')capacityOrder=null;if(tab==='planning'){previousShown=null;activePlanningMember=null;}changesUi={...changesUi,notice:'',error:'',confirmAll:false};render();},
   review: reviewChanges, sync:synchronize, 'close-sync':closeSyncPanel,
   'retry-review':()=>{changesUi.error='';render();},
   'discard-all':()=>{changesUi.confirmAll=true;render();},
@@ -2659,7 +2674,7 @@ document.addEventListener('input',event=>{
   if('newIteration' in (event.target.dataset ?? {})) newIterationInput(event.target);
   if(event.target.dataset?.naming) namingInput(event.target);
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
-  if(event.target.id==='backlog-search'){backlogQuery=event.target.value;lanesToggled.clear();refreshBacklog();}
+  if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
 });
@@ -2676,7 +2691,7 @@ document.addEventListener('dragstart', event => {
   const card=event.target.closest('.task-card, [data-drag-task]'); if (!card || pending) return event.preventDefault();
   event.dataTransfer.setData('application/x-neo-task',card.dataset.task || card.dataset.dragTask); event.dataTransfer.effectAllowed='move';
 });
-document.addEventListener('dragover', event => {
+for (const type of ['dragenter','dragover']) document.addEventListener(type, event => {
   const zone=event.target.closest('[data-drop]'); if (!zone || pending || !event.dataTransfer.types.includes('application/x-neo-task')) return;
   event.preventDefault(); event.dataTransfer.dropEffect='move'; zone.classList.add('drop-active');
 });
