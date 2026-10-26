@@ -8,7 +8,7 @@ import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { matchesQuery, compileQuery } from './search.js';
-import { timelineView, timelinePicker, timelineGroups, newTimeline } from './timeline.js';
+import { timelineView, timelinePicker, timelineGroups, newTimeline, editableRanges, storeRanges, resetRanges, addDay, zoomStep, DAY_WIDTH } from './timeline.js';
 import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf } from './sprint-name.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot, localDay } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
@@ -2181,18 +2181,24 @@ async function switchMode(mode) {
 }
 // Líneas temporales: the list is edited here at once and saved in the background, so
 // reordering and trying owners never waits for the server.
-let timelineUi = { list: null, scope: null, id: null, search: '', pickerOpen: undefined, confirmDelete: false, collapsed: new Set() };
+let timelineUi = { list: null, scope: null, id: null, search: '', pickerOpen: undefined, confirmDelete: false, collapsed: new Set(), vacations: {}, vacationsFor: null, years: [], zoom: DAY_WIDTH, dayWidth: DAY_WIDTH, fitWidth: 0 };
+// The zoom is a preference of this browser: pixels per day, or "fit" to see it all.
+try { const saved = localStorage.getItem('neo-team:timeline-zoom'); if (saved === 'fit' || Number(saved) > 0) timelineUi.zoom = saved === 'fit' ? 'fit' : Number(saved); } catch { /* The default zoom applies. */ }
 // A branch with only some of its stories chosen shows its box half marked.
 const markPartialBranches = () => document.querySelectorAll('[data-tl-stories].partial').forEach(box => { box.indeterminate = true; });
 const timelineDirty = new Set();
 let timelineSaveTimer, timelineDragging = null;
 function timelineList() {
-  if (timelineUi.scope !== state.mode || !timelineUi.list) Object.assign(timelineUi, { list: structuredClone(state.timelines ?? []), scope: state.mode, confirmDelete: false });
+  if (timelineUi.scope !== state.mode || !timelineUi.list) Object.assign(timelineUi, { list: structuredClone(state.timelines ?? []), vacations: structuredClone(state.vacations ?? {}), vacationsFor: null, scope: state.mode, confirmDelete: false });
   return timelineUi.list;
 }
 const currentTimeline = () => { const list = timelineList(); return list.find(t => t.id === timelineUi.id) ?? list[0] ?? null; };
+// The calendar's label column, as wide as the stylesheet makes it.
+const timelineLabelWidth = () => innerWidth <= 900 ? 270 : 580;
 function renderTimelines(focus = '') {
   const scroll = $('[data-tl-scroll]'), left = scroll?.scrollLeft ?? 0, top = scroll?.scrollTop ?? 0;
+  const app = $('#app'), padding = getComputedStyle(app);
+  timelineUi.fitWidth = app.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight) - timelineLabelWidth() - 4;
   timelineList();
   timelineUi.id = currentTimeline()?.id ?? null;
   $('#app').innerHTML = timelineView(state.workspace, timelineUi, { memberName, taskLink: item => taskId(item) });
@@ -2213,6 +2219,44 @@ async function saveTimelines() {
     if (timeline) await request('/api/timeline', { timeline }).catch(error => toast(error.message, 'error'));
   }
 }
+// Holidays and vacations are shared by every timeline; each year is saved as it was left.
+let vacationsSaveTimer;
+function changeVacations(mutate, focus = '') {
+  const who = timelineUi.vacationsFor, index = Math.max(0, (state.workspace?.members ?? []).findIndex(m => key(m) === who));
+  const list = editableRanges(timelineUi.vacations, who, index, timelineUi.years);
+  mutate(list);
+  const years = [...new Set([...timelineUi.years, ...list.map(r => Number(r.start.slice(0, 4)))])];
+  timelineUi.vacations = storeRanges(timelineUi.vacations, who, years, list);
+  renderTimelines(focus);
+  clearTimeout(vacationsSaveTimer); vacationsSaveTimer = setTimeout(saveVacations, 250);
+}
+async function saveVacations() {
+  if (pending) { vacationsSaveTimer = setTimeout(saveVacations, 200); return; }
+  await request('/api/vacations', { vacations: timelineUi.vacations }).catch(error => toast(error.message, 'error'));
+}
+// Zooming keeps in place the day under the pointer, or the one in the middle.
+function setTimelineZoom(zoom, focus = '', pointerX = null) {
+  const scroll = $('[data-tl-scroll]'), before = timelineUi.dayWidth, label = timelineLabelWidth();
+  const box = scroll?.getBoundingClientRect(), anchor = scroll ? (pointerX === null ? (scroll.clientWidth - label) / 2 : Math.max(0, pointerX - box.left - label)) : 0;
+  const day = scroll ? (scroll.scrollLeft + anchor) / before : 0;
+  timelineUi.zoom = zoom;
+  try { localStorage.setItem('neo-team:timeline-zoom', String(zoom)); } catch { /* Kept for this visit only. */ }
+  renderTimelines(focus);
+  const next = $('[data-tl-scroll]');
+  if (next && zoom !== 'fit') next.scrollLeft = Math.max(0, day * timelineUi.dayWidth - anchor);
+  else if (next) next.scrollLeft = 0;
+}
+let timelineWheel = 0, timelineResize;
+document.addEventListener('wheel', event => {
+  if (!event.ctrlKey || tab !== 'timelines' || !event.target.closest?.('[data-tl-scroll]')) return;
+  event.preventDefault();
+  timelineWheel += event.deltaY;
+  if (Math.abs(timelineWheel) < 30) return;
+  const zoom = zoomStep(timelineUi.dayWidth, timelineWheel > 0 ? -1 : 1);
+  timelineWheel = 0;
+  if (zoom !== timelineUi.dayWidth) setTimelineZoom(zoom, '', event.clientX);
+}, { passive: false });
+window.addEventListener('resize', () => { if (tab === 'timelines' && timelineUi.zoom === 'fit') { clearTimeout(timelineResize); timelineResize = setTimeout(() => renderTimelines(), 150); } });
 function changeTimeline(mutate, focus = '') {
   const timeline = currentTimeline();
   if (!timeline) return;
@@ -2293,6 +2337,16 @@ function timelineChange(el) {
     timelineUi.pickerOpen = true;
     changeTimeline(t => { t.stories = el.checked ? [...t.stories, ...ids.filter(id => !t.stories.includes(id))] : t.stories.filter(id => !ids.includes(id)); }, focus); return true;
   }
+  if (el.dataset.tlVac) {
+    const index = Number(el.dataset.index), field = el.dataset.tlVac, value = field === 'name' ? el.value.replace(/\s+/g, ' ').trim().slice(0, 60) : el.value;
+    if (field !== 'name' && !/^\d{4}-\d{2}-\d{2}$/.test(value)) { renderTimelines(); return true; }
+    changeVacations(list => {
+      const range = list[index];
+      if (!range) return;
+      range[field] = value;
+      if (range.end < range.start) { if (field === 'start') range.end = range.start; else range.start = range.end; }
+    }, `[data-tl-vac="${field}"][data-index="${index}"]`); return true;
+  }
   if ('tlOwner' in el.dataset) {
     const id = Number(el.dataset.tlOwner), item = state.workspace.effectiveItems.find(i => i.id === id);
     changeTimeline(t => { const owners = { ...t.owners }; if (el.value === (item?.assignedTo || '')) delete owners[id]; else owners[id] = el.value; t.owners = owners; }, `[data-tl-owner="${id}"]`); return true;
@@ -2337,6 +2391,24 @@ const actions = {
   },
   'tl-expand': () => { timelineUi.collapsed.clear(); timelineUi.pickerOpen = true; renderTimelines('[data-action="tl-expand"]'); },
   'tl-collapse': () => { document.querySelectorAll('[data-tl-branch]').forEach(el => timelineUi.collapsed.add(el.dataset.tlBranch)); timelineUi.pickerOpen = true; renderTimelines('[data-action="tl-collapse"]'); },
+  'tl-vacations': el => { timelineUi.vacationsFor = timelineUi.vacationsFor === el.dataset.who ? null : el.dataset.who; renderTimelines(`[data-action="tl-vacations"][data-who="${CSS.escape(el.dataset.who)}"]`); },
+  'tl-vac-close': () => { const who = timelineUi.vacationsFor; timelineUi.vacationsFor = null; renderTimelines(`[data-action="tl-vacations"][data-who="${CSS.escape(who ?? '')}"]`); },
+  'tl-vac-add': () => {
+    const start = currentTimeline()?.start ?? localDay();
+    changeVacations(list => { list.push({ start, end: addDay(start, 4), name: '' }); });
+    // The new range goes to its place by date: its unnamed row is the one to fill in.
+    [...document.querySelectorAll('[data-tl-vac="name"]')].find(input => !input.value && input.parentElement.querySelector('[data-tl-vac="start"]').value === start)?.focus();
+  },
+  'tl-vac-remove': el => changeVacations(list => { list.splice(Number(el.dataset.index), 1); }, '[data-action="tl-vac-add"]'),
+  'tl-vac-reset': () => {
+    timelineUi.vacations = resetRanges(timelineUi.vacations, timelineUi.vacationsFor, timelineUi.years);
+    renderTimelines('[data-action="tl-vac-add"]'); clearTimeout(vacationsSaveTimer); vacationsSaveTimer = setTimeout(saveVacations, 250);
+  },
+  'tl-zoom': el => {
+    const zoom = 'fit' in el.dataset ? (timelineUi.zoom === 'fit' ? DAY_WIDTH : 'fit') : 'reset' in el.dataset ? DAY_WIDTH : zoomStep(timelineUi.dayWidth, Number(el.dataset.step));
+    const focus = 'fit' in el.dataset ? '[data-action="tl-zoom"][data-fit]' : 'reset' in el.dataset ? '[data-action="tl-zoom"][data-fit]' : `[data-action="tl-zoom"][data-step="${el.dataset.step}"]`;
+    setTimelineZoom(zoom, focus);
+  },
   'tl-remove-story': el => changeTimeline(t => { t.stories = t.stories.filter(id => id !== Number(el.dataset.story)); }),
   'tl-apply-owners': applyTimelineOwners,
   'open-maintenance': () => openMaintenance(),

@@ -30,7 +30,7 @@ import { filterItems, filtersFrom, jiraItems, narrowed } from '../dist/maintenan
 import { describeError, errorLocation, isInternalError, recordFailure } from './diagnostics.js';
 import { AzurePipelines, runAnalysis, sourceKey, PIPELINE_LIMITS } from './pipelines.js';
 import { DemoPipelineGateway, DemoPipelineAnalyst } from './demo-pipelines.js';
-import { saveTimeline, removeTimeline } from './timelines.js';
+import { saveTimeline, removeTimeline, cleanVacations } from './timelines.js';
 
 const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const port = Number(process.env.NEO_TEAM_PORT || 4310);
@@ -228,7 +228,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -249,7 +249,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/timeline', '/api/iteration-templates', '/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
+const LOCAL_PATHS = new Set(['/api/timeline', '/api/vacations', '/api/iteration-templates', '/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -967,6 +967,10 @@ const server = http.createServer(async (req, res) => {
           // Local plans of the current mode; they never reach Azure DevOps.
           const data=structuredClone(store.data), list=data.timelines?.[data.mode] ?? [];
           data.timelines={...data.timelines,[data.mode]:typeof input.remove==='string' ? removeTimeline(list,input.remove) : saveTimeline(list,input.timeline)};
+          await store.save(data);
+        } else if(path==='/api/vacations') {
+          const data=structuredClone(store.data);
+          data.vacations={...data.vacations,[data.mode]:cleanVacations(input.vacations)};
           await store.save(data);
         } else if(path==='/api/iteration-templates') {
           // The criterion for new iterations; existing ones keep their names.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { timelineGroups, capacityModel, scheduleTimeline, timelinePicker, newTimeline, dayAt, dayFrom, timelineView } from '../dist/timeline.js';
-import { cleanTimeline, saveTimeline, removeTimeline } from '../server/timelines.js';
+import { timelineGroups, capacityModel, scheduleTimeline, timelinePicker, newTimeline, dayAt, dayFrom, timelineView, easter, defaultHolidays, defaultVacations, editableRanges, storeRanges, resetRanges, isDefault, zoomStep } from '../dist/timeline.js';
+import { cleanTimeline, saveTimeline, removeTimeline, cleanVacations } from '../server/timelines.js';
 
 // Monday 2 November 2026: two weeks of one iteration, Ana 6 h/day and Luis 4 h/day.
 const workspace = () => ({
@@ -139,4 +139,62 @@ test('saved timelines are validated', () => {
   assert.equal(list.length, 1);
   assert.equal(list[0].name, 'Otro');
   assert.deepEqual(removeTimeline(list, 'abc'), []);
+});
+
+test('invented holidays and vacations follow the usual Spanish calendar', () => {
+  assert.equal(easter(2026), '2026-04-05');
+  assert.equal(easter(2027), '2027-03-28');
+  const holidays = defaultHolidays(2026).map(h => h.start);
+  for (const day of ['2026-01-01', '2026-01-06', '2026-04-02', '2026-04-03', '2026-05-01', '2026-08-15', '2026-10-12', '2026-11-01', '2026-12-06', '2026-12-08', '2026-12-25']) assert.ok(holidays.includes(day), day);
+  assert.deepEqual(defaultVacations(2026, 0).map(v => [v.start, v.end]), [['2026-03-30', '2026-04-06'], ['2026-08-03', '2026-08-14'], ['2026-12-24', '2027-01-06']]);
+  assert.equal(defaultVacations(2026, 1)[1].start, '2026-08-17');
+});
+
+test('holidays, vacations and weekends leave no hours; edited years replace the invented ones', () => {
+  const ws = workspace(), timeline = { ...base(), start: '2026-12-07' }, capacity = capacityModel(ws, timeline);
+  // Monday 7 working, Tuesday 8 a holiday, Saturday 12 a weekend, Thursday 24 Christmas vacations.
+  assert.equal(capacity('ana@x', 0), 6);
+  assert.equal(capacity('ana@x', 1), 0);
+  assert.equal(capacity('', 1), 0);
+  assert.equal(capacity('ana@x', 5), 0);
+  assert.equal(capacity('ana@x', 17), 0);
+  assert.equal(capacity('', 17) > 0, true);
+  let saved = storeRanges({}, 'ana@x', [2026], [{ start: '2026-12-09', end: '2026-12-09', name: 'Médico' }]);
+  assert.equal(isDefault(saved, 'ana@x', [2026]), false);
+  const edited = capacityModel(ws, timeline, saved);
+  assert.equal(edited('ana@x', 2), 0);
+  assert.equal(edited('ana@x', 17), 6);
+  assert.deepEqual(editableRanges(saved, 'ana@x', 0, [2026]).map(r => r.name), ['Médico']);
+  saved = resetRanges(saved, 'ana@x', [2026]);
+  assert.equal(editableRanges(saved, 'ana@x', 0, [2026]).length, 3);
+  assert.deepEqual(cleanVacations({ holidays: { 2026: [{ start: '2026-12-08', end: '2026-12-08', name: 'x' }, { start: 'mal', end: '2026-01-01' }] }, people: { 'ana@x': { 2026: [{ start: '2026-02-02', end: '2026-02-01' }] } } }),
+    { holidays: { 2026: [{ start: '2026-12-08', end: '2026-12-08', name: 'x' }] }, people: { 'ana@x': { 2026: [] } } });
+});
+
+test('a person with capacity in two projects the same day counts it whole', () => {
+  const ws = workspace();
+  ws.iterations.push({ id: 'other', attributes: { startDate: '2026-11-02T00:00:00Z', finishDate: '2026-11-13T00:00:00Z' } });
+  ws.effectiveCapacities.other = { daysOff: [], teamMembers: [{ teamMember: { id: 'a' }, activities: [{ capacityPerDay: 2 }], daysOff: [] }] };
+  const capacity = capacityModel(ws, base());
+  assert.equal(capacity('ana@x', 0), 8);
+  assert.equal(capacity('luis@x', 1), 0);
+  assert.equal(capacity.usual('ana@x'), 8);
+});
+
+test('zooming out shows weeks, then months, and "fit" spreads the work over the screen', () => {
+  assert.equal(zoomStep(26, -1), 19);
+  assert.equal(zoomStep(26, 1), 38);
+  assert.equal(zoomStep(5, -1), 4);
+  assert.equal(zoomStep(5, 1), 6);
+  assert.equal(zoomStep(2, -1), 2);
+  const ws = workspace(), view = ui => timelineView(ws, Object.assign(ui, { list: [base()], id: 't1' }), { memberName: v => v, taskLink: item => `#${item.id}` });
+  assert.match(view({}), /class="tl-day /);
+  const weeks = view({ zoom: 6 });
+  assert.doesNotMatch(weeks, /class="tl-day /);
+  assert.match(weeks, /class="tl-week"/);
+  assert.match(weeks, /tl-narrow tl-compact/);
+  const ui = { zoom: 'fit', fitWidth: 400 };
+  // The work ends on day 3: a week at least, over 400 px.
+  assert.match(view(ui), /--tl-days:7;/);
+  assert.equal(ui.dayWidth, 400 / 7);
 });

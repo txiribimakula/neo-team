@@ -25,3 +25,15 @@ export function saveTimeline(list, input) {
   return current.some(t => t.id === timeline.id) ? current.map(t => t.id === timeline.id ? timeline : t) : [...current, timeline];
 }
 export const removeTimeline = (list, id) => (Array.isArray(list) ? list : []).filter(t => t.id !== id);
+
+// Holidays of the team and vacations of each person, by the year each range starts in.
+// A year that is not saved uses the invented defaults of the interface.
+const isDay = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`));
+function cleanYears(value) {
+  return Object.fromEntries(Object.entries(value && typeof value === 'object' && !Array.isArray(value) ? value : {}).filter(([year, ranges]) => /^\d{4}$/.test(year) && Array.isArray(ranges)).slice(0, 20).map(([year, ranges]) => [year,
+    ranges.filter(r => isDay(r?.start) && isDay(r?.end) && r.start <= r.end).slice(0, 60).map(r => ({ start: r.start, end: r.end, name: String(r.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 60) }))]));
+}
+export function cleanVacations(input) {
+  const people = input?.people && typeof input.people === 'object' && !Array.isArray(input.people) ? input.people : {};
+  return { holidays: cleanYears(input?.holidays), people: Object.fromEntries(Object.entries(people).filter(([key]) => key && key.length <= 255).slice(0, 500).map(([key, years]) => [key, cleanYears(years)])) };
+}
