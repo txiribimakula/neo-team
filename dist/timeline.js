@@ -2,7 +2,8 @@
 // below. Each person works through their own tasks one after another, in the order
 // of the timeline; tasks of different people run in parallel unless one is set to
 // go after another. Owners changed here are only a scenario until they are applied.
-import { memberKey, isExecutable, isCompleted, typeRank, hierarchy } from './hierarchy.js';
+import { memberKey, isExecutable, isCompleted, typeRank, hierarchy, ancestors, filterHierarchy } from './hierarchy.js';
+import { matchesQuery, normalize } from './search.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const number = value => new Intl.NumberFormat('es', { maximumFractionDigits: 1 }).format(value);
@@ -14,7 +15,11 @@ const initials = name => String(name).trim().split(/\s+/).slice(0, 2).map(s => s
 const closedStates = new Set(['closed', 'done', 'removed', 'resolved', 'cerrado', 'hecho', 'eliminado']);
 const isClosed = (item, ws) => isCompleted(item, ws) || closedStates.has(String(item.state ?? '').toLowerCase());
 
-export const isStory = item => !item.contextOnly && typeRank(item) === 2;
+// A story is what holds the tasks: user stories, PBIs or requirements, whatever the
+// process calls them, and any other item with tasks or bugs right below it. Those
+// imported only as context of another team count too: their tasks may be ours.
+const storyName = /story|historia|backlog item|requirement|requisito/i;
+export const isStory = node => !isExecutable(node) && !['task', 'bug', 'tarea'].includes(String(node.type).toLowerCase()) && (typeRank(node) === 2 || storyName.test(node.type) || !!node.children?.some(isExecutable));
 export const hoursOf = item => item.remainingWork ?? item.originalEstimate ?? null;
 function openTasks(tree, id, ws) {
   const result = [], walk = node => { for (const child of node.children) { if (isExecutable(child) && !isClosed(child, ws)) result.push(child); walk(child); } };
@@ -24,15 +29,6 @@ function openTasks(tree, id, ws) {
 }
 export function newTimeline(id, name, start) {
   return { id, name, start, stories: [], order: [], owners: {}, after: {}, storyAfter: {}, rates: {} };
-}
-
-// The stories that can be chosen: open ones, and any already in the timeline.
-export function storyChoices(ws, timeline) {
-  const tree = hierarchy(ws.effectiveItems), chosen = new Set(timeline?.stories ?? []);
-  return ws.effectiveItems.filter(item => isStory(item) && (chosen.has(item.id) || !isClosed(item, ws))).map(story => {
-    const tasks = openTasks(tree, story.id, ws), parent = tree.nodes.get(tree.parents.get(story.id));
-    return { story, parent, tasks: tasks.length, hours: tasks.reduce((sum, t) => sum + (hoursOf(t) ?? 0), 0), chosen: chosen.has(story.id) };
-  }).sort((a, b) => Number(b.chosen) - Number(a.chosen) || Number(b.tasks > 0) - Number(a.tasks > 0) || (a.story.priority ?? 5) - (b.story.priority ?? 5) || a.story.id - b.story.id);
 }
 
 // The stories of the timeline in its order, each with its open tasks in their order.
@@ -154,12 +150,36 @@ export const dayAt = (start, moment) => addDay(start, Math.max(0, Math.ceil(mome
 export const dayFrom = (start, moment) => addDay(start, Math.max(0, Math.floor(moment + EPSILON)));
 
 const DAY_WIDTH = 26;
-function pickerView(ws, timeline, search) {
-  const wanted = search.trim().toLowerCase();
-  const choices = storyChoices(ws, timeline).filter(c => !wanted || `#${c.story.id} ${c.story.title} ${c.parent?.title ?? ''} ${c.story.project ?? ''}`.toLowerCase().includes(wanted));
-  return choices.map(c => `<label class="tl-choice ${c.chosen ? 'chosen' : ''}"><input type="checkbox" data-tl-story="${c.story.id}" ${c.chosen ? 'checked' : ''}><span class="tl-choice-title">${escape(c.story.title)}</span><small>#${c.story.id}${c.parent ? ` · ${escape(c.parent.title)}` : ''}${c.story.project ? ` · ${escape(c.story.project)}` : ''}</small><span class="tl-choice-hours">${c.tasks ? `${c.tasks} · ${number(c.hours)} h` : '—'}</span></label>`).join('') || '<p class="tl-none">Sin user stories</p>';
+const searchable = item => normalize(`${item.id} #${item.id} ${item.title} ${(item.tags ?? []).join(' ')} ${item.type} ${item.project ?? ''}`);
+// The backlog as in Planificación: projects, epics and features open down to the
+// stories, which are chosen one by one or all those below a branch at once. The
+// search keeps what matches and everything below a branch that matches.
+export function timelinePicker(ws, timeline, search = '', collapsed = new Set()) {
+  const tree = hierarchy(ws.effectiveItems), chosen = new Set(timeline.stories), query = search.trim();
+  const matches = node => !query || matchesQuery(query, searchable(node)) || ancestors(node.id, tree).some(parent => matchesQuery(query, searchable(parent)));
+  const roots = filterHierarchy(tree.roots, node => isStory(node) && (chosen.has(node.id) || !isClosed(node, ws)) && matches(node));
+  const below = node => isStory(node) ? [node.id] : node.children.flatMap(below);
+  const branch = (id, label, node, ids, children) => {
+    const all = ids.length && ids.every(i => chosen.has(i)), some = ids.some(i => chosen.has(i));
+    return `<details class="tl-branch" data-tl-branch="${escape(id)}" ${query || !collapsed.has(String(id)) ? 'open' : ''}><summary><span class="branch-chevron" aria-hidden="true">›</span><input type="checkbox" data-tl-stories="${ids.join(',')}" ${all ? 'checked' : ''} class="${some && !all ? 'partial' : ''}" aria-label="Todas las de ${escape(node?.title ?? label)}">${label}<small>${node ? `#${node.id} · ` : ''}${ids.length} US</small></summary><div class="tl-branch-children">${children}</div></details>`;
+  };
+  const row = node => {
+    const type = `<span class="node-type kind-${typeRank(node)}">${escape(node.type)}</span>`;
+    if (isStory(node)) {
+      const tasks = openTasks(tree, node.id, ws), hours = tasks.reduce((sum, t) => sum + (hoursOf(t) ?? 0), 0);
+      return `<label class="tl-choice ${chosen.has(node.id) ? 'chosen' : ''}"><input type="checkbox" data-tl-story="${node.id}" ${chosen.has(node.id) ? 'checked' : ''}>${type}<span class="tl-choice-title">${escape(node.title)}</span><small>#${node.id}${node.contextOnly ? ' · contexto' : ''}</small><span class="tl-choice-hours">${tasks.length ? `${tasks.length} · ${number(hours)} h` : 'Sin tareas'}</span></label>`;
+    }
+    return branch(node.id, `${type}<span class="tl-choice-title">${escape(node.title)}</span>`, node, below(node), node.children.map(row).join(''));
+  };
+  const empty = `<p class="tl-none">${query ? `Nada coincide con «${escape(query)}».` : 'No hay user stories abiertas en la planificación importada.'}</p>`;
+  if (!ws.sources) return roots.map(row).join('') || empty;
+  // With several projects, each project is the top parent of its own backlog.
+  const projects = ws.sources.map(source => {
+    const own = roots.filter(node => node.sourceId === source.id);
+    return own.length ? branch(`project:${source.id}`, `<span class="node-type kind-project">Proyecto</span><span class="tl-choice-title">${escape(source.config.project)}</span>`, null, own.flatMap(below), own.map(row).join('')) : '';
+  }).join('');
+  return projects + roots.filter(node => !ws.sources.some(source => source.id === node.sourceId)).map(row).join('') || empty;
 }
-export const timelinePicker = pickerView;
 
 function afterOptions(groups, self, story, value) {
   const option = (ref, label) => `<option value="${ref}" ${ref === value ? 'selected' : ''}>${escape(label)}</option>`;
@@ -184,7 +204,7 @@ export function timelineView(ws, ui, { memberName, taskLink }) {
   const facts = groups.length ? [plan.hours ? `Fin ${shortDate(dayAt(timeline.start, plan.end))}` : '', `${number(plan.hours)} h`, plan.unestimated ? `${plan.unestimated} sin estimar` : '', plan.loops ? `${plan.loops} en bucle` : ''].filter(Boolean) : [];
 
   const toolbar = `<div class="tl-toolbar"><input class="tl-name" data-tl-field="name" value="${escape(timeline.name)}" maxlength="120" aria-label="Nombre de la línea temporal"><label class="tl-start">Inicio <input type="date" data-tl-field="start" value="${escape(timeline.start)}" required></label><span class="tl-facts">${facts.map(f => `<span>${escape(f)}</span>`).join('')}</span>${changed ? `<button type="button" class="button small primary" data-action="tl-apply-owners" title="Guardar los responsables cambiados como cambios locales, pendientes de sincronizar">Aplicar responsables · ${changed}</button>` : ''}<button type="button" class="button small ${ui.confirmDelete ? 'danger' : ''}" data-action="tl-delete">${ui.confirmDelete ? '¿Eliminar?' : 'Eliminar'}</button></div>`;
-  const picker = `<details class="tl-picker" ${ui.pickerOpen ?? !groups.length ? 'open' : ''} data-tl-picker><summary>User stories <span class="count">${groups.length}</span></summary><input class="search" data-tl-search placeholder="Buscar user story" aria-label="Buscar user story" value="${escape(ui.search ?? '')}"><div class="tl-choices" id="tl-choices">${pickerView(ws, timeline, ui.search ?? '')}</div></details>`;
+  const picker = `<details class="tl-picker" ${ui.pickerOpen ?? !groups.length ? 'open' : ''} data-tl-picker><summary>User stories <span class="count">${groups.length}</span></summary><div class="tl-picker-tools"><input class="search" data-tl-search placeholder="Buscar rama o user story" aria-label="Buscar en el backlog" value="${escape(ui.search ?? '')}"><button type="button" class="button small" data-action="tl-expand">Expandir</button><button type="button" class="button small" data-action="tl-collapse">Plegar</button></div><div class="tl-choices" id="tl-choices">${timelinePicker(ws, timeline, ui.search ?? '', ui.collapsed)}</div></details>`;
   const people = owners.length ? `<div class="tl-people" aria-label="Personas">${owners.map(owner => {
     const p = plan.people.get(owner), rate = timeline.rates?.[owner];
     return `<div class="tl-person" style="${style(owner)}"><span class="tl-avatar" aria-hidden="true">${owner ? escape(initials(memberName(owner))) : '?'}</span><span class="tl-person-name">${escape(owner ? memberName(owner) : 'Sin asignar')}<small>${number(p.hours)} h · ${p.hours ? shortDate(dayAt(timeline.start, p.end)) : '—'}</small></span><label class="tl-rate" title="Horas al día en esta línea temporal; vacío usa su capacidad"><input type="number" min="0" max="24" step="0.5" data-tl-rate="${escape(owner)}" value="${rate ?? ''}" placeholder="${number(capacity.usual(owner))}" aria-label="Horas al día de ${escape(owner ? memberName(owner) : 'sin asignar')}">h/d</label></div>`;
@@ -204,7 +224,7 @@ export function timelineView(ws, ui, { memberName, taskLink }) {
   const memberOptions = owner => `<option value="" ${owner === '' ? 'selected' : ''}>Sin asignar</option>${(ws.members ?? []).map(m => `<option value="${escape(memberKey(m))}" ${memberKey(m) === owner ? 'selected' : ''}>${escape(m.displayName)}</option>`).join('')}${owner && !(ws.members ?? []).some(m => memberKey(m) === owner) ? `<option value="${escape(owner)}" selected>${escape(memberName(owner))}</option>` : ''}`;
   const rows = groups.map(g => {
     const s = plan.stories.get(g.story.id);
-    const storyRow = `<div class="tl-row tl-story-row" data-tl-row="story:${g.story.id}"><div class="tl-label"><button type="button" class="tl-handle" draggable="true" data-tl-drag="story:${g.story.id}" aria-label="Mover #${g.story.id}; flechas arriba y abajo" title="Arrastra para cambiar el orden">⋮⋮</button><span class="tl-title" title="${escape(g.story.title)}"><span class="node-type kind-2">US</span>${escape(g.story.title)} <small>${taskLink(g.story)}</small></span><span class="tl-hours">${number(s.hours ?? 0)}</span><span class="tl-who">${g.tasks.length ? escape(range(dayFrom(timeline.start, s.start), dayAt(timeline.start, s.end))) : 'Sin tareas abiertas'}</span><select data-tl-story-after="${g.story.id}" aria-label="#${g.story.id} empieza después de" class="${g.after ? 'set' : ''}">${afterOptions(groups, null, g.story.id, g.after)}</select><button type="button" class="tl-remove" data-action="tl-remove-story" data-story="${g.story.id}" aria-label="Quitar #${g.story.id}" title="Quitar de la línea temporal">×</button></div><div class="tl-track">${g.tasks.length && s.end > s.start ? `<div class="tl-span" style="left:${s.start * DAY_WIDTH}px;width:${(s.end - s.start) * DAY_WIDTH}px"></div>` : ''}</div></div>`;
+    const storyRow = `<div class="tl-row tl-story-row" data-tl-row="story:${g.story.id}"><div class="tl-label"><button type="button" class="tl-handle" draggable="true" data-tl-drag="story:${g.story.id}" aria-label="Mover #${g.story.id}; flechas arriba y abajo" title="Arrastra para cambiar el orden">⋮⋮</button><span class="tl-title" title="${escape(g.story.title)}"><span class="node-type kind-2">${escape(g.story.type)}</span>${escape(g.story.title)} <small>${taskLink(g.story)}</small></span><span class="tl-hours">${number(s.hours ?? 0)}</span><span class="tl-who">${g.tasks.length ? escape(range(dayFrom(timeline.start, s.start), dayAt(timeline.start, s.end))) : 'Sin tareas abiertas'}</span><select data-tl-story-after="${g.story.id}" aria-label="#${g.story.id} empieza después de" class="${g.after ? 'set' : ''}">${afterOptions(groups, null, g.story.id, g.after)}</select><button type="button" class="tl-remove" data-action="tl-remove-story" data-story="${g.story.id}" aria-label="Quitar #${g.story.id}" title="Quitar de la línea temporal">×</button></div><div class="tl-track">${g.tasks.length && s.end > s.start ? `<div class="tl-span" style="left:${s.start * DAY_WIDTH}px;width:${(s.end - s.start) * DAY_WIDTH}px"></div>` : ''}</div></div>`;
     return storyRow + g.tasks.map(t => {
       const p = plan.tasks.get(t.id), name = t.owner ? memberName(t.owner) : 'Sin asignar';
       const classes = [t.estimated ? '' : 'unestimated', p.loop ? 'loop' : '', p.waits ? 'waits' : '', p.overflow ? 'overflow' : '', t.owner ? '' : 'unassigned'].filter(Boolean).join(' ');

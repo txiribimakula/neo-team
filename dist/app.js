@@ -2181,7 +2181,9 @@ async function switchMode(mode) {
 }
 // Líneas temporales: the list is edited here at once and saved in the background, so
 // reordering and trying owners never waits for the server.
-let timelineUi = { list: null, scope: null, id: null, search: '', pickerOpen: undefined, confirmDelete: false };
+let timelineUi = { list: null, scope: null, id: null, search: '', pickerOpen: undefined, confirmDelete: false, collapsed: new Set() };
+// A branch with only some of its stories chosen shows its box half marked.
+const markPartialBranches = () => document.querySelectorAll('[data-tl-stories].partial').forEach(box => { box.indeterminate = true; });
 const timelineDirty = new Set();
 let timelineSaveTimer, timelineDragging = null;
 function timelineList() {
@@ -2194,6 +2196,7 @@ function renderTimelines(focus = '') {
   timelineList();
   timelineUi.id = currentTimeline()?.id ?? null;
   $('#app').innerHTML = timelineView(state.workspace, timelineUi, { memberName, taskLink: item => taskId(item) });
+  markPartialBranches();
   const next = $('[data-tl-scroll]');
   if (next) { next.scrollLeft = left; next.scrollTop = top; }
   if (focus) $(focus)?.focus({ preventScroll: true });
@@ -2285,6 +2288,11 @@ async function applyTimelineOwners() {
 // Fields of the timeline, saved as they change.
 function timelineChange(el) {
   if ('tlStory' in el.dataset) { const id = Number(el.dataset.tlStory); timelineUi.pickerOpen = true; changeTimeline(t => { t.stories = el.checked ? [...t.stories.filter(s => s !== id), id] : t.stories.filter(s => s !== id); }, `[data-tl-story="${id}"]`); return true; }
+  if ('tlStories' in el.dataset) {
+    const ids = el.dataset.tlStories.split(',').filter(Boolean).map(Number), focus = `[data-tl-stories="${el.dataset.tlStories}"]`;
+    timelineUi.pickerOpen = true;
+    changeTimeline(t => { t.stories = el.checked ? [...t.stories, ...ids.filter(id => !t.stories.includes(id))] : t.stories.filter(id => !ids.includes(id)); }, focus); return true;
+  }
   if ('tlOwner' in el.dataset) {
     const id = Number(el.dataset.tlOwner), item = state.workspace.effectiveItems.find(i => i.id === id);
     changeTimeline(t => { const owners = { ...t.owners }; if (el.value === (item?.assignedTo || '')) delete owners[id]; else owners[id] = el.value; t.owners = owners; }, `[data-tl-owner="${id}"]`); return true;
@@ -2327,6 +2335,8 @@ const actions = {
     Object.assign(timelineUi, { id: timelineUi.list[0]?.id ?? null, confirmDelete: false, pickerOpen: undefined });
     render(); await request('/api/timeline', { remove: timeline.id });
   },
+  'tl-expand': () => { timelineUi.collapsed.clear(); timelineUi.pickerOpen = true; renderTimelines('[data-action="tl-expand"]'); },
+  'tl-collapse': () => { document.querySelectorAll('[data-tl-branch]').forEach(el => timelineUi.collapsed.add(el.dataset.tlBranch)); timelineUi.pickerOpen = true; renderTimelines('[data-action="tl-collapse"]'); },
   'tl-remove-story': el => changeTimeline(t => { t.stories = t.stories.filter(id => id !== Number(el.dataset.story)); }),
   'tl-apply-owners': applyTimelineOwners,
   'open-maintenance': () => openMaintenance(),
@@ -2809,7 +2819,7 @@ document.addEventListener('change',async event=>{
 });
 document.addEventListener('input',event=>{
   if ('pipelineFilter' in (event.target.dataset ?? {})) { filterPipelines(pipelineUi, event.target.value); return; }
-  if ('tlSearch' in (event.target.dataset ?? {})) { timelineUi.search = event.target.value; const timeline = currentTimeline(); if (timeline) $('#tl-choices').innerHTML = timelinePicker(state.workspace, timeline, timelineUi.search); return; }
+  if ('tlSearch' in (event.target.dataset ?? {})) { timelineUi.search = event.target.value; const timeline = currentTimeline(); if (timeline) { $('#tl-choices').innerHTML = timelinePicker(state.workspace, timeline, timelineUi.search, timelineUi.collapsed); markPartialBranches(); } return; }
   if (event.target.dataset?.personNote!==undefined) noteDrafts[event.target.dataset.personNote]=event.target.value;
   if (event.target.id === 'maintenance-type') {
     const form = $('#maintenance-settings-form');
@@ -2837,6 +2847,7 @@ document.addEventListener('toggle',event=>{
   const element=event.target;
   // The lines of the activity stay open or folded across redraws.
   if (element.matches?.('details[data-tl-picker]')) { timelineUi.pickerOpen = element.open; return; }
+  if (element.matches?.('details[data-tl-branch]')) { if (!timelineUi.search.trim()) { if (element.open) timelineUi.collapsed.delete(element.dataset.tlBranch); else timelineUi.collapsed.add(element.dataset.tlBranch); } return; }
   if (element.matches?.('details[data-feed]')) { jiraUi.feedOpen ??= new Set(); if (element.open) jiraUi.feedOpen.add(element.dataset.feed); else jiraUi.feedOpen.delete(element.dataset.feed); return; }
   if (!element.matches?.('details[data-node], details[data-project]')) return;
   const id=element.dataset.project ? `project:${element.dataset.project}` : Number(element.dataset.node);

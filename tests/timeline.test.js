@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { timelineGroups, capacityModel, scheduleTimeline, storyChoices, newTimeline, dayAt, dayFrom, timelineView } from '../dist/timeline.js';
+import { timelineGroups, capacityModel, scheduleTimeline, timelinePicker, newTimeline, dayAt, dayFrom, timelineView } from '../dist/timeline.js';
 import { cleanTimeline, saveTimeline, removeTimeline } from '../server/timelines.js';
 
 // Monday 2 November 2026: two weeks of one iteration, Ana 6 h/day and Luis 4 h/day.
@@ -87,11 +87,32 @@ test('a loop of predecessors is broken instead of hanging', () => {
   assert.equal(result.loops, 1);
 });
 
-test('closed stories and tasks are left out of the choices', () => {
-  const ws = workspace(), choices = storyChoices(ws, base());
-  assert.deepEqual(choices.map(c => c.story.id), [1, 2]);
-  assert.equal(choices[0].tasks, 2);
-  assert.equal(choices[0].hours, 18);
+test('the backlog to choose from shows branches down to the stories, as in Planificación', () => {
+  const ws = workspace();
+  ws.effectiveItems.push(
+    { id: 5, type: 'Feature', title: 'Pagos', state: 'Active' },
+    { id: 6, type: 'Historia de usuario', title: 'Cobro con tarjeta', parent: 5, state: 'Nuevo', contextOnly: true },
+    { id: 61, type: 'Task', title: 'Pasarela', parent: 6, state: 'New', remainingWork: 5, assignedTo: 'ana@x' },
+    { id: 7, type: 'Requisito', title: 'Sin tareas', parent: 5, state: 'New' },
+  );
+  ws.effectiveItems.find(i => i.id === 1).parent = 5;
+  const timeline = { ...base(), stories: [6] }, html = timelinePicker(ws, timeline);
+  assert.match(html, /data-tl-branch="5"/);
+  assert.match(html, /data-tl-stories="1,6,7"/);
+  assert.match(html, /class="partial"/);
+  assert.match(html, /data-tl-story="6" checked/);
+  assert.match(html, /#6 · contexto/);
+  assert.match(html, /data-tl-story="7"/);
+  assert.match(html, /data-tl-story="2"/);
+  assert.doesNotMatch(html, /data-tl-story="3"/);
+  assert.doesNotMatch(html, /data-tl-story="61"/);
+  // A matching branch keeps everything below it; otherwise only what matches.
+  assert.match(timelinePicker(ws, timeline, 'pagos'), /data-tl-story="7"/);
+  const card = timelinePicker(ws, timeline, 'tarjeta');
+  assert.match(card, /data-tl-story="6"/);
+  assert.doesNotMatch(card, /data-tl-story="7"/);
+  assert.match(timelinePicker(ws, timeline, 'nada así'), /Nada coincide/);
+  assert.equal(plan(ws, timeline).tasks.get(61).end, 1 - 1 / 6);
 });
 
 test('the view lays out stories, tasks and people', () => {
