@@ -122,6 +122,11 @@ test('the view lays out stories, tasks and people', () => {
   assert.match(html, /Ana Pérez/);
   assert.match(html, /Sin asignar/);
   assert.doesNotMatch(html, /Hecha/);
+  assert.doesNotMatch(html, /download-hierarchy/);
+  ws.mode = 'azure';
+  const azure = timelineView(ws, { list: [base()], id: 't1' }, { memberName: v => v, taskLink: item => `#${item.id}` });
+  assert.match(azure, /data-action="download-hierarchy"/);
+  assert.match(azure, /id="backlog-progress"/);
 });
 
 test('saved timelines are validated', () => {
