@@ -8,6 +8,7 @@ import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { matchesQuery, compileQuery } from './search.js';
+import { timelineView, timelinePicker, timelineGroups, newTimeline } from './timeline.js';
 import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf } from './sprint-name.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot, localDay } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
@@ -87,7 +88,7 @@ function pendingLabel(item) {return item.localOnly ? 'Nuevo · pendiente de sinc
 // Pending changes are counted by the server, with the same rules as the review.
 const pendingCount = (ws = state?.workspace) => ws?.pendingChanges ?? 0;
 const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
-const isPlanningTab = () => !['home', 'permissions', 'maintenance', 'my-iteration', 'test-plans', 'reviews', 'pipelines', 'jira'].includes(tab);
+const isPlanningTab = () => !['home', 'timelines', 'permissions', 'maintenance', 'my-iteration', 'test-plans', 'reviews', 'pipelines', 'jira'].includes(tab);
 function savedStatus() {
   const count=pendingCount();
   return count ? `${plural(count,'pendiente')} de sincronizar` : 'Sin cambios pendientes';
@@ -1462,7 +1463,7 @@ function render() {
   syncButton.setAttribute('aria-label',`Sincronización: ${savedStatus()}`);
   syncButton.title=`Sincronización: ${savedStatus()}`;
   renderSyncPanel();
-  const section = ({ home: 'Inicio', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', 'test-plans': 'Planes de prueba', reviews: 'Revisión de PRs', pipelines: 'Pipelines', jira: 'Mantenimiento' })[tab] || 'Planificación';
+  const section = ({ home: 'Inicio', timelines: 'Líneas temporales', permissions: 'Permisos', maintenance: 'Mantenimiento', 'my-iteration': 'Mi iteración', 'test-plans': 'Planes de prueba', reviews: 'Revisión de PRs', pipelines: 'Pipelines', jira: 'Mantenimiento' })[tab] || 'Planificación';
   $('.workspace-label').textContent = section;
   document.title = `${section} · Neo Team`;
   syncJiraDesktop();
@@ -1499,6 +1500,7 @@ function render() {
   if (testPlansSnapshot?.scope !== JSON.stringify([state.mode, state.config?.organization, state.config?.project])) testPlansSnapshot = null;
   syncMaintenanceBar();
   if (tab === 'home') { $('#app').innerHTML = homeView(); return; }
+  if (tab === 'timelines') { renderTimelines(); return; }
   if (tab === 'maintenance') { $('#app').innerHTML = maintenanceView(maintenanceSources(), state, { setup: maintenanceSetup, tools: jiraGear() }); syncJiraScope(); syncMaintenanceBar(); return; }
   if (tab === 'my-iteration') { $('#app').innerHTML = myIterationView(myIterationSnapshot, state); return; }
   if (tab === 'test-plans') { $('#app').innerHTML = testPlansView(testPlansSnapshot, state); return; }
@@ -1797,6 +1799,7 @@ async function securityQuery(descriptor, reauthenticate = false) {
 function homeView() {
   return `<section class="home"><div class="home-sections">
     <button class="home-card" data-action="open-planning"><span class="home-icon" aria-hidden="true">◷</span><strong>Planificación</strong>${pendingCount() ? `<small class="home-pending" title="Cambios guardados en local que aún no se han subido a Azure DevOps">${plural(pendingCount(),'pendiente')} de sincronizar</small>` : ''}</button>
+    <button class="home-card timelines" data-action="open-timelines"><span class="home-icon" aria-hidden="true">☰</span><strong>Líneas temporales</strong></button>
     <button class="home-card my-iteration" data-action="open-my-iteration"><span class="home-icon" aria-hidden="true">▦</span><strong>Mi iteración</strong></button>
     <button class="home-card test-plans" data-action="open-test-plans"><span class="home-icon" aria-hidden="true">✓</span><strong>Planes de prueba</strong></button>
     <button class="home-card maintenance" data-action="open-maintenance"><span class="home-icon" aria-hidden="true">⚙</span><strong>Mantenimiento</strong></button>
@@ -2176,6 +2179,126 @@ async function switchMode(mode) {
   render();
   toast(mode === 'demo' ? 'Modo de prueba activado. Tus datos reales se conservan.' : 'Modo real activado. Tus pruebas se conservan por separado.');
 }
+// Líneas temporales: the list is edited here at once and saved in the background, so
+// reordering and trying owners never waits for the server.
+let timelineUi = { list: null, scope: null, id: null, search: '', pickerOpen: undefined, confirmDelete: false };
+const timelineDirty = new Set();
+let timelineSaveTimer, timelineDragging = null;
+function timelineList() {
+  if (timelineUi.scope !== state.mode || !timelineUi.list) Object.assign(timelineUi, { list: structuredClone(state.timelines ?? []), scope: state.mode, confirmDelete: false });
+  return timelineUi.list;
+}
+const currentTimeline = () => { const list = timelineList(); return list.find(t => t.id === timelineUi.id) ?? list[0] ?? null; };
+function renderTimelines(focus = '') {
+  const scroll = $('[data-tl-scroll]'), left = scroll?.scrollLeft ?? 0, top = scroll?.scrollTop ?? 0;
+  timelineList();
+  timelineUi.id = currentTimeline()?.id ?? null;
+  $('#app').innerHTML = timelineView(state.workspace, timelineUi, { memberName, taskLink: item => taskId(item) });
+  const next = $('[data-tl-scroll]');
+  if (next) { next.scrollLeft = left; next.scrollTop = top; }
+  if (focus) $(focus)?.focus({ preventScroll: true });
+}
+function queueTimelineSave(id) {
+  timelineDirty.add(id); clearTimeout(timelineSaveTimer);
+  timelineSaveTimer = setTimeout(saveTimelines, 250);
+}
+async function saveTimelines() {
+  if (pending) { timelineSaveTimer = setTimeout(saveTimelines, 200); return; }
+  for (const id of [...timelineDirty]) {
+    timelineDirty.delete(id);
+    const timeline = timelineUi.list?.find(t => t.id === id);
+    if (timeline) await request('/api/timeline', { timeline }).catch(error => toast(error.message, 'error'));
+  }
+}
+function changeTimeline(mutate, focus = '') {
+  const timeline = currentTimeline();
+  if (!timeline) return;
+  mutate(timeline); timelineUi.confirmDelete = false;
+  renderTimelines(focus); queueTimelineSave(timeline.id);
+}
+// A story goes before or after another; a task before or after one of its own story.
+function moveTimelineStory(timeline, id, target, after) {
+  const stories = timeline.stories.filter(s => s !== id), index = stories.indexOf(target);
+  stories.splice(index < 0 ? stories.length : index + (after ? 1 : 0), 0, id);
+  timeline.stories = stories;
+}
+function moveTimelineTask(timeline, id, story, target, after) {
+  const group = timelineGroups(state.workspace, timeline).find(g => g.story.id === story);
+  if (!group) return;
+  const own = group.tasks.map(t => t.id), ids = own.filter(t => t !== id), index = target === null ? 0 : ids.indexOf(target) + (after ? 1 : 0);
+  ids.splice(Math.max(0, index), 0, id);
+  timeline.order = [...timeline.order.filter(t => !own.includes(t)), ...ids];
+}
+const timelineRef = value => { const [kind, id, story] = String(value ?? '').split(':'); return { kind, id: Number(id), story: Number(story ?? id) }; };
+// Dropped on a row: the same story reorders; another story's task or story makes it wait for that.
+function timelineDrop(row, event) {
+  if (!timelineDragging || !row) return null;
+  const from = timelineRef(timelineDragging), to = timelineRef(row.dataset.tlRow), box = row.getBoundingClientRect(), after = event.clientY > box.top + box.height / 2;
+  if (from.kind === 'story') return to.kind !== 'story' || to.id === from.id ? null : { mode: after ? 'after' : 'before', apply: t => moveTimelineStory(t, from.id, to.id, after) };
+  if (to.story === from.story) {
+    if (to.kind === 'story') return { mode: 'after', apply: t => moveTimelineTask(t, from.id, from.story, null, false) };
+    return to.id === from.id ? null : { mode: after ? 'after' : 'before', apply: t => moveTimelineTask(t, from.id, from.story, to.id, after) };
+  }
+  return { mode: 'link', target: to.id, apply: t => { t.after = { ...t.after, [from.id]: to.kind === 'story' ? `s:${to.id}` : `t:${to.id}` }; } };
+}
+function timelineDragStart(event) {
+  const handle = event.target.closest('[data-tl-drag]');
+  timelineDragging = handle.dataset.tlDrag;
+  event.dataTransfer.setData('application/x-neo-timeline', timelineDragging); event.dataTransfer.effectAllowed = 'move';
+  const row = handle.closest('.tl-row');
+  if (row) event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+}
+const clearTimelineDrop = () => document.querySelectorAll('.tl-drop-before, .tl-drop-after, .tl-drop-link').forEach(el => el.classList.remove('tl-drop-before', 'tl-drop-after', 'tl-drop-link'));
+function moveTimelineByKey(handle, step) {
+  const ref = timelineRef(handle.dataset.tlDrag), selector = `[data-tl-drag="${handle.dataset.tlDrag}"]`;
+  changeTimeline(t => {
+    if (ref.kind === 'story') { const index = t.stories.indexOf(ref.id), target = t.stories[index + step]; if (target !== undefined) moveTimelineStory(t, ref.id, target, step > 0); return; }
+    const ids = timelineGroups(state.workspace, t).find(g => g.story.id === ref.story)?.tasks.map(x => x.id) ?? [], target = ids[ids.indexOf(ref.id) + step];
+    if (target !== undefined) moveTimelineTask(t, ref.id, ref.story, target, step > 0);
+  }, selector);
+}
+function timelineDragOver(event) {
+  if (!timelineDragging) return;
+  const row = event.target.closest('[data-tl-row]'), drop = timelineDrop(row, event);
+  clearTimelineDrop();
+  if (!drop) return;
+  event.preventDefault(); event.dataTransfer.dropEffect = 'move'; row.classList.add(`tl-drop-${drop.mode}`);
+}
+function timelineDropped(event) {
+  if (!timelineDragging) return;
+  const drop = timelineDrop(event.target.closest('[data-tl-row]'), event), dragged = timelineDragging;
+  clearTimelineDrop(); timelineDragging = null;
+  if (!drop) return;
+  event.preventDefault(); changeTimeline(drop.apply, `[data-tl-drag="${dragged}"]`);
+  if (drop.mode === 'link') toast(`#${timelineRef(dragged).id} va después de #${drop.target}.`);
+}
+const timelineListeners = { dragenter: timelineDragOver, dragover: timelineDragOver, drop: timelineDropped, dragend: () => { clearTimelineDrop(); timelineDragging = null; } };
+for (const [type, listener] of Object.entries(timelineListeners)) document.addEventListener(type, listener);
+// Owners tried in the timeline become local changes, pending synchronization like any other.
+async function applyTimelineOwners() {
+  const timeline = currentTimeline(), changed = timelineGroups(state.workspace, timeline).flatMap(g => g.tasks).filter(t => t.changed);
+  for (let i = 0; i < changed.length; i += 200) await request('/api/stage', { edits: changed.slice(i, i + 200).map(t => ({ id: t.id, changes: { assignedTo: t.owner } })) });
+  review = null;
+  changeTimeline(t => { for (const task of changed) delete t.owners[task.id]; });
+  toast(`${plural(changed.length, 'responsable')} guardado${changed.length === 1 ? '' : 's'} en local. Pendiente de sincronizar en Planificación.`);
+}
+// Fields of the timeline, saved as they change.
+function timelineChange(el) {
+  if ('tlStory' in el.dataset) { const id = Number(el.dataset.tlStory); timelineUi.pickerOpen = true; changeTimeline(t => { t.stories = el.checked ? [...t.stories.filter(s => s !== id), id] : t.stories.filter(s => s !== id); }, `[data-tl-story="${id}"]`); return true; }
+  if ('tlOwner' in el.dataset) {
+    const id = Number(el.dataset.tlOwner), item = state.workspace.effectiveItems.find(i => i.id === id);
+    changeTimeline(t => { const owners = { ...t.owners }; if (el.value === (item?.assignedTo || '')) delete owners[id]; else owners[id] = el.value; t.owners = owners; }, `[data-tl-owner="${id}"]`); return true;
+  }
+  if ('tlAfter' in el.dataset) { const id = el.dataset.tlAfter; changeTimeline(t => { const after = { ...t.after }; if (el.value) after[id] = el.value; else delete after[id]; t.after = after; }, `[data-tl-after="${id}"]`); return true; }
+  if ('tlStoryAfter' in el.dataset) { const id = el.dataset.tlStoryAfter; changeTimeline(t => { const after = { ...t.storyAfter }; if (el.value) after[id] = el.value; else delete after[id]; t.storyAfter = after; }, `[data-tl-story-after="${id}"]`); return true; }
+  if ('tlRate' in el.dataset) {
+    const owner = el.dataset.tlRate, value = Number(el.value);
+    changeTimeline(t => { const rates = { ...t.rates }; if (el.value !== '' && value > 0 && value <= 24) rates[owner] = value; else delete rates[owner]; t.rates = rates; }, `[data-tl-rate="${CSS.escape(owner)}"]`); return true;
+  }
+  if (el.dataset.tlField === 'name') { const name = el.value.replace(/\s+/g, ' ').trim(); if (name) changeTimeline(t => { t.name = name.slice(0, 120); }); else renderTimelines(); return true; }
+  if (el.dataset.tlField === 'start') { if (/^\d{4}-\d{2}-\d{2}$/.test(el.value)) changeTimeline(t => { t.start = el.value; }, '[data-tl-field="start"]'); else renderTimelines(); return true; }
+  return false;
+}
 const actions = {
   permissions: async () => { if (state.mode === 'demo') { toast('Cambia al modo Azure DevOps para consultar permisos.'); return; } await loadSecurity(); resetPermissionFilters(); tab = 'permissions'; render(); if (!securitySnapshot && state.config?.project) await securityQuery(); },
   'security-back': () => { tab = lastPlanningTab; render(); },
@@ -2188,6 +2311,24 @@ const actions = {
   'security-page': el => filterPermissions(securitySnapshot.report, 'page', el.dataset.direction),
   home: () => { tab = 'home'; render(); window.scrollTo({ top: 0 }); },
   'open-planning': () => { tab = lastPlanningTab; render(); },
+  'open-timelines': () => { tab = 'timelines'; render(); },
+  'tl-open': el => { timelineUi.id = el.dataset.timeline; timelineUi.confirmDelete = false; timelineUi.pickerOpen = undefined; render(); },
+  'tl-new': () => {
+    const list = timelineList(), id = crypto.randomUUID();
+    list.push(newTimeline(id, `Línea temporal ${list.length + 1}`, localDay()));
+    Object.assign(timelineUi, { id, confirmDelete: false, pickerOpen: true, search: '' });
+    render(); queueTimelineSave(id); $('[data-tl-search]')?.focus();
+  },
+  'tl-delete': async () => {
+    const timeline = currentTimeline();
+    if (!timeline) return;
+    if (!timelineUi.confirmDelete) { timelineUi.confirmDelete = true; render(); $('[data-action="tl-delete"]')?.focus(); return; }
+    timelineUi.list = timelineList().filter(t => t !== timeline); timelineDirty.delete(timeline.id);
+    Object.assign(timelineUi, { id: timelineUi.list[0]?.id ?? null, confirmDelete: false, pickerOpen: undefined });
+    render(); await request('/api/timeline', { remove: timeline.id });
+  },
+  'tl-remove-story': el => changeTimeline(t => { t.stories = t.stories.filter(id => id !== Number(el.dataset.story)); }),
+  'tl-apply-owners': applyTimelineOwners,
   'open-maintenance': () => openMaintenance(),
   'maintenance-refresh': () => maintenanceRefresh(),
   'open-my-iteration': async () => {
@@ -2509,6 +2650,8 @@ document.addEventListener('click', async event => {
   try { await action(target); } catch (error) { errorInModal(error); }
 });
 document.addEventListener('keydown', event => {
+  if (event.target.dataset?.tlDrag && ['ArrowUp','ArrowDown'].includes(event.key) && !pending) { event.preventDefault(); moveTimelineByKey(event.target, event.key==='ArrowUp' ? -1 : 1); return; }
+  if (event.target.dataset?.tlField==='name' && event.key==='Enter') { event.preventDefault(); event.target.blur(); return; }
   const commentBox=event.target.dataset?.commentFor ? event.target : null;
   if (commentBox && mentionUi && ['ArrowDown','ArrowUp','Enter','Tab','Escape'].includes(event.key)) {
     event.preventDefault();
@@ -2602,6 +2745,7 @@ document.addEventListener('submit', async event => {
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if (tab==='timelines' && timelineChange(el)) return;
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
   if ('selectTask' in el.dataset) { selectTask(Number(el.dataset.selectTask), el.checked); return; }
   if ('maintenanceSelect' in el.dataset) { selectMaintenance(el.dataset.maintenanceSelect, el.checked); applyMaintenanceSelection(); return; }
@@ -2665,6 +2809,7 @@ document.addEventListener('change',async event=>{
 });
 document.addEventListener('input',event=>{
   if ('pipelineFilter' in (event.target.dataset ?? {})) { filterPipelines(pipelineUi, event.target.value); return; }
+  if ('tlSearch' in (event.target.dataset ?? {})) { timelineUi.search = event.target.value; const timeline = currentTimeline(); if (timeline) $('#tl-choices').innerHTML = timelinePicker(state.workspace, timeline, timelineUi.search); return; }
   if (event.target.dataset?.personNote!==undefined) noteDrafts[event.target.dataset.personNote]=event.target.value;
   if (event.target.id === 'maintenance-type') {
     const form = $('#maintenance-settings-form');
@@ -2691,6 +2836,7 @@ document.addEventListener('input',event=>{
 document.addEventListener('toggle',event=>{
   const element=event.target;
   // The lines of the activity stay open or folded across redraws.
+  if (element.matches?.('details[data-tl-picker]')) { timelineUi.pickerOpen = element.open; return; }
   if (element.matches?.('details[data-feed]')) { jiraUi.feedOpen ??= new Set(); if (element.open) jiraUi.feedOpen.add(element.dataset.feed); else jiraUi.feedOpen.delete(element.dataset.feed); return; }
   if (!element.matches?.('details[data-node], details[data-project]')) return;
   const id=element.dataset.project ? `project:${element.dataset.project}` : Number(element.dataset.node);
@@ -2698,6 +2844,7 @@ document.addEventListener('toggle',event=>{
 },true);
 document.addEventListener('mousedown', event => { if (event.target.closest('.mention-option')) event.preventDefault(); });
 document.addEventListener('dragstart', event => {
+  if (event.target.closest?.('[data-tl-drag]')) { timelineDragStart(event); return; }
   const card=event.target.closest('.task-card, [data-drag-task]'); if (!card || pending) return event.preventDefault();
   event.dataTransfer.setData('application/x-neo-task',card.dataset.task || card.dataset.dragTask); event.dataTransfer.effectAllowed='move';
 });
@@ -2755,7 +2902,7 @@ function currentPath() {
   }
   if (tab === 'pipelines') return pipelineUi.pipelineId ? `/pipelines/${pipelineUi.pipelineId}` : '/pipelines';
   if (tab === 'reviews') return prUi.reviewId ? `/revision-prs/${encodeURIComponent(prUi.reviewId)}` : '/revision-prs';
-  return { 'my-iteration': '/mi-iteracion', 'test-plans': '/planes-prueba', permissions: '/permisos' }[tab] ?? '/';
+  return { timelines: '/lineas-temporales', 'my-iteration': '/mi-iteracion', 'test-plans': '/planes-prueba', permissions: '/permisos' }[tab] ?? '/';
 }
 // Until the address of the page is opened, redraws do not change it.
 let routing = true;
@@ -2770,6 +2917,7 @@ async function openRoute(path) {
     const [section, sub] = path.split('/').filter(Boolean).map(part => { try { return decodeURIComponent(part); } catch { return part; } });
     if (modal.open && !pending) modal.close();
     if (section === 'planificacion') { tab = Object.entries(PLANNING_ROUTES).find(([, name]) => name === sub)?.[0] ?? lastPlanningTab; render(); }
+    else if (section === 'lineas-temporales') actions['open-timelines']();
     else if (section === 'mi-iteracion') await actions['open-my-iteration']();
     else if (section === 'planes-prueba') await actions['open-test-plans']();
     else if (section === 'permisos') await actions.permissions();
