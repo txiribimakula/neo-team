@@ -2012,7 +2012,16 @@ async function maintenanceRefresh() {
 }
 async function jiraRefresh() {
   const { filters, keys } = maintenanceScope(maintenanceSources(), state);
-  const data = await runOperation('/api/jira-refresh', { filters }, 'Actualizar desde Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : keys ? 'Los tickets filtrados del tablero y del filtro.' : 'Los tickets del tablero y los nuevos del filtro.');
+  let data;
+  try { data = await runOperation('/api/jira-refresh', { filters }, 'Actualizar desde Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : keys ? 'Los tickets filtrados del tablero y del filtro.' : 'Los tickets del tablero y los nuevos del filtro.'); }
+  catch (error) {
+    // A rejected token is fixed right there: the update goes on once a new one connects.
+    if (error.reason !== 'jira-token' || state.jira.tokenFromEnv) throw error;
+    modal.close(); actions['jira-settings']();
+    jiraUi.settingsError = 'token'; jiraUi.settingsDraft = {}; jiraUi.refreshAfterToken = true; restoreJiraForm();
+    toast('Jira ha rechazado el token: crea otro y pégalo aquí.', 'error');
+    return;
+  }
   jiraUi.board = data.jira; jiraSeen = ''; render();
   if (data.result.blind) return toast(data.result.blind, 'warning');
   const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments);
@@ -2560,7 +2569,7 @@ const actions = {
   },
   'jira-tab': el => { jiraUi.ticketTab = el.dataset.tab; refreshTicket(); },
   'jira-settings': () => {
-    jiraUi.settingsDraft = null; jiraUi.settingsError = null;
+    jiraUi.settingsDraft = null; jiraUi.settingsError = null; jiraUi.refreshAfterToken = false;
     showModal('Configuración', '', jiraSettingsView(state.jira, true), `<button class="button" data-action="close">Cancelar</button>${JIRA_SETTINGS_SUBMIT}`);
     modal.classList.add('wide-modal');
   },
@@ -2804,6 +2813,7 @@ document.addEventListener('submit', async event => {
       if (popup) modal.close();
       jiraUi.view = 'board'; await loadJira().catch(() => {}); render(); startJiraPolling();
       toast(`Conectado a Jira como ${data.jiraAccount ?? 'tu cuenta'}.`);
+      if (jiraUi.refreshAfterToken) { jiraUi.refreshAfterToken = false; await jiraRefresh(); }
       return;
     }
     if (event.target.id === 'assistant-form') { await askAssistant(event.target); return; }

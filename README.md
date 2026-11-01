@@ -117,7 +117,7 @@ Un tablero cuyas columnas son agentes de GitHub Copilot. Al descargarse, cada ti
 - **Aplicación:** repositorio local, rama base, comando de compilación y cómo arrancar la aplicación. El comando de compilación lo necesita Verificar, que compila antes de comprobar; el de arrancar es opcional: si falta, el agente lo averigua y lo guarda como aprendizaje.
 - **Carpeta de tickets:** por defecto `.neo-team/jira/`.
 
-**Conectar** guarda y comprueba al momento la conexión con la cuenta del token; si Jira la rechaza lo indica y la configuración queda guardada para corregirla. GitHub Copilot usa la misma sesión que la revisión de PRs.
+**Conectar** guarda y comprueba al momento la conexión con la cuenta del token; si Jira la rechaza lo indica y la configuración queda guardada para corregirla. Si Jira rechaza el token al pulsar **Actualizar**, se abre aquí mismo con el campo del token seleccionado y, al conectar con uno nuevo, la actualización sigue sola. GitHub Copilot usa la misma sesión que la revisión de PRs.
 
 **Lo que falta.** Si a un agente le falta algo que necesita (la sesión de Copilot; para Reproducir y Verificar, `winapp`, y para Revisar, la conexión con Azure DevOps), su columna muestra ⚠: al pulsarlo se ve qué falta, y el enlace de Copilot abre cómo iniciar sesión, con **Comprobar**. Mientras falte, su ▶ está desactivado y el modo automático no ejecuta esa columna. Sin sesión de Copilot el asistente también queda desactivado. Analizar avisa también si falta `ffmpeg` (sin él no hay fotogramas de los vídeos), pero sigue funcionando.
 
