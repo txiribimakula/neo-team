@@ -131,9 +131,17 @@ test('updating reads the whole filter and downloads only the tickets the filters
   assert.deepEqual([mine.downloaded, mine.found, mine.total, mine.filtered, (await tickets.list()).map(x => x.key)], [1, 1, 3, true, ['NEO-1']], 'only those filtered');
   await tickets.update('NEO-9', () => newTicket({ key: 'NEO-9' }));
   const all = await run(null);
-  assert.deepEqual([all.downloaded, all.unchanged, all.left, (await tickets.list()).map(x => [x.key, x.inFilter])], [1, 1, 1, [['NEO-1', true], ['NEO-2', true], ['NEO-9', false]]], 'nothing filtered: the whole filter, but not those finished in Jira');
+  assert.deepEqual([all.downloaded, all.unchanged, all.left, (await tickets.list()).map(x => [x.key, x.inFilter])], [1, 1, ['NEO-9'], [['NEO-1', true], ['NEO-2', true]]], 'nothing filtered: the whole filter, but not those finished in Jira, and the one that left it goes');
+  await tickets.update('NEO-9', () => newTicket({ key: 'NEO-9' }));
   const later = await collectFilter({ client, settings, tickets, me: { id: 'yo' }, catalog: { ...catalog, limited: true }, keys: null });
-  assert.equal(later.left, 0, 'a filter read in part does not tell which ones left it');
+  assert.deepEqual([later.left, (await tickets.get('NEO-9')).inFilter], [[], true], 'a filter read in part does not tell which ones left it');
+  const busy = await collectFilter({ client, settings, tickets, me: { id: 'yo' }, catalog, keys: null, busyKey: 'NEO-9' });
+  assert.deepEqual([busy.left, (await tickets.get('NEO-9')).inFilter], [[], false], 'the one an agent is working on is only marked');
+  const empty = await collectFilter({ client, settings, tickets, me: { id: 'yo' }, catalog: { entries: [], limited: false }, keys: null });
+  assert.deepEqual([empty.left, (await tickets.list()).map(x => x.key)], [[], ['NEO-1', 'NEO-2', 'NEO-9']], 'an empty filter deletes nothing');
+  assert.equal((await tickets.get('NEO-1')).inFilter, false);
+  await run(null);
+  assert.equal(await tickets.get('NEO-9'), null);
   // What updating the board just did is not undone by the filter, read before it.
   await tickets.remove('NEO-2');
   assert.equal((await collectFilter({ client, settings, tickets, catalog, synced: { closed: ['NEO-2'], updated: [] } })).downloaded, 0);

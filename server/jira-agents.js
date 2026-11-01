@@ -253,8 +253,8 @@ export async function readCatalog({ client, settings, me = null, onProgress = ()
 }
 // Downloads the tickets of the filter that are new or changed in Jira, only those in
 // `keys` when the person filters which ones. Every ticket of the filter on the board
-// gets who it is assigned to; those that left it are marked, unless the filter had
-// more tickets than were read. `synced`: what updating the board just did, which the
+// gets who it is assigned to; those that left it go, unless the filter had more
+// tickets than were read. `synced`: what updating the board just did, which the
 // filter, read before, does not know yet.
 export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, synced = null, onProgress = () => {} }) {
   const read = catalog ?? await readCatalog({ client, settings, me, onProgress });
@@ -264,7 +264,7 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
   // Those finished in Jira are not downloaded: updating would delete them.
   const wanted = read.entries.filter(entry => entry.category !== 'done' && !closed.has(entry.key) && (!keys || keys.has(entry.key)) && (!deleted.has(entry.key) || entry.key === only)), issues = wanted.slice(0, LIMITS.tickets);
   const chosen = new Set(issues.map(entry => entry.key)), found = new Set(read.entries.map(entry => entry.key));
-  const counts = { found: wanted.length, total: read.entries.length, downloaded: 0, unchanged: 0, left: 0, skipped: [] };
+  const counts = { found: wanted.length, total: read.entries.length, downloaded: 0, unchanged: 0, left: [], skipped: [] };
   for (const [index, entry] of read.entries.entries()) {
     const known = await tickets.get(entry.key);
     const complete = !!known && !!(await stat(join(tickets.folder(entry.key), 'descripcion.md')).catch(() => null));
@@ -282,8 +282,13 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
     if (deleted.has(entry.key)) await tickets.forget(entry.key, false);
     counts.downloaded++;
   }
+  // Those that left the filter are deleted. The one an agent is working on is only
+  // marked, and so is everything when the filter comes back empty, which is more
+  // likely a problem with the filter than every ticket leaving it at once.
   if (!read.limited) for (const ticket of await tickets.list()) {
-    if (!found.has(ticket.key) && ticket.inFilter !== false) { await tickets.update(ticket.key, t => ({ ...t, inFilter: false })); counts.left++; }
+    if (found.has(ticket.key)) continue;
+    if (read.entries.length && ticket.key !== busyKey) { await tickets.remove(ticket.key); counts.left.push(ticket.key); }
+    else if (ticket.inFilter !== false) await tickets.update(ticket.key, t => ({ ...t, inFilter: false }));
   }
   return { ...counts, limited: read.limited || wanted.length > issues.length, filtered: !!keys };
 }

@@ -639,15 +639,18 @@ const server = http.createServer(async (req, res) => {
           const keys = narrowed(filters) ? new Set(filterItems(jiraItems(await pipeline.tickets.list(), catalog.entries), filters).rows.filter(item => item.origin === 'jira').map(item => item.key)) : null;
           const options = { client, settings, tickets: pipeline.tickets, me: jiraMe(), ffmpeg, busyKey: pipeline.running?.key, catalog, keys, onProgress: progress };
           const sync = await syncTickets(options);
-          // A ticket finished or gone in Jira is no longer waiting for an agent.
-          const removed = [...sync.closed, ...sync.gone];
-          pipeline.queue = pipeline.queue.filter(q => !removed.includes(q.key));
-          if (removed.includes(pipeline.focus)) pipeline.focus = null;
+          // A ticket deleted here is no longer waiting for an agent.
+          const dropped = removed => {
+            pipeline.queue = pipeline.queue.filter(q => !removed.includes(q.key));
+            if (removed.includes(pipeline.focus)) pipeline.focus = null;
+          };
+          dropped([...sync.closed, ...sync.gone]);
           const collect = await collectFilter({ ...options, synced: sync });
+          dropped(collect.left);
           await pipeline.collectAll();
           const news = sync.updated.filter(u => u.comments || u.attachments).map(u => u.key);
-          const told = [collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}`, sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira`, sync.gone.length && `${sync.gone.length} ya no existe${sync.gone.length === 1 ? '' : 'n'}`, news.length && `novedades en ${news.join(', ')}`, collect.left && `${collect.left} fuera del filtro`, sync.missing.length && `${sync.missing.length} sin comprobar`].filter(Boolean);
-          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: keys ? `${keys.size} filtrado${keys.size === 1 ? '' : 's'}` : 'todo el filtro', detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.gone.length && `Ya no existen: ${sync.gone.join(', ')}`, sync.missing.length && `Sin comprobar: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
+          const told = [collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}`, sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira`, sync.gone.length && `${sync.gone.length} ya no existe${sync.gone.length === 1 ? '' : 'n'}`, news.length && `novedades en ${news.join(', ')}`, collect.left.length && `${collect.left.length} fuera del filtro`, sync.missing.length && `${sync.missing.length} sin comprobar`].filter(Boolean);
+          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: keys ? `${keys.size} filtrado${keys.size === 1 ? '' : 's'}` : 'todo el filtro', detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.gone.length && `Ya no existen: ${sync.gone.join(', ')}`, collect.left.length && `Fuera del filtro: ${collect.left.join(', ')}`, sync.missing.length && `Sin comprobar: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
           return json(res, { result: { sync, collect }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-share' || path === '/api/jira-resume') {

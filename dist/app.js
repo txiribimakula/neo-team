@@ -2020,7 +2020,7 @@ async function jiraRefresh() {
     sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira borrado${sync.closed.length === 1 ? '' : 's'} (${sync.closed.join(', ')})`,
     sync.gone.length && `${sync.gone.length} que ya no existe${sync.gone.length === 1 ? '' : 'n'} en Jira borrado${sync.gone.length === 1 ? '' : 's'} (${sync.gone.join(', ')})`,
     news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
-    collect.left && `${collect.left} ya no está${collect.left === 1 ? '' : 'n'} en el filtro`,
+    collect.left.length && `${collect.left.length} fuera del filtro borrado${collect.left.length === 1 ? '' : 's'} (${collect.left.join(', ')})`,
     sync.missing.length && `${sync.missing.length} sin comprobar en Jira (${sync.missing.join(', ')})`,
   ].filter(Boolean);
   toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${collect.filtered ? `${collect.found} filtrados de ${collect.total} en el filtro` : `${collect.total} tickets en el filtro`}.`, sync.missing.length ? 'warning' : 'info');

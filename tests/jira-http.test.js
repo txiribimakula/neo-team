@@ -244,7 +244,7 @@ test('HTTP Jira board in the example: collect, run the agents to the end and lea
   assert.equal((await post('/api/jira-run', { key: '../../etc' })).status, 400);
   // Updating brings what the filters of Mantenimiento leave; the whole filter is read, not downloaded.
   const single = (await post('/api/jira-refresh', { filters: { text: 'neo-102' } })).data;
-  assert.deepEqual([single.result.collect.filtered, single.result.collect.found, single.result.collect.left], [true, 1, 0]);
+  assert.deepEqual([single.result.collect.filtered, single.result.collect.found, single.result.collect.left], [true, 1, []]);
   assert.deepEqual(single.jira.catalog.map(e => [e.key, e.components]), [['NEO-101', ['Facturación']], ['NEO-102', ['Clientes']], ['NEO-103', ['Impresión']]], 'the filter, as it was read');
   assert.equal(single.jira.pipeline.feed.at(-1).meta, '1 filtrado');
   const outside = (await post('/api/jira-refresh', { filters: { text: 'NEO-999' } })).data.result.collect;
