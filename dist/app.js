@@ -2014,6 +2014,7 @@ async function jiraRefresh() {
   const { filters, keys } = maintenanceScope(maintenanceSources(), state);
   const data = await runOperation('/api/jira-refresh', { filters }, 'Actualizar desde Jira', state.jira.demo ? 'Ejemplo: nada se pide a Jira.' : keys ? 'Los tickets filtrados del tablero y del filtro.' : 'Los tickets del tablero y los nuevos del filtro.');
   jiraUi.board = data.jira; jiraSeen = ''; render();
+  if (data.result.blind) return toast(data.result.blind, 'warning');
   const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments);
   const parts = [
     collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.filtered ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,

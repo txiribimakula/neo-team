@@ -16,7 +16,7 @@ import { AzureGateway } from './azure.js';
 import { Planner, createLocalItem, duplicateItem, addComment, addComments, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
 import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, demoTestPlans, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
-import { JiraClient, accountOf, jiraSettingsFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
+import { JiraClient, accountOf, jiraSettingsFrom, jqlFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
 import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
 import { listScreens, screensFrom } from './jira-desktop.js';
 import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, readCatalog, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
@@ -631,7 +631,8 @@ const server = http.createServer(async (req, res) => {
           if (!settings) throw fail('Configura Jira primero.');
           const client = store.data.mode === 'demo' ? new DemoJiraClient() : new JiraClient(settings, await jiraToken());
           const pipeline = jiraPipeline();
-          if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(() => null));
+          // A rejected token stops here: read as nobody, Jira can answer with no tickets at all.
+          if (client instanceof JiraClient) await saveJiraMe(await client.call('/rest/api/2/myself').catch(error => { if (error.status === 401) throw error; return null; }));
           const ffmpeg = store.data.mode !== 'demo' && (await detectJiraTools()).ffmpeg;
           const filters = filtersFrom(input.filters);
           const catalog = await readCatalog({ client, settings, me: jiraMe(), onProgress: progress });
@@ -650,8 +651,11 @@ const server = http.createServer(async (req, res) => {
           await pipeline.collectAll();
           const news = sync.updated.filter(u => u.comments || u.attachments).map(u => u.key);
           const told = [collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}`, sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira`, sync.gone.length && `${sync.gone.length} ya no existe${sync.gone.length === 1 ? '' : 'n'}`, news.length && `novedades en ${news.join(', ')}`, collect.left.length && `${collect.left.length} fuera del filtro`, sync.missing.length && `${sync.missing.length} sin comprobar`].filter(Boolean);
-          pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: keys ? `${keys.size} filtrado${keys.size === 1 ? '' : 's'}` : 'todo el filtro', detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.gone.length && `Ya no existen: ${sync.gone.join(', ')}`, collect.left.length && `Fuera del filtro: ${collect.left.join(', ')}`, sync.missing.length && `Sin comprobar: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
-          return json(res, { result: { sync, collect }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
+          // Nothing at all from Jira points to the account or the filter, not to the tickets.
+          const blind = sync.blind ? `Jira no devuelve ningún ticket a ${jiraMe()?.name ?? 'esta cuenta'}: no se ha borrado nada` : null;
+          if (blind) pipeline.feed.add({ family: 'warning', title: blind, meta: `${sync.checked} en local`, detail: `Filtro: ${jqlFrom(settings.filter)}` });
+          else pipeline.feed.add({ family: sync.missing.length ? 'warning' : 'jira', title: `Actualizado desde Jira${told.length ? `: ${told.join(' · ')}` : ': todo al día'}`, meta: keys ? `${keys.size} filtrado${keys.size === 1 ? '' : 's'}` : 'todo el filtro', detail: [sync.closed.length && `Terminados: ${sync.closed.join(', ')}`, sync.gone.length && `Ya no existen: ${sync.gone.join(', ')}`, collect.left.length && `Fuera del filtro: ${collect.left.join(', ')}`, sync.missing.length && `Sin comprobar: ${sync.missing.join(', ')}`].filter(Boolean).join('\n') });
+          return json(res, { result: { sync, collect, blind }, jira: await jiraBoard(), state: publicState({ operationComplete: true }) });
         }
         if (path === '/api/jira-share' || path === '/api/jira-resume') {
           // The state of a ticket goes to Jira as an attachment, so another computer can

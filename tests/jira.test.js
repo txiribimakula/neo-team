@@ -202,9 +202,11 @@ test('an account that sees nothing in Jira deletes nothing, and a failed search 
   await tickets.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1' }), stage: 'analyze' }));
   const sync = (catalog, search = async () => ({ issues: [] })) => syncTickets({ client: { search }, settings: { url: 'https://e' }, tickets, catalog });
   await assert.rejects(sync({ entries: [{ key: 'NEO-8' }] }, async () => { throw new Error('Jira respondió 503'); }));
-  assert.deepEqual((await sync({ entries: [] })).missing, ['NEO-1']);
+  const blind = await sync({ entries: [] });
+  assert.deepEqual([blind.missing, blind.blind], [['NEO-1'], true]);
   assert.ok(await tickets.get('NEO-1'));
-  assert.deepEqual((await sync({ entries: [{ key: 'NEO-8' }] })).gone, ['NEO-1'], 'the filter shows it can read Jira');
+  const seen = await sync({ entries: [{ key: 'NEO-8' }] });
+  assert.deepEqual([seen.gone, seen.blind], [['NEO-1'], false], 'the filter shows it can read Jira');
   assert.equal(await tickets.get('NEO-1'), null);
 });
 

@@ -348,6 +348,7 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
   // it goes. Unless Jira shows nothing at all, which says more about the account than
   // about the tickets, or the filter has just returned it.
   const listed = new Set((catalog?.entries ?? []).map(entry => entry.key)), sees = remote.size > 0 || listed.size > 0;
+  result.blind = !sees && local.length > 0;
   for (const [index, ticket] of local.entries()) {
     if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
     const issue = remote.get(ticket.key);
