@@ -2018,9 +2018,10 @@ async function jiraRefresh() {
   const parts = [
     collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.filtered ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,
     sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira borrado${sync.closed.length === 1 ? '' : 's'} (${sync.closed.join(', ')})`,
+    sync.gone.length && `${sync.gone.length} que ya no existe${sync.gone.length === 1 ? '' : 'n'} en Jira borrado${sync.gone.length === 1 ? '' : 's'} (${sync.gone.join(', ')})`,
     news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
     collect.left && `${collect.left} ya no está${collect.left === 1 ? '' : 'n'} en el filtro`,
-    sync.missing.length && `${sync.missing.length} ya no existe${sync.missing.length === 1 ? '' : 'n'} o no tienes acceso (${sync.missing.join(', ')})`,
+    sync.missing.length && `${sync.missing.length} sin comprobar en Jira (${sync.missing.join(', ')})`,
   ].filter(Boolean);
   toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${collect.filtered ? `${collect.found} filtrados de ${collect.total} en el filtro` : `${collect.total} tickets en el filtro`}.`, sync.missing.length ? 'warning' : 'info');
 }

@@ -258,7 +258,7 @@ export async function readCatalog({ client, settings, me = null, onProgress = ()
 // filter, read before, does not know yet.
 export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, synced = null, onProgress = () => {} }) {
   const read = catalog ?? await readCatalog({ client, settings, me, onProgress });
-  const closed = new Set(synced?.closed ?? []), fresh = new Set((synced?.updated ?? []).map(u => u.key));
+  const closed = new Set([...(synced?.closed ?? []), ...(synced?.gone ?? [])]), fresh = new Set((synced?.updated ?? []).map(u => u.key));
   // One deleted by hand stays out unless the filters leave only it: bringing that ticket brings it back.
   const deleted = await tickets.deleted(), only = keys?.size === 1 ? [...keys][0] : null;
   // Those finished in Jira are not downloaded: updating would delete them.
@@ -325,12 +325,13 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 
 // Brings the local tickets up to date with Jira: those finished there (status of
 // category Done) are deleted with their files, and those changed there are
-// downloaded again, which brings their new comments and attachments.
+// downloaded again, which brings their new comments and attachments. Those that no
+// longer exist there are deleted too.
 // With `keys`, the tickets the person filters, the rest are checked (to delete the
 // finished ones) but their changes are not downloaded.
-export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, keys = null, onProgress = () => {} }) {
+export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, onProgress = () => {} }) {
   const local = await tickets.list();
-  const result = { checked: local.length, closed: [], updated: [], missing: [], skipped: [] };
+  const result = { checked: local.length, closed: [], gone: [], updated: [], missing: [], skipped: [] };
   const remote = new Map();
   for (let i = 0; i < local.length; i += 100) {
     const keys = local.slice(i, i + 100).map(t => t.key);
@@ -338,10 +339,22 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
     const { issues } = await client.search(`key in (${keys.join(', ')})`, ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee']);
     for (const issue of issues) remote.set(issue.key, issue);
   }
+  // Seeing nothing of Jira at all says more about the account than about the tickets.
+  const sees = remote.size > 0 || !!catalog?.entries?.length;
   for (const [index, ticket] of local.entries()) {
-    const issue = remote.get(ticket.key);
-    if (!issue) { result.missing.push(ticket.key); continue; }
     if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
+    let issue = remote.get(ticket.key);
+    if (!issue) {
+      // The search also leaves out what it has not indexed or has archived: only the
+      // answer about that ticket says it is gone. Moved, it answers with its new key.
+      onProgress({ message: `Comprobando ${ticket.key} en Jira (${index + 1} de ${local.length})…` });
+      issue = await client.issue(ticket.key).catch(error => error.status === 404 ? { key: null } : null);
+      if (!issue) { result.missing.push(ticket.key); continue; }
+      if (issue.key !== ticket.key) {
+        if (sees) { await tickets.remove(ticket.key); result.gone.push(ticket.key); } else result.missing.push(ticket.key);
+        continue;
+      }
+    }
     const assignee = assigneeOf(issue, me), status = issue.fields?.status;
     if (status?.statusCategory?.key === 'done') {
       await tickets.remove(ticket.key);
