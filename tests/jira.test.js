@@ -448,13 +448,18 @@ test('the board shows a column per agent with its model and the live step', () =
   assert.doesNotMatch(column('Revisar').match(/aria-label="NEO-7 · Hecho">([\s\S]*?)<\/article>/)[1], /data-action="jira-(run|done|autolock)"/, 'with nothing left to do');
   assert.match(column('Analizar'), /NEO-9/, 'a ticket being indexed shows in Analizar');
   assert.match(html, /aria-label="Reproducir">[\s\S]*?data-action="jira-warn" data-stage="reproduce"/, 'an agent that lacks something it needs warns');
-  assert.doesNotMatch(html, /data-stage="analyze" aria-expanded/, 'and one that has everything does not');
+  assert.doesNotMatch(html, /data-action="jira-warn" data-stage="analyze"/, 'and one that has everything does not');
   const tip = jiraView(state, { view: 'board', board, warn: 'reproduce' }, { isAuthenticated: true, models: [] });
   assert.match(tip, /<span class="jira-warn-tip" role="tooltip"><strong>Falta<\/strong><ul><li>winapp: instálalo<\/li><\/ul>/, 'clicking it lists what to install');
   assert.doesNotMatch(html, /data-ai-choice="jira" data-stage="collect"/);
   assert.match(html, /<option value="claude-opus-4\.5" selected>Claude Opus 4\.5 · ×3/);
   assert.match(html, /data-action="jira-auto" data-on="false"[^>]*aria-label="Pausar">❚❚<\/button>/, 'started: the button pauses');
   assert.match(html, /data-action="jira-learnings" data-stage="fix"/, 'each column opens its own lessons');
+  for (const stage of ['analyze', 'reproduce', 'fix', 'verify', 'review']) assert.match(html, new RegExp(`data-action="jira-info" data-stage="${stage}" aria-expanded="false"`), 'each column can say what it does');
+  assert.doesNotMatch(html, /jira-info-text/, 'closed until asked');
+  const told = jiraView(state, { view: 'board', board, info: 'fix' }, { isAuthenticated: true, models: [] });
+  assert.match(told, /data-action="jira-info" data-stage="fix" aria-expanded="true"/);
+  assert.deepEqual([...told.matchAll(/<\/h2><p class="jira-info-text">([^<]*)/g)].map(m => m[1].slice(0, 20)), ['Busca la causa y cor'], 'only that column, under its name');
   // The header: the stage with its count (and ⚠) and its lessons, then the traffic light and the model.
   const header = html.match(/aria-label="Reproducir"><header>([\s\S]*?)<\/header>/)[1];
   assert.match(header, /^<h2><span class="jira-column-name">Reproducir<span class="count"[^>]*>1<\/span><span class="jira-warn">[\s\S]*<\/span><button class="icon-button jira-learn"[^>]*><svg[\s\S]*?<\/svg><\/button><\/h2><div class="jira-column-tools"><span class="jira-light[\s\S]*<span class="ai-choice" data-ai-choice="jira" data-stage="reproduce"><select class="ai-model jira-model"/);

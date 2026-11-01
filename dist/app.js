@@ -2550,6 +2550,7 @@ const actions = {
     $('#jira-learnings-form').dataset.saved = JSON.stringify(data.learnings);
   },
   'jira-warn': el => { jiraUi.warn = jiraUi.warn === el.dataset.stage ? null : el.dataset.stage; render(); },
+  'jira-info': el => { jiraUi.info = jiraUi.info === el.dataset.stage ? null : el.dataset.stage; render(); },
   // Signing in to Copilot, from the warning of an agent that needs it.
   'jira-copilot-login': () => { jiraUi.warn = null; render(); showModal('Iniciar sesión en GitHub Copilot', '', `<div id="copilot-login">${loginSteps()}</div>`, '<button class="button" data-action="close">Cerrar</button><button class="button primary" data-action="pr-copilot-status">Comprobar</button>'); },
   'jira-assistant': () => {
@@ -2736,6 +2737,8 @@ document.addEventListener('click', async event => {
   if (event.target.closest('.jira-answer') && !event.target.closest('button')) return;
   // The list of what an agent lacks closes when clicking anywhere else.
   if (jiraUi.warn && !event.target.closest('.jira-warn')) { jiraUi.warn = null; render(); }
+  // And so does what a column does.
+  if (jiraUi.info && !event.target.closest('.jira-info-icon, .jira-info-text')) { jiraUi.info = null; render(); }
   if (!target || pending || target.disabled) return;
   if (target.closest('summary')) event.preventDefault();
   const action = actions[target.dataset.action];

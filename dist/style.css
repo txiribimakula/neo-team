@@ -721,10 +721,12 @@ dialog.sync-panel{position:fixed;inset:0 0 0 auto;margin:0;width:min(720px,100vw
 .jira-activity>header code,.jira-activity>summary code{font-size:11px;color:var(--muted)}
 .jira-activity .log-result{border-left:3px solid #5d9440}
 
-.jira-column-name{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.jira-column-name{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px 6px;min-width:0}
 .jira-warn{position:relative;display:inline-flex}
 .jira-warn-icon{border:0;background:none;padding:0 2px;font-size:14px;line-height:1;color:#b7791f;cursor:pointer}.jira-warn-icon:hover{color:#8a5a12}
 .jira-warn-tip{position:absolute;top:calc(100% + 6px);left:-6px;z-index:20;min-width:190px;background:#fff;border:1px solid #ecd49c;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.12);padding:8px 10px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap}
+.jira-info-icon{border:0;background:none;padding:0;line-height:0;color:var(--muted);cursor:pointer}.jira-info-icon:hover,.jira-info-icon[aria-expanded=true]{color:var(--ink)}
+.jira-info-text{margin:0;font-size:12.5px;line-height:1.45;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 .jira-warn-tip strong{display:block;color:#8a5a12;margin-bottom:4px}.jira-warn-tip ul{margin:0;padding-left:16px}
 .jira-comment-preview{white-space:pre-wrap;max-height:50vh;overflow:auto;background:#f5f7f5;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12.5px;margin:0}
 .jira-comment-decide{display:inline-flex;gap:6px;margin-left:auto}

@@ -11,11 +11,11 @@ const minutes = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${
 // Analizar), building is the start of Verificar, and the solved tickets stay in
 // Revisar, highlighted.
 export const COLUMNS = [
-  { id: 'analyze', name: 'Analizar', tier: 'Medio' },
-  { id: 'reproduce', name: 'Reproducir', tier: 'Medio' },
-  { id: 'fix', name: 'Solucionar', tier: 'Avanzado' },
-  { id: 'verify', name: 'Verificar', tier: 'Medio' },
-  { id: 'review', name: 'Revisar', tier: 'Avanzado' },
+  { id: 'analyze', name: 'Analizar', tier: 'Medio', about: 'Lee el ticket y mira el código sin cambiarlo ni arrancar la aplicación. Estima lo fácil que es reproducirlo y solucionarlo, y apunta los pasos esperados y dónde puede estar la causa. Antes, al descargar el ticket, se crea un índice sin IA.' },
+  { id: 'reproduce', name: 'Reproducir', tier: 'Medio', about: 'Arranca la versión actual de la aplicación y la maneja siguiendo el ticket para ver el error. Guarda evidencias y un script que repite los pasos.' },
+  { id: 'fix', name: 'Solucionar', tier: 'Avanzado', about: 'Busca la causa y corrige el código en una copia aparte, en la rama neo/<ticket>, sin tocar tu clon. No compila ni hace commits.' },
+  { id: 'verify', name: 'Verificar', tier: 'Medio', about: 'Compila la corrección, sin IA, y repite la reproducción sobre esa versión. Si no compila o el error sigue, el ticket vuelve a Solucionar.' },
+  { id: 'review', name: 'Revisar', tier: 'Avanzado', about: 'Revisa el código como un revisor experto y lo publica en Azure DevOps como pull request borrador con sus comentarios. Sin comentarios nuevos, el ticket queda resuelto; con comentarios, vuelve a Solucionar.' },
 ];
 const SHOWN_IN = { collect: 'analyze', build: 'verify', done: 'review' };
 // Where a ticket can be: the columns plus the solved ones, in order.
@@ -292,7 +292,7 @@ export function generalView(general, draft = '', signedOut = false, warn = null,
 }
 
 // `shown`: the keys the filters of Mantenimiento leave (all, without it); `head`, its head.
-function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, warn = null, assistantClosed = false, head = null, feedOpen = new Set(), to = null, unread = 0, screens = null, filtered = null, selected = null) {
+function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, warn = null, assistantClosed = false, head = null, feedOpen = new Set(), to = null, unread = 0, screens = null, filtered = null, selected = null, info = null) {
   const missing = missingOf(board, copilot);
   const visible = shown ? board.tickets.filter(t => shown.has(t.key)) : board.tickets;
   const columns = COLUMNS.map(column => {
@@ -303,7 +303,7 @@ function boardView(board, copilot, drafts, shown = null, tell = '', tells = {}, 
     // An agent that lacks something does not run.
     const lacking = lackingOf(column.id, missing);
     const warning = warnView(column.id, column.name, lackingOf(column.id, missing, true), warn === column.id);
-    return `<section class="jira-column${active ? ' is-active' : ''} mode-${mode}" aria-label="${escape(column.name)}"><header><h2><span class="jira-column-name">${escape(column.name)}<span class="count" title="Tickets en ${escape(column.name)}">${tickets.length}</span>${warning}</span>${column.tier ? `<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>` : ''}</h2><div class="jira-column-tools">${lights}${column.tier ? modelSelect(column, board.settings, board.defaults, copilot) : ''}</div></header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, mode, drafts, board.settings.demo, !!board.pipeline?.queue?.includes(t.key) || board.pipeline?.focus === t.key, lacking, !!selected?.has(`jira:${t.key}`))).join('')}</div></section>`;
+    return `<section class="jira-column${active ? ' is-active' : ''} mode-${mode}" aria-label="${escape(column.name)}"><header><h2><span class="jira-column-name">${escape(column.name)}<span class="count" title="Tickets en ${escape(column.name)}">${tickets.length}</span>${warning}<button class="jira-info-icon" data-action="jira-info" data-stage="${column.id}" aria-expanded="${info === column.id}" title="Qué hace ${escape(column.name)}" aria-label="Qué hace ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></button></span>${column.tier ? `<button class="icon-button jira-learn" data-action="jira-learnings" data-stage="${column.id}" title="Aprendizajes del agente" aria-label="Aprendizajes de ${escape(column.name)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>` : ''}</h2>${info === column.id ? `<p class="jira-info-text">${escape(column.about)}</p>` : ''}<div class="jira-column-tools">${lights}${column.tier ? modelSelect(column, board.settings, board.defaults, copilot) : ''}</div></header><div class="jira-cards">${tickets.map(t => card(t, board.pipeline?.running, mode, drafts, board.settings.demo, !!board.pipeline?.queue?.includes(t.key) || board.pipeline?.focus === t.key, lacking, !!selected?.has(`jira:${t.key}`))).join('')}</div></section>`;
   }).join('');
   const error = board.pipeline?.error ? `<p class="inline-error">${escape(board.pipeline.error)}</p>` : '';
   // Without a Copilot session the agents cannot work: how to sign in, as in pull request reviews.
@@ -510,7 +510,7 @@ export function jiraView(state, ui, copilot) {
   if (!state.jira) return page(`${ui.head ? ui.head('') : ''}${settingsView(state.jira)}`);
   if (!board) return page('<p class="text-muted"><span class="spinner"></span></p>');
   if (board.error) return page(`<p class="inline-error">${escape(board.error)}</p>`);
-  return page(boardView(board, copilot, ui.answers, ui.shown ?? null, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.head ?? null, ui.feedOpen, ui.to, ui.unread, ui.screens, ui.filtered ?? null, ui.selected ?? null));
+  return page(boardView(board, copilot, ui.answers, ui.shown ?? null, ui.tell, ui.tells, ui.warn, ui.assistantClosed, ui.head ?? null, ui.feedOpen, ui.to, ui.unread, ui.screens, ui.filtered ?? null, ui.selected ?? null, ui.info ?? null));
 }
 
 export function settingsFrom(form) {
