@@ -183,6 +183,31 @@ test('with the filtered tickets, updating downloads nothing else from the board'
   assert.deepEqual((await sync(null)).updated.map(u => u.key), ['NEO-2']);
 });
 
+test('a ticket under way in Jira skips the steps it is past, only forward and once per status', async t => {
+  const after = (jiraStatus, jiraCategory) => nextAfter({ jiraStatus, jiraCategory }, 'collect', 'ok').stage;
+  assert.deepEqual([after('Abierto', 'new'), after('In Progress', 'indeterminate'), after('En curso', 'indeterminate'), after('In Review', 'indeterminate'), after('En revisión', 'indeterminate'), after('Code Review', 'new'), after('', '')], ['analyze', 'fix', 'fix', 'review', 'review', 'review', 'analyze']);
+  const tickets = new TicketStore(await temp(t));
+  const stages = { 'NEO-1': 'analyze', 'NEO-2': 'reproduce', 'NEO-3': 'verify', 'NEO-4': 'analyze', 'NEO-5': 'fix', 'NEO-6': 'analyze', 'NEO-7': 'analyze' };
+  for (const [key, stage] of Object.entries(stages)) await tickets.update(key, () => ({ ...newTicket({ key }), stage, status: key === 'NEO-2' ? 'blocked' : 'pending', question: key === 'NEO-2' ? '¿Qué?' : null, updated: 'u' }));
+  const issue = (key, name, category) => ({ key, fields: { updated: 'u', status: { name, statusCategory: { key: category } } } });
+  const jira = { 'NEO-1': ['In Progress', 'indeterminate'], 'NEO-2': ['In Progress', 'indeterminate'], 'NEO-3': ['In Progress', 'indeterminate'], 'NEO-4': ['In Review', 'indeterminate'], 'NEO-5': ['In Review', 'indeterminate'], 'NEO-6': ['Abierto', 'new'], 'NEO-7': ['In Progress', 'indeterminate'] };
+  const client = { search: async () => ({ issues: Object.entries(jira).map(([key, [name, category]]) => issue(key, name, category)) }) };
+  const sync = () => syncTickets({ client, settings: { url: 'https://e' }, tickets, busyKey: 'NEO-7' });
+  const stagesNow = async () => Object.fromEntries((await tickets.list()).map(x => [x.key, x.stage]));
+  assert.deepEqual((await sync()).placed, ['NEO-1', 'NEO-2', 'NEO-4', 'NEO-5']);
+  assert.deepEqual(await stagesNow(), { 'NEO-1': 'fix', 'NEO-2': 'fix', 'NEO-3': 'verify', 'NEO-4': 'review', 'NEO-5': 'review', 'NEO-6': 'analyze', 'NEO-7': 'analyze' }, 'never back, nor the one an agent is working on');
+  assert.deepEqual([(await tickets.get('NEO-2')).status, (await tickets.get('NEO-2')).question], ['pending', null]);
+  await tickets.update('NEO-1', x => ({ ...x, stage: 'reproduce' }));
+  assert.deepEqual((await sync()).placed, [], 'where the person puts it stands');
+  assert.equal((await tickets.get('NEO-1')).stage, 'reproduce');
+  jira['NEO-1'] = ['In Review', 'indeterminate'];
+  assert.deepEqual((await sync()).placed, ['NEO-1'], 'until its status changes in Jira');
+  assert.equal((await tickets.get('NEO-1')).stage, 'review');
+  const verify = history => stagePrompt({ stage: 'verify', ticket: { key: 'NEO-1', summary: 's', history }, folder: '/t', files: [], settings: {} });
+  assert.match(verify([]), /was not reproduced here/, 'verifying without a reproduction takes the steps from the ticket');
+  assert.doesNotMatch(verify([{ stage: 'reproduce', outcome: 'reproduced' }]), /was not reproduced here/);
+});
+
 test('updating deletes what the search of Jira no longer returns, and only that', async t => {
   const tickets = new TicketStore(await temp(t)), asked = [];
   for (const key of ['NEO-1', 'NEO-2', 'NEO-3', 'NEO-4']) await tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));

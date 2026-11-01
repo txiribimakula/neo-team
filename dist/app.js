@@ -2029,6 +2029,7 @@ async function jiraRefresh() {
     collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.filtered ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,
     sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira borrado${sync.closed.length === 1 ? '' : 's'} (${sync.closed.join(', ')})`,
     sync.gone.length && `${sync.gone.length} que ya no existe${sync.gone.length === 1 ? '' : 'n'} en Jira borrado${sync.gone.length === 1 ? '' : 's'} (${sync.gone.join(', ')})`,
+    sync.placed.length && `${sync.placed.length} movido${sync.placed.length === 1 ? '' : 's'} según su estado en Jira (${sync.placed.join(', ')})`,
     news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
     collect.left.length && `${collect.left.length} fuera del filtro borrado${collect.left.length === 1 ? '' : 's'} (${collect.left.join(', ')})`,
     sync.missing.length && `${sync.missing.length} sin comprobar en Jira (${sync.missing.join(', ')})`,

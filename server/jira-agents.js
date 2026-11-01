@@ -90,10 +90,14 @@ export const reviewRounds = ticket => (ticket.history ?? []).filter(sentBack).le
 // back to fix, which answers them: a fix that changed no code (and left nothing for
 // the verification) goes straight back to review. The reviews also stop after
 // `maxIterations` rounds of comments.
+// A ticket already going on in Jira does not start over: in review it waits in Revisar,
+// and any other status of the category «in progress» is past reproducing, in Solucionar.
+const IN_REVIEW = /review|revisi[oó]n|revisar/i;
+export const stageFromJira = (name, category) => category === 'done' ? null : IN_REVIEW.test(name ?? '') ? 'review' : category === 'indeterminate' ? 'fix' : null;
 export function nextAfter(ticket, stage, outcome, maxIterations = 3, { unchanged = false } = {}) {
   const fixes = roundFixes(ticket);
   switch (`${stage}:${outcome}`) {
-    case 'collect:ok': return { stage: 'analyze', status: 'pending' };
+    case 'collect:ok': return { stage: stageFromJira(ticket.jiraStatus, ticket.jiraCategory) ?? 'analyze', status: 'pending' };
     case 'analyze:analyzed': return { stage: 'reproduce', status: 'pending' };
     case 'reproduce:reproduced': return { stage: 'fix', status: 'pending' };
     case 'reproduce:not_reproduced': return (ticket.reproduceAttempts ?? 0) < REPRODUCE_ATTEMPTS ? { stage: 'reproduce', status: 'pending' } : { stage: 'reproduce', status: 'blocked', note: `No se reprodujo en ${REPRODUCE_ATTEMPTS} intentos.` };
@@ -336,7 +340,7 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 // finished ones) but their changes are not downloaded.
 export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, onProgress = () => {} }) {
   const local = await tickets.list();
-  const result = { checked: local.length, closed: [], gone: [], updated: [], missing: [], skipped: [] };
+  const result = { checked: local.length, closed: [], gone: [], placed: [], updated: [], missing: [], skipped: [] };
   const remote = new Map();
   for (let i = 0; i < local.length; i += 100) {
     const keys = local.slice(i, i + 100).map(t => t.key);
@@ -361,6 +365,13 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
       await tickets.remove(ticket.key);
       result.closed.push(ticket.key);
       continue;
+    }
+    // A ticket that moved on in Jira moves on here, only forward and once per status:
+    // after that, where the person puts it stands.
+    if (ticket.stage !== 'collect' && status?.name && status.name !== ticket.jiraPlaced) {
+      const target = stageFromJira(status.name, status.statusCategory?.key), ahead = target && STAGE_IDS.indexOf(target) > STAGE_IDS.indexOf(ticket.stage);
+      await tickets.update(ticket.key, t => ({ ...t, jiraPlaced: status.name, ...(ahead ? { stage: target, status: 'pending', note: null, question: null } : {}) }));
+      if (ahead) result.placed.push(ticket.key);
     }
     if (issue.fields?.updated === ticket.updated || (keys && !keys.has(ticket.key))) {
       if (JSON.stringify(ticket.assignee ?? null) !== JSON.stringify(assignee)) await tickets.update(ticket.key, t => ({ ...t, assignee }));
@@ -457,7 +468,7 @@ Outcome "fixed" when the change is complete; "failed" when you could not fix it 
     verify: `${ticket.history?.findLast(h => h.stage === 'fix' && !h.rewound)?.by === 'person' ? `The latest fix was made by a person, not by the fix agent: its report says where the changed code is; if it does not and ${worktree?.path ?? settings.repository} has no change for this ticket, report "blocked" asking where it is.\n` : ''}Check that the problem no longer happens with the build of the fixed code in ${worktree?.path ?? settings.repository} (launch that build, not an installed one). It was built right before you started, as the first part of this step (see the latest build report): do not build again; if the build is missing, report "blocked".
 ${launch}
 ${WINAPP_GUIDE}
-Your check is the reproduction repeated: the same conditions and steps, but now the behavior must have changed. Start by reading the latest reproduction report (its «Para verificar» section) and reproducir.ps1${ticket.history?.findLast(h => h.stage === 'reproduce')?.by === 'person' ? ' (the reproduction was done by a person: if they left no steps, take them from the ticket)' : ''}. Launch the fixed build, prepare the same preconditions and data, replay reproducir.ps1 or those steps up to the same observation point: where the reproduction saw the wrong result, the expected behavior must now appear. The fix may change the screens a little: if a step no longer matches, adapt it, say so and update reproducir.ps1 so it keeps working on the fixed version. Then check closely related behavior did not break.
+Your check is the reproduction repeated: the same conditions and steps, but now the behavior must have changed. Start by reading the latest reproduction report (its «Para verificar» section) and reproducir.ps1${!ticket.history?.some(h => h.stage === 'reproduce') ? ' (this ticket was already under way in Jira and was not reproduced here: if they do not exist, take the steps from the ticket and the fix report)' : ticket.history.findLast(h => h.stage === 'reproduce').by === 'person' ? ' (the reproduction was done by a person: if they left no steps, take them from the ticket)' : ''}. Launch the fixed build, prepare the same preconditions and data, replay reproducir.ps1 or those steps up to the same observation point: where the reproduction saw the wrong result, the expected behavior must now appear. The fix may change the screens a little: if a step no longer matches, adapt it, say so and update reproducir.ps1 so it keeps working on the fixed version. Then check closely related behavior did not break.
 ${review.deferred.length ? `The code review asked for these manual checks and the fix left them for you. Do each one with the application after the main check and report it in neo_report "checks" (id, ok, result): "ok" false when it shows a problem, which makes the outcome "not_fixed". The result is published on the pull request: one short sentence in English.
 ${commentsBlock(review.deferred, { answers: false })}
 ` : ''}Your report: before (from the reproduction) and now, side by side at the observation point; what you ran; evidence files; and, if it still fails, exactly what and where, for the fix agent.
@@ -1011,7 +1022,7 @@ Read what you need from them and the ticket files before answering.`;
     const entry = { stage: 'collect', number, outcome: result.outcome, report: 'resumen.md', question: result.question ?? null, model: null, usage: null, startedAt, finishedAt: new Date().toISOString(), error: null, log, activity };
     return this.tickets.update(key, t => {
       const next = nextAfter(t, 'collect', result.outcome);
-      return { ...t, ...next, note: null, question: next.status === 'blocked' ? result.question ?? null : null, lastOutcome: result.outcome, history: [...(t.history ?? []), entry] };
+      return { ...t, ...next, jiraPlaced: t.jiraStatus, note: null, question: next.status === 'blocked' ? result.question ?? null : null, lastOutcome: result.outcome, history: [...(t.history ?? []), entry] };
     });
   }
   // Each column has a traffic light: «auto» runs on its own, «ask» waits for the

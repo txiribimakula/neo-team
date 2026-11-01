@@ -341,7 +341,7 @@ export class DemoJiraClient {
   async search(jql = '') {
     if (String(jql).startsWith('key in')) DemoJiraClient.checks++;
     const changed = t => DemoJiraClient.synced && t.afterSync;
-    return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: changed(t) ? t.afterSync.updated : t.updated, status: changed(t)?.status ?? { name: 'Abierto', statusCategory: { key: 'indeterminate' } }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null, reporter: demoUser('Soporte'), created: t.updated, labels: ['cliente'], components: (t.components ?? []).map(name => ({ name })) } })), limited: false };
+    return { issues: DEMO_TICKETS.map(t => ({ key: t.key, fields: { summary: t.summary, updated: changed(t) ? t.afterSync.updated : t.updated, status: changed(t)?.status ?? { name: 'Abierto', statusCategory: { key: 'new' } }, priority: { name: t.priority }, issuetype: { name: t.type }, assignee: t.assignee ?? null, reporter: demoUser('Soporte'), created: t.updated, labels: ['cliente'], components: (t.components ?? []).map(name => ({ name })) } })), limited: false };
   }
   async issue(key) {
     const t = demoTicket(key);
