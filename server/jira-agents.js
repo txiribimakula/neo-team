@@ -7,12 +7,13 @@
 // iterations. The review publishes the fix as a draft pull request with its
 // comments, which send the ticket back to fix until it has none.
 import { exec } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { JiraDesktop, desktopStage, desktopTitle, desktopTool } from './jira-desktop.js';
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
 import { IMAGE, LIMITS, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
-import { ActivityFeed } from './jira-feed.js';
+import { ActivityFeed, narrateCommand, narrateTool } from './jira-feed.js';
 import { effortFor } from './ai-choice.js';
 import { DemoReviewHub, changedFiles, commentState, commentsBlock, commentsIn, diffText, azureRemote, publishCode, publishPending, pullRequestLink, reviewComments, severityOf, snapshot, treeOf, answerText, ANSWERS, SEVERITIES } from './jira-review.js';
 
@@ -406,6 +407,7 @@ export function systemMessage(stage) {
 - Never contact Jira or any web service and never publish anything (comments, status changes, messages): what goes to Jira is decided by the person.
 - Write only inside the folders the task allows. Never commit, push, reset, clean, rebase or delete branches, and never touch other repositories or system settings.
 - Write reports and lessons in Spanish, as concise Markdown.
+- The person follows your work by reading your intent, the descriptions of your commands and what you say between tools: write them in plain Spanish. Do not write more of them because of this.
 - Learn for future tickets: read the lessons you are given before acting. Whenever you find something reusable (how to build, launch or drive the application, selectors that work, where code lives, pitfalls, faster ways to do your step), call neo_learn once per lesson: "general" for what every agent needs, "${stage}" for what only this step needs. Keep each lesson short and specific; do not save facts about this ticket alone or repeat lessons already listed.
 - When you cannot go on without a person (missing information, a decision, access), report "blocked" with a precise question: they answer it and you are run again.
 - Finish by calling neo_report exactly once with the outcome and your report.`;
@@ -547,11 +549,11 @@ export function runBuild(command, cwd, { timeoutMs = 60 * 60000, signal = null, 
 // column lets it run. The log goes with the report; a failed build goes back to fix.
 export async function buildTicket({ settings, ticket, worktree, folder, number, build = runBuild, signal = null, demo = false, onActivity = () => {} }) {
   if (demo) {
-    onActivity({ kind: 'tool', message: 'dotnet build NeoDesk.sln (simulado)' });
+    onActivity({ kind: 'tool', message: 'dotnet build NeoDesk.sln (simulado)', title: 'Compilando', command: 'dotnet build NeoDesk.sln (simulado)' });
     return { outcome: 'built', report: `# Compilar · ${ticket.key} (simulado)\n\nCompila sin errores.\n`, model: null, usage: null };
   }
   if (!settings.buildCommand) return { outcome: 'blocked', report: `# Compilar · ${ticket.key}\n\nNo hay comando de compilación configurado.\n`, question: 'Indica el comando de compilación en la configuración de Jira y vuelve a ejecutar Compilar.', model: null, usage: null };
-  onActivity({ kind: 'tool', message: `${settings.buildCommand} · en ${worktree.path}` });
+  onActivity({ kind: 'tool', message: `${settings.buildCommand} · en ${worktree.path}`, title: 'Compilando', command: `${settings.buildCommand} · en ${worktree.path}` });
   // Its output reaches the log in batches of its latest lines, every two seconds.
   let lines = [];
   const flush = () => { if (lines.length) onActivity({ kind: 'output', message: lines.slice(-20).join('\n') }); lines = []; };
@@ -762,14 +764,16 @@ export class CopilotAgent {
   }
   listen(session, onActivity, usage) {
     session.on('assistant.intent', event => onActivity({ kind: 'info', source: 'intent', message: short(event.data?.intent) }));
+    // Already written and paid for by the model: showing it costs nothing more.
+    session.on('assistant.reasoning', event => onActivity({ kind: 'info', source: 'reasoning', message: activityText(event.data?.content) }));
     const tools = new Map();
     // What it says after the person spoke is its answer to them.
     session.on('assistant.message', event => { if (event.data?.content?.trim()) onActivity({ kind: this.conversation?.byPerson ? 'agent' : 'info', message: activityText(event.data.content) }); });
     session.on('tool.execution_start', ({ data }) => {
       if (data?.toolName === 'report_intent') return;
-      const description = describeTool(data);
-      tools.set(data.toolCallId, { description, at: Date.now() });
-      onActivity({ kind: 'tool', message: `Iniciando ${description}`, toolId: data.toolCallId, phase: 'start', title: description });
+      const description = describeTool(data), title = short(narrateTool(data));
+      tools.set(data.toolCallId, { description, title, at: Date.now() });
+      onActivity({ kind: 'tool', message: `Iniciando ${description}`, toolId: data.toolCallId, phase: 'start', title, command: description });
     });
     session.on('tool.execution_progress', ({ data }) => onActivity({ kind: 'tool', message: activityText(data?.progressMessage), toolId: data?.toolCallId }));
     session.on('tool.execution_complete', ({ data }) => {
@@ -778,7 +782,7 @@ export class CopilotAgent {
       tools.delete(data.toolCallId);
       const detail = data.error?.message ?? data.result?.content;
       const seconds = ((Date.now() - tool.at) / 1000).toFixed(1);
-      onActivity({ kind: data.success ? 'result' : 'warning', message: `${data.success ? 'Completado' : 'Falló'} ${tool.description} · ${seconds} s${detail ? `\n${activityText(detail)}` : ''}`, toolId: data.toolCallId, phase: 'end', title: tool.description, ok: !!data.success, seconds, detail: detail ? activityText(detail) : '' });
+      onActivity({ kind: data.success ? 'result' : 'warning', message: `${data.success ? 'Completado' : 'Falló'} ${tool.description} · ${seconds} s${detail ? `\n${activityText(detail)}` : ''}`, toolId: data.toolCallId, phase: 'end', title: tool.title, command: tool.description, ok: !!data.success, seconds, detail: detail ? activityText(detail) : '' });
     });
     session.on('assistant.usage', event => { usage.model = event.data?.model ?? usage.model; usage.inputTokens += event.data?.inputTokens ?? 0; usage.outputTokens += event.data?.outputTokens ?? 0; });
     session.on('session.error', event => { usage.error = event.data?.message ?? 'Error de GitHub Copilot.'; onActivity({ kind: 'warning', message: usage.error }); });
@@ -1403,7 +1407,14 @@ export class DemoAgent {
         while (steps.length) {
           if (cut || this.aborted) return;
           const message = steps.shift();
-          onActivity({ kind: message.startsWith('winapp') || message.startsWith('dotnet') ? 'tool' : 'info', message });
+          if (message.startsWith('winapp') || message.startsWith('dotnet')) {
+            const toolId = randomUUID(), line = { kind: 'tool', message, toolId, title: narrateCommand(message), command: message };
+            onActivity({ ...line, phase: 'start' });
+            await wait();
+            onActivity({ ...line, phase: 'end', ok: true, seconds: '0.0' });
+            continue;
+          }
+          onActivity({ kind: 'info', message });
           await wait();
         }
         done = true;

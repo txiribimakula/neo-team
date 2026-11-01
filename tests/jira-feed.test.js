@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ActivityFeed, curate, split } from '../server/jira-feed.js';
+import { ActivityFeed, curate, narrateCommand, narrateTool, split } from '../server/jira-feed.js';
 import { feedView, generalView } from '../dist/jira.js';
 
 const temp = async t => { const dir = await mkdtemp(join(tmpdir(), 'neo-feed-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; };
@@ -59,4 +59,27 @@ test('folded, the assistant counts what is new', () => {
   assert.match(folded(120), />99\+<\/span>/);
   assert.doesNotMatch(folded(0), /jira-side-count/);
   assert.match(generalView({ conversation: 'waiting', activity: [] }, '', false, null, true, [], new Set(), {}, 0), /jira-side-dot[\s\S]*/, 'without news, the dot still says it waits for you');
+});
+
+test('what the AI does reads in plain words, with the command folded under it', async t => {
+  const tool = (toolName, args) => narrateTool({ toolName, arguments: args });
+  assert.equal(tool('view', { path: 'C:\\repos\\app\\Exportador.cs' }), 'Leyendo Exportador.cs');
+  assert.equal(tool('edit', { path: 'src/Exportador.cs' }), 'Editando Exportador.cs');
+  assert.equal(tool('grep', { pattern: 'Guardar' }), 'Buscando «Guardar» en el código');
+  assert.equal(tool('neo_report', { outcome: 'fixed' }), 'Entregando su informe');
+  assert.equal(tool('otra', {}), 'Usando otra');
+  assert.equal(tool('powershell', { command: 'dotnet build App.sln', description: 'Compilar la solución para ver el error' }), 'Compilar la solución para ver el error', 'what the agent says it does comes first');
+  assert.equal(tool('powershell', { command: 'dotnet build App.sln' }), 'Compilando');
+  assert.deepEqual(['winapp ui screenshot -a App', 'winapp ui invoke btn -a App', 'winapp ui inspect -a App', 'git diff HEAD', 'dotnet test', 'algo-raro --x'].map(narrateCommand),
+    ['Capturando la pantalla de la aplicación', 'Manejando la aplicación', 'Mirando lo que hay en la pantalla de la aplicación', 'Consultando los cambios en git', 'Ejecutando las pruebas', 'Ejecutando un comando']);
+  const feed = new ActivityFeed(join(await mkdtemp(join(tmpdir(), 'neo-feed-')), 'actividad.json'));
+  await feed.ready;
+  feed.activity({ kind: 'tool', toolId: 'c', phase: 'start', title: 'Compilando', command: 'powershell: dotnet build' });
+  assert.deepEqual([feed.items[0].title, feed.items[0].detail], ['Compilando', 'powershell: dotnet build'], 'it can be unfolded while it runs');
+  feed.activity({ kind: 'result', toolId: 'c', phase: 'end', title: 'Compilando', command: 'powershell: dotnet build', ok: true, seconds: '2.0', detail: '0 errores' });
+  assert.deepEqual([feed.items[0].title, feed.items[0].detail, feed.items[0].status], ['Compilando', 'powershell: dotnet build\n\n0 errores', 'ok']);
+  assert.deepEqual(curate({ kind: 'info', source: 'reasoning', message: 'El fallo está en el exportador' }), { family: 'ai', title: 'Razonando: El fallo está en el exportador', detail: '' });
+  assert.equal(curate({ kind: 'info', source: 'reasoning', message: '' }), null);
+  assert.deepEqual(curate({ kind: 'tool', message: 'build.bat', title: 'Compilando', command: 'build.bat' }), { family: 'tool', title: 'Compilando', detail: 'build.bat' });
+  assert.deepEqual(curate({ kind: 'tool', message: 'Subiendo el código…' }), { family: 'tool', title: 'Subiendo el código…', detail: '' }, 'what already reads well stays');
 });
