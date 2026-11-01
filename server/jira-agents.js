@@ -258,7 +258,7 @@ export async function readCatalog({ client, settings, me = null, onProgress = ()
 // filter, read before, does not know yet.
 export async function collectFilter({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, synced = null, onProgress = () => {} }) {
   const read = catalog ?? await readCatalog({ client, settings, me, onProgress });
-  const closed = new Set([...(synced?.closed ?? []), ...(synced?.gone ?? [])]), fresh = new Set((synced?.updated ?? []).map(u => u.key));
+  const closed = new Set(synced?.closed ?? []), fresh = new Set((synced?.updated ?? []).map(u => u.key));
   // One deleted by hand stays out unless the filters leave only it: bringing that ticket brings it back.
   const deleted = await tickets.deleted(), only = keys?.size === 1 ? [...keys][0] : null;
   // Those finished in Jira are not downloaded: updating would delete them.
@@ -339,21 +339,16 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
     const { issues } = await client.search(`key in (${keys.join(', ')})`, ['summary', 'status', 'updated', 'priority', 'issuetype', 'assignee']);
     for (const issue of issues) remote.set(issue.key, issue);
   }
-  // Seeing nothing of Jira at all says more about the account than about the tickets.
-  const sees = remote.size > 0 || !!catalog?.entries?.length;
+  // What the search leaves out was deleted, moved, archived or can no longer be seen:
+  // it goes. Unless Jira shows nothing at all, which says more about the account than
+  // about the tickets, or the filter has just returned it.
+  const listed = new Set((catalog?.entries ?? []).map(entry => entry.key)), sees = remote.size > 0 || listed.size > 0;
   for (const [index, ticket] of local.entries()) {
     if (ticket.key === busyKey) { result.skipped.push(ticket.key); continue; }
-    let issue = remote.get(ticket.key);
+    const issue = remote.get(ticket.key);
     if (!issue) {
-      // The search also leaves out what it has not indexed or has archived: only the
-      // answer about that ticket says it is gone. Moved, it answers with its new key.
-      onProgress({ message: `Comprobando ${ticket.key} en Jira (${index + 1} de ${local.length})…` });
-      issue = await client.issue(ticket.key).catch(error => error.status === 404 ? { key: null } : null);
-      if (!issue) { result.missing.push(ticket.key); continue; }
-      if (issue.key !== ticket.key) {
-        if (sees) { await tickets.remove(ticket.key); result.gone.push(ticket.key); } else result.missing.push(ticket.key);
-        continue;
-      }
+      if (sees && !listed.has(ticket.key)) { await tickets.remove(ticket.key); result.gone.push(ticket.key); } else result.missing.push(ticket.key);
+      continue;
     }
     const assignee = assigneeOf(issue, me), status = issue.fields?.status;
     if (status?.statusCategory?.key === 'done') {

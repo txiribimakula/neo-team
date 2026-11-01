@@ -175,33 +175,25 @@ test('with the filtered tickets, updating downloads nothing else from the board'
   assert.deepEqual((await sync(null)).updated.map(u => u.key), ['NEO-2']);
 });
 
-test('updating deletes the tickets that no longer exist in Jira, and only those', async t => {
-  const tickets = new TicketStore(await temp(t)), lookedUp = [];
-  const put = key => tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));
-  for (const key of ['NEO-1', 'NEO-2', 'NEO-3', 'NEO-4', 'NEO-5', 'NEO-6', 'NEO-7']) await put(key);
-  const open = key => ({ key, fields: { updated: '2026-10-01T00:00:00Z', status: { statusCategory: { key: 'indeterminate' } } } });
-  const answers = {
-    'NEO-2': () => { throw Object.assign(new Error('404'), { status: 404 }); },
-    'NEO-3': () => open('OTRO-9'),
-    'NEO-4': () => { throw Object.assign(new Error('502'), { status: 502 }); },
-    'NEO-5': () => open('NEO-5'),
-    'NEO-6': () => ({ key: 'NEO-6', fields: { status: { statusCategory: { key: 'done' } } } }),
-    'NEO-7': () => { throw Object.assign(new Error('404'), { status: 404 }); },
+test('updating deletes what the search of Jira no longer returns, and only that', async t => {
+  const tickets = new TicketStore(await temp(t)), asked = [];
+  for (const key of ['NEO-1', 'NEO-2', 'NEO-3', 'NEO-4']) await tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));
+  const client = {
+    search: async () => ({ issues: [{ key: 'NEO-1', fields: { updated: '2026-10-01T00:00:00Z', status: { statusCategory: { key: 'indeterminate' } } } }] }),
+    issue: async key => { asked.push(key); throw Object.assign(new Error('403'), { status: 502 }); },
   };
-  const client = { search: async () => ({ issues: [open('NEO-1')] }), issue: async key => { lookedUp.push(key); return answers[key](); } };
-  const sync = await syncTickets({ client, settings: { url: 'https://e' }, tickets, busyKey: 'NEO-7' });
-  assert.deepEqual([sync.gone, sync.closed, sync.missing, sync.skipped], [['NEO-2', 'NEO-3'], ['NEO-6'], ['NEO-4'], ['NEO-7']]);
-  assert.deepEqual((await tickets.list()).map(ticket => ticket.key), ['NEO-1', 'NEO-4', 'NEO-5', 'NEO-7'], 'one Jira could not answer about, one the search had not indexed and one an agent is working on stay');
-  assert.ok(!lookedUp.includes('NEO-1') && !lookedUp.includes('NEO-7'), 'only what the search left out is looked up');
-  assert.deepEqual(await tickets.deleted(), new Set(), 'they can come back if they appear in the filter again');
-  assert.equal((await collectFilter({ client, settings: { url: 'https://e' }, tickets, catalog: { entries: [{ key: 'NEO-2', updated: 'x' }] }, synced: sync })).downloaded, 0, 'what just went is not downloaded');
+  const sync = await syncTickets({ client, settings: { url: 'https://e' }, tickets, busyKey: 'NEO-4', catalog: { entries: [{ key: 'NEO-3' }] } });
+  assert.deepEqual([sync.gone, sync.missing, sync.skipped], [['NEO-2'], ['NEO-3'], ['NEO-4']]);
+  assert.deepEqual((await tickets.list()).map(ticket => ticket.key), ['NEO-1', 'NEO-3', 'NEO-4'], 'the one the filter has just returned and the one an agent is working on stay');
+  assert.deepEqual(asked, [], 'what Jira answers about each ticket apart does not decide it');
+  assert.deepEqual(await tickets.deleted(), new Set(), 'it can come back if it appears in the filter again');
 });
 
-test('an account that sees nothing in Jira deletes nothing', async t => {
+test('an account that sees nothing in Jira deletes nothing, and a failed search neither', async t => {
   const tickets = new TicketStore(await temp(t));
   await tickets.update('NEO-1', () => ({ ...newTicket({ key: 'NEO-1' }), stage: 'analyze' }));
-  const client = { search: async () => ({ issues: [] }), issue: async () => { throw Object.assign(new Error('404'), { status: 404 }); } };
-  const sync = catalog => syncTickets({ client, settings: { url: 'https://e' }, tickets, catalog });
+  const sync = (catalog, search = async () => ({ issues: [] })) => syncTickets({ client: { search }, settings: { url: 'https://e' }, tickets, catalog });
+  await assert.rejects(sync({ entries: [{ key: 'NEO-8' }] }, async () => { throw new Error('Jira respondió 503'); }));
   assert.deepEqual((await sync({ entries: [] })).missing, ['NEO-1']);
   assert.ok(await tickets.get('NEO-1'));
   assert.deepEqual((await sync({ entries: [{ key: 'NEO-8' }] })).gone, ['NEO-1'], 'the filter shows it can read Jira');
