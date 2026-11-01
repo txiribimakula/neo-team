@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zip, unzip, safeEntry } from '../server/zip.js';
-import { fingerprint, localWork, packState, unpackState } from '../server/jira-share.js';
+import { cleanShared, fingerprint, localWork, packState, unpackState } from '../server/jira-share.js';
 import { TicketStore, ensureWorktree, newTicket } from '../server/jira-agents.js';
 import { collectTicket, SHARED, sharedName } from '../server/jira.js';
 
@@ -130,4 +130,19 @@ test('what was done here since the state was last shared is told apart', async t
   assert.equal(await localWork(tickets, 'NEO-4'), '1 rebobinado');
   await writeFile(join(path, 'a.txt'), 'otra vez\n');
   assert.equal(await localWork(tickets, 'NEO-4'), '1 rebobinado y cambios en el código');
+});
+
+test('a shared state cannot read or write outside the ticket, nor hide it', () => {
+  const clean = cleanShared({ stage: 'nada', history: [{ stage: 'fix', report: '../../jira-token', log: 'registros/solucionar-1.log' }, { stage: 'fix', report: 'C:\\\\secreto.txt' }, { stage: 'fix', report: 'solucion-1.md' }, null, 'x'] }, { stage: 'verify' });
+  assert.equal(clean.stage, 'verify');
+  assert.deepEqual(clean.history.map(h => [h.report, h.log]), [[null, 'registros/solucionar-1.log'], [null, null], ['solucion-1.md', null]]);
+  assert.equal(cleanShared({ stage: 'review', history: 'x' }).stage, 'review');
+  assert.deepEqual(cleanShared({ stage: 'x' }).history, []);
+});
+
+test('a ZIP cannot inflate beyond what it declares', () => {
+  const bomb = zip([{ name: 'a.txt', data: Buffer.alloc(1024 * 1024, 'a') }]);
+  const central = bomb.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  bomb.writeUInt32LE(10, central + 24);
+  assert.throws(() => unzip(bomb), /dañado/);
 });

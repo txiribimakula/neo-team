@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { writeAtomic } from './jira.js';
-import { ensureWorktree } from './jira-agents.js';
+import { STAGE_IDS, ensureWorktree } from './jira-agents.js';
 import { safeEntry, unzip, zip } from './zip.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -88,6 +88,14 @@ export async function packState(tickets, key, { by = '' } = {}) {
   return { data: zip([{ name: MANIFEST, data: Buffer.from(JSON.stringify(manifest, null, 2)) }, ...entries.filter(e => e.name !== MANIFEST)]), manifest, files: entries.length, patch: entries.some(e => e.name === PATCH) };
 }
 
+// Anyone who can attach a file to the ticket can write a state: its files stay inside
+// the ticket's folder and it can only put the ticket in a real column.
+const insideTicket = name => { try { return typeof name === 'string' ? safeEntry(name) : null; } catch { return null; } };
+export function cleanShared(shared, current = null) {
+  const history = (Array.isArray(shared.history) ? shared.history : []).filter(h => h && typeof h === 'object').map(h => ({ ...h, report: insideTicket(h.report), log: insideTicket(h.log) }));
+  return { ...shared, history, stage: STAGE_IDS.includes(shared.stage) ? shared.stage : current?.stage ?? 'analyze' };
+}
+
 // Replaces the state of the ticket on this computer with the one in the ZIP. What
 // there was is kept first in copias/, ZIP too, so nothing done here is lost.
 export async function unpackState({ tickets, key, data, settings, me = null }) {
@@ -95,7 +103,7 @@ export async function unpackState({ tickets, key, data, settings, me = null }) {
   if (!manifest || manifest.key !== key) throw fail(`El adjunto no es un estado de ${key} guardado por Neo Team.`);
   if (manifest.format > FORMAT) throw fail('El estado lo guardó una versión más nueva de Neo Team: actualízala en este equipo.');
   const shared = JSON.parse(entries.find(e => e.name === 'estado.json')?.data.toString('utf8') ?? 'null');
-  if (!shared) throw fail('El estado compartido no tiene el historial del ticket (estado.json).');
+  if (!shared || typeof shared !== 'object') throw fail('El estado compartido no tiene el historial del ticket (estado.json).');
   const folder = tickets.folder(key), warnings = [];
   await mkdir(folder, { recursive: true, mode: 0o700 });
 
@@ -110,7 +118,7 @@ export async function unpackState({ tickets, key, data, settings, me = null }) {
     if (!skipped(entry.name) && entry.name !== 'estado.json') await rm(join(folder, entry.name), { recursive: true, force: true });
   }
   for (const entry of entries) {
-    if ([MANIFEST, PATCH, 'estado.json'].includes(entry.name) || skipped(entry.name.split('/')[0])) continue;
+    if ([MANIFEST, PATCH, 'estado.json'].includes(entry.name.toLowerCase()) || skipped(entry.name.split('/')[0])) continue;
     const file = join(folder, ...entry.name.split('/'));
     await mkdir(join(file, '..'), { recursive: true, mode: 0o700 });
     await writeFile(file, entry.data, { mode: 0o600 });
@@ -149,7 +157,7 @@ export async function unpackState({ tickets, key, data, settings, me = null }) {
 
   const updated = await tickets.update(key, t => {
     const mine = Object.fromEntries(LOCAL.filter(name => t?.[name] !== undefined).map(name => [name, t[name]]));
-    const theirs = Object.fromEntries(Object.entries(shared).filter(([name]) => !LOCAL.includes(name) && name !== 'changedAt'));
+    const theirs = Object.fromEntries(Object.entries(cleanShared(shared, t)).filter(([name]) => !LOCAL.includes(name) && name !== 'changedAt'));
     const assignee = mine.assignee ? { ...mine.assignee, me: !!me && mine.assignee.id === String(me.id) } : mine.assignee;
     return { ...theirs, ...mine, ...(assignee !== undefined ? { assignee } : {}), status: !theirs.status || theirs.status === 'running' ? 'pending' : theirs.status, resumedFrom: { by: manifest.by ?? '', at: manifest.exportedAt ?? null } };
   });

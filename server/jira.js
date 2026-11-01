@@ -220,6 +220,9 @@ export class JiraClient {
   deleteAttachment(id) { return this.call(`/rest/api/2/attachment/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
 }
 
+// What runs code that is not Neo Team's goes without its variables, the Jira token among them.
+export const withoutOwnVariables = () => Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('NEO_TEAM_')));
+
 // --- Files on disk -----------------------------------------------------------
 
 export async function writeAtomic(file, content) {

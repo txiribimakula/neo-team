@@ -53,7 +53,10 @@ export function unzip(buffer, { maxBytes = 1024 * 1024 * 1024 } = {}) {
     total += size;
     if (total > maxBytes) throw fail('El estado del ticket ocupa demasiado.');
     const bodyAt = offset + 30 + buffer.readUInt16LE(offset + 26) + buffer.readUInt16LE(offset + 28);
-    const body = buffer.subarray(bodyAt, bodyAt + packed), data = method === 8 ? inflateRawSync(body) : Buffer.from(body);
+    const body = buffer.subarray(bodyAt, bodyAt + packed);
+    // It never inflates beyond what it declares, which is what the limit above counted.
+    let data;
+    try { data = method === 8 ? inflateRawSync(body, { maxOutputLength: Math.max(size, 1) }) : Buffer.from(body); } catch { throw fail(`El ZIP está dañado (${name}).`); }
     if (data.length !== size || crc32(data) !== crc) throw fail(`El ZIP está dañado (${name}).`);
     entries.push({ name: safeEntry(name), data });
   }

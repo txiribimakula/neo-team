@@ -2024,7 +2024,7 @@ async function jiraRefresh() {
   }
   jiraUi.board = data.jira; jiraSeen = ''; render();
   if (data.result.blind) return toast(data.result.blind, 'warning');
-  const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments);
+  const { sync, collect } = data.result, news = sync.updated.filter(u => u.comments || u.attachments), failed = [...sync.failed, ...collect.failed];
   const parts = [
     collect.downloaded && `${collect.downloaded} descargado${collect.downloaded === 1 ? '' : 's'}${collect.filtered ? '' : ' del filtro'}${collect.limited ? ' (solo los primeros 200)' : ''}`,
     sync.closed.length && `${sync.closed.length} terminado${sync.closed.length === 1 ? '' : 's'} en Jira borrado${sync.closed.length === 1 ? '' : 's'} (${sync.closed.join(', ')})`,
@@ -2033,8 +2033,9 @@ async function jiraRefresh() {
     news.length && `novedades en ${news.map(u => u.key).join(', ')}`,
     collect.left.length && `${collect.left.length} fuera del filtro borrado${collect.left.length === 1 ? '' : 's'} (${collect.left.join(', ')})`,
     sync.missing.length && `${sync.missing.length} sin comprobar en Jira (${sync.missing.join(', ')})`,
+    failed.length && `${failed.length} con errores (${failed.map(f => f.key).join(', ')})`,
   ].filter(Boolean);
-  toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${collect.filtered ? `${collect.found} filtrados de ${collect.total} en el filtro` : `${collect.total} tickets en el filtro`}.`, sync.missing.length ? 'warning' : 'info');
+  toast(parts.length ? `${parts.join(' · ')}.` : `Todo al día: ${collect.filtered ? `${collect.found} filtrados de ${collect.total} en el filtro` : `${collect.total} tickets en el filtro`}.`, sync.missing.length || failed.length ? 'warning' : 'info');
 }
 // Mantenimiento opens on the board; the list and the people view read Azure DevOps
 // the first time they open.

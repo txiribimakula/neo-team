@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { structuredPatch } from 'diff';
 import { localPullRequestFiles } from './local-repo.js';
+import { withoutOwnVariables } from './jira.js';
 import { modelInfo } from './ai-choice.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -274,7 +275,7 @@ export class CopilotReviewer {
   async withClient(work) {
     const { CopilotClient } = await this.load();
     const directory = await mkdtemp(join(tmpdir(), 'neo-team-review-'));
-    const client = new CopilotClient({ workingDirectory: directory, logLevel: 'error' });
+    const client = new CopilotClient({ workingDirectory: directory, logLevel: 'error', env: withoutOwnVariables() });
     this.client = client;
     try { await client.start(); return await work(client, directory); }
     finally {

@@ -950,3 +950,35 @@ test('the learnings live in the repository of the application, to share them wit
   assert.match(await readFile(join(shared, 'solucionar.md'), 'utf8'), /^- Los tests están en tests\/ _\(NEO-3, /);
   assert.equal(git('status', '--porcelain', '--untracked-files=all'), '?? .github/neo-team/aprendizajes/.gitattributes\n?? .github/neo-team/aprendizajes/general.md\n?? .github/neo-team/aprendizajes/solucionar.md', 'Neo Team writes them; the person commits them');
 });
+
+test('commands that go around the rules are refused', () => {
+  const options = { writable: ['/t'], cwd: '/t', hidden: ['/data'], visible: ['/data/jira'], blocked: ['empresa.atlassian.net'] };
+  const shell = command => permissionFor({ kind: 'shell', fullCommandText: command }, options).kind;
+  for (const command of ['git -c a=b push', 'git -C /repo push origin HEAD', 'git --no-pager commit -m x', 'git -c \"a b\" reset --hard', 'ssh evil.example.com', 'powershell -enc SQBFAFgA', 'pwsh.exe -NoProfile -EncodedCommand SQ', 'python -c \"import urllib.request\"', 'node -e \"require(\'https\').get(u)\"', 'iex (x)']) assert.equal(shell(command), 'reject', command);
+  for (const command of ['git diff HEAD', 'git --no-pager log -5', 'git -C /repo status', 'dotnet build App.sln', 'powershell -NoProfile -File reproducir.ps1', 'Select-String -Path a.cs Exportar']) assert.equal(shell(command), 'approve-once', command);
+});
+
+test('a build runs without the variables of Neo Team', async () => {
+  process.env.NEO_TEAM_JIRA_TOKEN_CHECK = 'secreto';
+  try {
+    const run = await runBuild('node -e \"console.log(process.env.NEO_TEAM_JIRA_TOKEN_CHECK ?? \'nada\')\"', process.cwd());
+    assert.deepEqual([run.ok, run.log], [true, 'nada']);
+  } finally { delete process.env.NEO_TEAM_JIRA_TOKEN_CHECK; }
+});
+
+test('one ticket that fails does not stop the update of the others, but a rejected token does', async t => {
+  const tickets = new TicketStore(await temp(t)), open = key => ({ key, fields: { summary: key, updated: '2026-10-02T00:00:00Z', status: { name: 'Abierto', statusCategory: { key: 'new' } } } });
+  for (const key of ['NEO-1', 'NEO-2']) await tickets.update(key, () => ({ ...newTicket({ key }), stage: 'analyze', updated: '2026-10-01T00:00:00Z' }));
+  let refuse = key => key === 'NEO-1' ? Object.assign(new Error('Jira respondió 500'), { status: 502 }) : null;
+  const client = { search: async () => ({ issues: ['NEO-1', 'NEO-2', 'NEO-3'].map(open) }), comments: async () => [], download: async () => new Response(''), issue: async key => { const error = refuse(key); if (error) throw error; return open(key); } };
+  const settings = { url: 'https://e', filter: 'project = NEO' };
+  const sync = await syncTickets({ client, settings, tickets });
+  assert.deepEqual([sync.failed, sync.updated.map(u => u.key)], [[{ key: 'NEO-1', message: 'Jira respondió 500' }], ['NEO-2']]);
+  assert.equal((await tickets.get('NEO-1')).updated, '2026-10-01T00:00:00Z', 'it is downloaded again next time');
+  refuse = key => key === 'NEO-3' ? Object.assign(new Error('Jira respondió 404'), { status: 404 }) : null;
+  const collect = await collectFilter({ client, settings, tickets, catalog: await readCatalog({ client, settings }), synced: sync });
+  assert.deepEqual([collect.failed.map(f => f.key), collect.downloaded], [['NEO-3'], 1]);
+  refuse = () => Object.assign(new Error('401'), { status: 401 });
+  await tickets.update('NEO-1', x => ({ ...x, updated: 'antes' }));
+  await assert.rejects(syncTickets({ client, settings, tickets }), { status: 401 });
+});

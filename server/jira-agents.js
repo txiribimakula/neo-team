@@ -12,7 +12,7 @@ import { JiraDesktop, desktopStage, desktopTitle, desktopTool } from './jira-des
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { git } from './local-repo.js';
-import { IMAGE, LIMITS, accountOf, collectTicket, jqlFrom, listFiles, readText, writeAtomic } from './jira.js';
+import { IMAGE, LIMITS, accountOf, collectTicket, jqlFrom, listFiles, readText, withoutOwnVariables, writeAtomic } from './jira.js';
 import { ActivityFeed, narrateCommand, narrateTool } from './jira-feed.js';
 import { effortFor } from './ai-choice.js';
 import { DemoReviewHub, changedFiles, commentState, commentsBlock, commentsIn, diffText, azureRemote, publishCode, publishPending, pullRequestLink, reviewComments, severityOf, snapshot, treeOf, answerText, ANSWERS, SEVERITIES } from './jira-review.js';
@@ -256,6 +256,12 @@ export async function readCatalog({ client, settings, me = null, onProgress = ()
   const result = await client.search(jqlFrom(settings.filter), CATALOG_FIELDS, count => onProgress({ message: `Consultando el filtro en Jira… ${count} tickets` }), LIMITS.catalog);
   return { entries: result.issues.filter(issue => KEY.test(issue.key ?? '')).map(issue => catalogEntry(issue, me)), limited: !!result.limited, at: new Date().toISOString() };
 }
+// One ticket that cannot be downloaded waits for the next update without stopping the
+// others; a rejected token would fail for all of them.
+function failedTicket(counts, key, error) {
+  if (error.status === 401) throw error;
+  counts.failed.push({ key, message: String(error.message ?? error).slice(0, 300) });
+}
 // Downloads the tickets of the filter that are new or changed in Jira, only those in
 // `keys` when the person filters which ones. Every ticket of the filter on the board
 // gets who it is assigned to; those that left it go, unless the filter had more
@@ -269,7 +275,7 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
   // Those finished in Jira are not downloaded: updating would delete them.
   const wanted = read.entries.filter(entry => entry.category !== 'done' && !closed.has(entry.key) && (!keys || keys.has(entry.key)) && (!deleted.has(entry.key) || entry.key === only)), issues = wanted.slice(0, LIMITS.tickets);
   const chosen = new Set(issues.map(entry => entry.key)), found = new Set(read.entries.map(entry => entry.key));
-  const counts = { found: wanted.length, total: read.entries.length, downloaded: 0, unchanged: 0, left: [], skipped: [] };
+  const counts = { found: wanted.length, total: read.entries.length, downloaded: 0, unchanged: 0, left: [], skipped: [], failed: [] };
   for (const [index, entry] of read.entries.entries()) {
     const known = await tickets.get(entry.key);
     const complete = !!known && !!(await stat(join(tickets.folder(entry.key), 'descripcion.md')).catch(() => null));
@@ -281,11 +287,13 @@ export async function collectFilter({ client, settings, tickets, ffmpeg = false,
     // The ticket an agent is working on is downloaded again next time.
     if (entry.key === busyKey) { counts.skipped.push(entry.key); continue; }
     onProgress({ message: `Descargando ${entry.key} (${index + 1} de ${read.entries.length})…`, counts: { ...counts } });
-    const meta = await collectTicket({ client, settings, key: entry.key, folder: tickets.folder(entry.key), ffmpeg, onProgress: message => onProgress({ message }) });
-    const again = known ? await redownloaded(tickets, entry.key, known, meta) : null;
-    await tickets.update(entry.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee: entry.assignee, inFilter: true, collectedAt: new Date().toISOString(), ...(again?.news ? { news: again.news } : {}) }));
-    if (deleted.has(entry.key)) await tickets.forget(entry.key, false);
-    counts.downloaded++;
+    try {
+      const meta = await collectTicket({ client, settings, key: entry.key, folder: tickets.folder(entry.key), ffmpeg, onProgress: message => onProgress({ message }) });
+      const again = known ? await redownloaded(tickets, entry.key, known, meta) : null;
+      await tickets.update(entry.key, t => ({ ...(t ?? newTicket({})), ...meta, assignee: entry.assignee, inFilter: true, collectedAt: new Date().toISOString(), ...(again?.news ? { news: again.news } : {}) }));
+      if (deleted.has(entry.key)) await tickets.forget(entry.key, false);
+      counts.downloaded++;
+    } catch (error) { failedTicket(counts, entry.key, error); }
   }
   // Those that left the filter are deleted. The one an agent is working on is only
   // marked, and so is everything when the filter comes back empty, which is more
@@ -341,7 +349,7 @@ ${attachments.length ? attachments.map(f => `- [${f.slice('adjuntos/'.length)}](
 // finished ones) but their changes are not downloaded.
 export async function syncTickets({ client, settings, tickets, ffmpeg = false, busyKey = null, me = null, catalog = null, keys = null, onProgress = () => {} }) {
   const local = await tickets.list();
-  const result = { checked: local.length, closed: [], gone: [], placed: [], updated: [], missing: [], skipped: [] };
+  const result = { checked: local.length, closed: [], gone: [], placed: [], updated: [], missing: [], skipped: [], failed: [] };
   const remote = new Map();
   for (let i = 0; i < local.length; i += 100) {
     const keys = local.slice(i, i + 100).map(t => t.key);
@@ -379,10 +387,12 @@ export async function syncTickets({ client, settings, tickets, ffmpeg = false, b
       continue;
     }
     onProgress({ message: `Descargando las novedades de ${ticket.key} (${index + 1} de ${local.length})…` });
-    const meta = await collectTicket({ client, settings, key: ticket.key, folder: tickets.folder(ticket.key), ffmpeg, onProgress: message => onProgress({ message }) });
-    const again = await redownloaded(tickets, ticket.key, ticket, meta);
-    await tickets.update(ticket.key, t => ({ ...t, ...meta, assignee, ...(again.news ? { news: again.news } : {}) }));
-    result.updated.push({ key: ticket.key, comments: again.comments, attachments: again.attachments });
+    try {
+      const meta = await collectTicket({ client, settings, key: ticket.key, folder: tickets.folder(ticket.key), ffmpeg, onProgress: message => onProgress({ message }) });
+      const again = await redownloaded(tickets, ticket.key, ticket, meta);
+      await tickets.update(ticket.key, t => ({ ...t, ...meta, assignee, ...(again.news ? { news: again.news } : {}) }));
+      result.updated.push({ key: ticket.key, comments: again.comments, attachments: again.attachments });
+    } catch (error) { failedTicket(result, ticket.key, error); }
   }
   return result;
 }
@@ -533,7 +543,7 @@ export async function ensureWorktree(settings, ticket, folder) {
 // The output is also passed on as it comes, to follow the build in its log.
 export function runBuild(command, cwd, { timeoutMs = 60 * 60000, signal = null, onOutput = () => {} } = {}) {
   return new Promise(done => {
-    const child = exec(command, { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+    const child = exec(command, { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: withoutOwnVariables() }, (error, stdout, stderr) => {
       signal?.removeEventListener('abort', kill);
       const log = `${stdout}\n${stderr}`.trim();
       done({ ok: !error, code: error?.code ?? 0, stopped: !!signal?.aborted, log: log.length > 20000 ? `…${log.slice(-20000)}` : log });
@@ -569,7 +579,7 @@ export async function buildTicket({ settings, ticket, worktree, folder, number, 
 
 // --- Permissions of an agent ----------------------------------------------------
 
-const FORBIDDEN = /\bgit\s+(push|commit|reset|clean|rebase|checkout\s+--|restore|stash|branch\s+-[dD]|worktree\s+remove)\b|\b(format|diskpart|shutdown|reg\s+(add|delete)|Set-ExecutionPolicy)\b|\brm\s+-[a-z]*r[a-z]*f?\s+(\/|~)(\s|$)/i;
+const FORBIDDEN = /\bgit(?:\s+-\S+(?:\s+"[^"]*"|\s+[^-\s]\S*)?)*\s+(push|commit|reset|clean|rebase|checkout\s+--|restore|stash|branch\s+-[dD]|worktree\s+remove)\b|\b(format|diskpart|shutdown|reg\s+(add|delete)|Set-ExecutionPolicy)\b|\brm\s+-[a-z]*r[a-z]*f?\s+(\/|~)(\s|$)/i;
 export function inside(roots, path, cwd) {
   const target = resolve(cwd, String(path ?? ''));
   return roots.some(root => {
@@ -581,7 +591,7 @@ export function inside(roots, path, cwd) {
 // read Neo Team's own data (where the token is), apart from the tickets, and every
 // command that would reach Jira or the web is rejected. Only the comments the person
 // confirms one by one are written there.
-const OUTSIDE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|Start-BitsTransfer|Send-MailMessage)\b|Net\.WebClient|HttpClient|\bfetch\s*\(|requests\.(get|post|put|patch|delete)|jira-token|NEO_TEAM_JIRA_TOKEN|atlassian\.(net|com)|\/rest\/(api|agile)\//i;
+const OUTSIDE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|Start-BitsTransfer|Send-MailMessage|ssh|scp|sftp|telnet|ncat|Invoke-Expression|iex)\b|\b(powershell|pwsh)(\.exe)?\b[^|;&]*\s-e(n|nc|nco\w*)?\b|urllib|http\.client|require\(\s*['"](node:)?(https?|net)['"]|Net\.Sockets|Net\.WebClient|HttpClient|\bfetch\s*\(|requests\.(get|post|put|patch|delete)|jira-token|NEO_TEAM_JIRA_TOKEN|atlassian\.(net|com)|\/rest\/(api|agile)\//i;
 const NO_OUTSIDE = 'Los agentes no pueden conectarse a Jira ni a la web: lo que se publica en Jira lo decide la persona.';
 export function permissionFor(request, { writable, cwd, hidden = [], visible = [], blocked = [] }) {
   const command = request.fullCommandText ?? '';
@@ -790,8 +800,7 @@ export class CopilotAgent {
   async connect(workingDirectory) {
     const { CopilotClient } = await this.load();
     // Without the Jira token, and without Neo Team's own variables.
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('NEO_TEAM_')));
-    const client = new CopilotClient({ workingDirectory, logLevel: 'error', env });
+    const client = new CopilotClient({ workingDirectory, logLevel: 'error', env: withoutOwnVariables() });
     this.client = client; this.aborted = false;
     await client.start();
     const auth = await client.getAuthStatus();
