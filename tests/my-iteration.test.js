@@ -31,11 +31,13 @@ test('the board groups my tasks by parent and state, like the taskboard', () => 
   ], 'removed items are hidden, a bug is placed by category and unparented cards go last');
 });
 
+// The iteration is chosen by today's date, so it must contain the day the test runs.
+const daysFromToday = days => new Date(Date.now() + days * 86400000).toISOString();
 test('my iteration reads the current iteration, my items, their parents and the states', async () => {
   const gateway = new AzureGateway(), calls = [];
   gateway.call = async (name, args) => {
     calls.push({ name, args });
-    if (name === 'work') return [{ id: 'i1', name: 'Sprint 7', path: '\\Sprint 7', attributes: { timeFrame: 'current', startDate: '2026-10-05T00:00:00Z', finishDate: '2026-10-16T00:00:00Z' } }];
+    if (name === 'work') return [{ id: 'i1', name: 'Sprint 7', path: '\\Sprint 7', attributes: { timeFrame: 'current', startDate: daysFromToday(-3), finishDate: daysFromToday(3) } }];
     if (name === 'neo_work_item_states') return states;
     if (/@Me/.test(args.wiql)) return { ids: [11], limited: false, workItems: [raw(11, 'Task', 'To Do', 1)] };
     return { ids: [1], workItems: [raw(1, 'User Story', 'Active')] };
