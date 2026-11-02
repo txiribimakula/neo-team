@@ -75,7 +75,10 @@ server.tool = (...args) => {
 };
 configureCoreTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 configureWorkTools(server, tokenProvider, connectionProvider);
-configureWorkItemTools(server, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
+// Microsoft writes its tools for zod 3. With zod 4 its only date, asOf, cannot be described
+// to the client; Neo Team does not use it, so that tool goes without it.
+const withoutDates = { server: server.server, tool: (name, description, { asOf, ...shape }, ...rest) => server.tool(name, description, shape, ...rest) };
+configureWorkItemTools(withoutDates, tokenProvider, connectionProvider, () => 'NeoTeam/0.1.0');
 configurePipelineTools(server, connectionProvider);
 
 server.tool('neo_security_login', 'Explicitly open Microsoft account selection in the browser for this MCP session.', {}, async () => {

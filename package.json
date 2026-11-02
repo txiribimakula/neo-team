@@ -26,7 +26,8 @@
   "overrides": {
     "@azure-devops/mcp": {
       "@modelcontextprotocol/sdk": "$@modelcontextprotocol/sdk",
-      "@azure/msal-node": "$@azure/msal-node"
+      "@azure/msal-node": "$@azure/msal-node",
+      "zod": "$zod"
     }
   }
 }
