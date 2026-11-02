@@ -15,17 +15,18 @@
   },
   "dependencies": {
     "@azure-devops/mcp": "2.10.0",
-    "@azure/msal-node": "5.6.0",
+    "@azure/msal-node": "7.1.2",
     "@github/copilot-sdk": "1.0.14",
     "@modelcontextprotocol/sdk": "1.32.1",
     "azure-devops-node-api": "15.1.2",
     "diff": "9.0.0",
     "open": "10.2.0",
-    "zod": "3.25.76"
+    "zod": "4.6.7"
   },
   "overrides": {
     "@azure-devops/mcp": {
-      "@modelcontextprotocol/sdk": "$@modelcontextprotocol/sdk"
+      "@modelcontextprotocol/sdk": "$@modelcontextprotocol/sdk",
+      "@azure/msal-node": "$@azure/msal-node"
     }
   }
 }

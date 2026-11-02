@@ -86,7 +86,7 @@ const readSecurity = securityReader(organization, tokenProvider);
 server.tool('neo_security_read', 'Read project groups, memberships, ACLs and resource roles. Does not change permissions.', {
   action: z.enum(['catalog', 'identity', 'acl', 'resources', 'roles', 'feedPermissions', 'feedViews', 'namespaces']),
   project: z.string().min(1).max(200).optional(), descriptor: z.string().max(2000).optional(),
-  namespaceId: z.string().uuid().optional(), descriptors: z.array(z.string().max(2000)).max(20).optional(),
+  namespaceId: z.guid().optional(), descriptors: z.array(z.string().max(2000)).max(20).optional(),
   kind: z.string().max(40).optional(), resourceId: z.string().max(200).optional(),
 }, async args => {
   try { return { content: [{ type: 'text', text: JSON.stringify(await readSecurity(args)) }] }; }
@@ -305,7 +305,7 @@ server.tool('neo_work_item_texts', 'Read the description fields of one work item
 });
 server.tool('neo_create_item', 'Create or validate one work item with its parent link and recovery marker.', {
   project:z.string().min(1), type:z.enum(['Epic','Feature','User Story','Task','Bug']),
-  fields:z.record(z.union([z.string(),z.number()])), parent:z.number().int().positive().nullable(), validateOnly:z.boolean(),
+  fields:z.record(z.string(),z.union([z.string(),z.number()])), parent:z.number().int().positive().nullable(), validateOnly:z.boolean(),
 }, async ({project,type,fields,parent,validateOnly})=>{
   const api=await (await connectionProvider()).getWorkItemTrackingApi();
   const allowed=['System.Title','System.Tags','System.AreaPath','System.IterationPath','System.AssignedTo','Microsoft.VSTS.Scheduling.RemainingWork','Microsoft.VSTS.Scheduling.OriginalEstimate','Microsoft.VSTS.Common.Priority',...TEXT_FIELDS];
@@ -409,14 +409,14 @@ server.tool('neo_pull_request', 'Read a pull request, its latest iteration and, 
   return { content: [{ type: 'text', text: JSON.stringify(result) }] };
 });
 server.tool('neo_pull_request_threads', 'List the text of the existing comments of a pull request.', {
-  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(),
+  project: z.string().min(1).max(200), repositoryId: z.guid(), pullRequestId: z.number().int().positive(),
 }, async ({ project, repositoryId, pullRequestId }) => {
   const git = await (await connectionProvider()).getGitApi();
   const threads = await git.getThreads(repositoryId, pullRequestId, project) ?? [];
   return { content: [{ type: 'text', text: JSON.stringify(threads.filter(t => !t.isDeleted).map(t => ({ id: t.id, comments: (t.comments ?? []).filter(c => !c.isDeleted).map(c => String(c.content ?? '')) }))) }] };
 });
 server.tool('neo_pull_request_comment_write', 'Add one new active comment thread to a pull request, optionally anchored to a line of the changed file.', {
-  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(),
+  project: z.string().min(1).max(200), repositoryId: z.guid(), pullRequestId: z.number().int().positive(),
   content: z.string().min(1).max(20000), filePath: z.string().min(1).max(1000).optional(), line: z.number().int().positive().optional(),
   endLine: z.number().int().positive().optional(), endOffset: z.number().int().positive().optional(),
 }, async ({ project, repositoryId, pullRequestId, content, filePath, line, endLine, endOffset }) => {
@@ -449,7 +449,7 @@ server.tool('neo_pull_request_create_write', 'Create a draft pull request from a
 });
 const THREAD_STATUS = { active: 1, fixed: 2, wontFix: 3, closed: 4, pending: 6 };
 server.tool('neo_pull_request_reply_write', 'Reply in a comment thread of a pull request and set the status of the thread.', {
-  project: z.string().min(1).max(200), repositoryId: z.string().uuid(), pullRequestId: z.number().int().positive(), threadId: z.number().int().positive(),
+  project: z.string().min(1).max(200), repositoryId: z.guid(), pullRequestId: z.number().int().positive(), threadId: z.number().int().positive(),
   content: z.string().min(1).max(20000), status: z.enum(['active', 'fixed', 'wontFix', 'closed', 'pending']),
 }, async ({ project, repositoryId, pullRequestId, threadId, content, status }) => {
   const git = await (await connectionProvider()).getGitApi();
