@@ -1073,3 +1073,12 @@ span.tl-who{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden
 .tl-compact .tl-bar{top:4px;height:16px;line-height:16px}
 .tl-compact .tl-span{top:8px;height:8px}
 @media (max-width:900px){.tl-grid{--tl-left:270px}.tl-label{grid-template-columns:18px minmax(0,1fr) 26px 76px;gap:4px;padding:3px 6px}.tl-label>:nth-child(n+5){display:none}}
+/* Planificación · Estimación and Desarrollo: tickets of the Jira filter and the row that creates their work items. */
+.pj-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:16px}.pj-filter{max-width:520px}.pj-toolbar small{white-space:nowrap}
+.pj-table{table-layout:fixed}.pj-table td{vertical-align:middle;overflow-wrap:anywhere}.pj-table th:nth-child(1){width:130px}.pj-table th:nth-child(3){width:150px}.pj-table th:nth-child(4){width:150px}.pj-table th:nth-child(5){width:190px}.pj-table th:nth-child(6){width:110px}.pj-table a{color:var(--ink);text-decoration:none}.pj-table a:hover{color:#507831;text-decoration:underline}
+.pj-key{white-space:nowrap}.pj-key .jira-type{vertical-align:-3px;margin-right:6px}.pj-title{font-weight:550}
+.pj-items .pill{display:inline-block;margin:2px 4px 2px 0}.pj-action{text-align:right}.pj-action .button{white-space:nowrap}
+.pj-table tr.open>td{background:#f3f8ee}.pj-table tr.pj-create-row>td{border-top:0;background:#f3f8ee;padding-top:0}
+.pj-create{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pj-create [name="title"]{flex:2 1 280px}.pj-create select{flex:1 1 240px;width:auto}
+.pj-story{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap;cursor:pointer}.pj-story input{width:auto;margin:0}
+@media(max-width:740px){.pj-table th:nth-child(n+3):nth-child(-n+4),.pj-table tr:not(.pj-create-row) td:nth-child(n+3):nth-child(-n+4){display:none}}

@@ -8,6 +8,7 @@ import { aiChoice } from './ai-choice.js';
 import { pipelinesView, filterPipelines, analysesOf } from './pipelines.js';
 import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, settingsView as jiraSettingsView, SETTINGS_SUBMIT as JIRA_SETTINGS_SUBMIT, learningsForm, pendingComments, commentPrompt, COLUMNS as JIRA_COLUMNS } from './jira.js';
 import { matchesQuery, compileQuery } from './search.js';
+import { planningJiraView, parentOptions, PLANNING_JIRA_TABS } from './planning-jira.js';
 import { timelineView, timelinePicker, timelineGroups, newTimeline, editableRanges, storeRanges, resetRanges, addDay, zoomStep, DAY_WIDTH } from './timeline.js';
 import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf } from './sprint-name.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot, localDay } from './hierarchy.js';
@@ -26,6 +27,9 @@ let pipelineUi = { snapshot: null, pipelineId: null, analysisId: null, filter: '
 // Jira: the board comes from the server and is polled while the section is open.
 const jiraAsked = new Set();
 let jiraUi = { view: 'board', board: null, detail: null, answers: {}, tells: {} };
+// Planificación · Estimación and Desarrollo: the tickets read from Jira (scope: the mode and
+// filter they belong to), the ticket whose creation row is open and the parents last chosen.
+let pjUi = { data: null, scope: null, loading: false, error: '', open: null, draft: null, parents: {} };
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
@@ -773,12 +777,13 @@ function stepContent() {
   if (tab==='iteration') return iterationView();
   if (tab==='capacity') return capacityView();
   if (tab==='planning') return plannerView();
+  if (PLANNING_JIRA_TABS[tab]) return planningJiraView(tab,state,pjUi);
   if (!iteration) return hierarchyView();
   return board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
 }
 function stepTabs() {
   const open=previousTasks().tasks.filter(t=>t.status==='open').length;
-  const steps=[['configuration','Configuración'],['iteration','Iteración'],['capacity','Capacidad'],['planning','Tareas',open]];
+  const steps=[['configuration','Configuración'],['iteration','Iteración'],['capacity','Capacidad'],['planning','Tareas',open],['estimates','Estimación'],['development','Desarrollo']];
   return `<nav class="step-tabs" aria-label="Planificación">${steps.map(([id,label,count])=>`<button class="step-tab ${tab===id ? 'active' : ''}" data-action="tab" data-tab="${id}" ${tab===id ? 'aria-current="page"' : ''}>${label}${count ? `<small aria-label="${count} sin decidir">${count}</small>` : ''}</button>`).join('')}</nav>`;
 }
 // Step 1: the iteration being planned. Every later step works on it.
@@ -1520,6 +1525,7 @@ function render() {
   if(gridScroll && $('.capacity-grid-wrap')) $('.capacity-grid-wrap').scrollLeft=gridScroll;
   restoreScrolls(scrolls);
   fitBoardColumns();
+  if (PLANNING_JIRA_TABS[tab]) ensurePlanningJira();
   if((backlogQuery.trim() || backlogFilter) && $('#backlog-count')) $('#backlog-count').textContent=leftPanelCount();
 }
 async function editTask(id, refreshStates = false) {
@@ -2118,6 +2124,28 @@ modal.addEventListener('close', () => { if (jiraUi.detail && !modal.open) { jira
 document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
 document.addEventListener('pointerup', () => { setTimeout(() => { pointerDown = false; }, 0); }, true);
 document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+// The tickets of Planificación are read from Jira on entering Estimación or Desarrollo
+// for the first time with this filter, and again with ⟳ (or Intro in the filter).
+function ensurePlanningJira() {
+  const scope = JSON.stringify([state.mode, state.planningJiraFilter]);
+  if (pjUi.scope !== scope) { pjUi.data = null; pjUi.error = ''; pjUi.open = null; pjUi.draft = null; pjUi.scope = scope; }
+  if (!pjUi.data && !pjUi.loading && !pjUi.error && state.jira && state.planningJiraFilter) loadPlanningJira();
+}
+async function loadPlanningJira() {
+  pjUi.loading = true; pjUi.error = ''; pjUi.scope = JSON.stringify([state.mode, state.planningJiraFilter]); render();
+  try {
+    let response = await fetch('/api/planning-jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+    let data = await response.json().catch(() => ({}));
+    if (response.status === 403 && data.reason === 'session') {
+      await loadState(false);
+      response = await fetch('/api/planning-jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+      data = await response.json().catch(() => ({}));
+    }
+    if (!response.ok) throw new Error(data.error || 'No se pudo consultar Jira.');
+    pjUi.data = data.planningJira;
+  } catch (error) { pjUi.error = error.message; pjUi.data = null; }
+  finally { pjUi.loading = false; if (PLANNING_JIRA_TABS[tab]) render(); }
+}
 async function loadJira() {
   let response = await fetch('/api/jira', { headers: { 'X-Neo-CSRF': state.csrf } });
   let data = await response.json().catch(() => ({}));
@@ -2425,6 +2453,14 @@ const actions = {
   'tl-remove-story': el => changeTimeline(t => { t.stories = t.stories.filter(id => id !== Number(el.dataset.story)); }),
   'tl-apply-owners': applyTimelineOwners,
   'open-maintenance': () => openMaintenance(),
+  'pj-connect': () => openMaintenance(),
+  'pj-open': el => {
+    const entry = pjUi.data?.entries.find(e => e.key === el.dataset.key);
+    if (!entry) return;
+    pjUi.open = entry.key; pjUi.draft = { title: entry.summary, story: false, parent: pjUi.parents.task ?? '' }; render();
+    $('#pj-create-form [name="title"]')?.focus();
+  },
+  'pj-close': () => { const key = pjUi.open; pjUi.open = null; pjUi.draft = null; render(); $(`[data-action="pj-open"][data-key="${CSS.escape(key ?? '')}"]`)?.focus(); },
   'maintenance-refresh': () => maintenanceRefresh(),
   'open-my-iteration': async () => {
     await loadMyIteration(); tab = 'my-iteration'; render();
@@ -2750,6 +2786,7 @@ document.addEventListener('click', async event => {
 document.addEventListener('keydown', event => {
   if (event.target.dataset?.tlDrag && ['ArrowUp','ArrowDown'].includes(event.key) && !pending) { event.preventDefault(); moveTimelineByKey(event.target, event.key==='ArrowUp' ? -1 : 1); return; }
   if (event.target.dataset?.tlField==='name' && event.key==='Enter') { event.preventDefault(); event.target.blur(); return; }
+  if (event.key==='Escape' && event.target.closest?.('#pj-create-form') && !pending) { event.preventDefault(); actions['pj-close'](); return; }
   const commentBox=event.target.dataset?.commentFor ? event.target : null;
   if (commentBox && mentionUi && ['ArrowDown','ArrowUp','Enter','Tab','Escape'].includes(event.key)) {
     event.preventDefault();
@@ -2792,6 +2829,17 @@ document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
     if (event.target.id === 'new-iteration-form') { await submitNewIteration(event.target); return; }
+    if (event.target.id === 'pj-filter-form') {
+      const filter = event.target.filter.value.trim();
+      if (filter !== state.planningJiraFilter) await request('/api/planning-jira-filter', { filter });
+      await loadPlanningJira(); return;
+    }
+    if (event.target.id === 'pj-create-form') {
+      const form = event.target, story = form.story.checked, parent = Number(form.parent.value);
+      await request('/api/create-from-jira', { title: form.title.value, parent, story });
+      pjUi.parents[story ? 'story' : 'task'] = parent; pjUi.open = null; pjUi.draft = null; render();
+      toast(story ? 'User story y tarea creadas en local. Pendientes de sincronizar.' : 'Tarea creada en local. Pendiente de sincronizar.'); return;
+    }
     if (event.target.id === 'maintenance-settings-form') {
       if ($('#maintenance-type').value.trim() !== event.target.dataset.type) throw new Error('Vuelve a cargar los estados del tipo de elemento antes de guardar.');
       const roles = [...event.target.querySelectorAll('input[type="radio"]:checked')], states = role => roles.filter(el => el.value === role).map(el => el.dataset.state);
@@ -2845,6 +2893,8 @@ document.addEventListener('submit', async event => {
 document.addEventListener('change',async event=>{
   const el=event.target;
   if (tab==='timelines' && timelineChange(el)) return;
+  if ('pjStory' in el.dataset && pjUi.draft) { pjUi.draft.story = el.checked; pjUi.draft.parent = pjUi.parents[el.checked ? 'story' : 'task'] ?? ''; $('#pj-create-form [name="parent"]').innerHTML = parentOptions(state.workspace, el.checked, pjUi.draft.parent); return; }
+  if (el.dataset.pjDraft && pjUi.draft) { pjUi.draft[el.dataset.pjDraft] = el.value; return; }
   if (el.dataset.securityFilter) { filterPermissions(securitySnapshot.report, el.dataset.securityFilter, el.value); return; }
   if ('selectTask' in el.dataset) { selectTask(Number(el.dataset.selectTask), el.checked); return; }
   if ('maintenanceSelect' in el.dataset) { selectMaintenance(el.dataset.maintenanceSelect, el.checked); applyMaintenanceSelection(); return; }
@@ -2908,6 +2958,7 @@ document.addEventListener('change',async event=>{
 });
 document.addEventListener('input',event=>{
   if ('pipelineFilter' in (event.target.dataset ?? {})) { filterPipelines(pipelineUi, event.target.value); return; }
+  if (event.target.dataset?.pjDraft && pjUi.draft) { pjUi.draft[event.target.dataset.pjDraft] = event.target.value; return; }
   if ('tlSearch' in (event.target.dataset ?? {})) { timelineUi.search = event.target.value; const timeline = currentTimeline(); if (timeline) { $('#tl-choices').innerHTML = timelinePicker(state.workspace, timeline, timelineUi.search, timelineUi.collapsed); markPartialBranches(); } return; }
   if (event.target.dataset?.personNote!==undefined) noteDrafts[event.target.dataset.personNote]=event.target.value;
   if (event.target.id === 'maintenance-type') {
@@ -2991,7 +3042,7 @@ window.addEventListener('unhandledrejection',event=>toast(event.reason?.message 
 window.addEventListener('error',event=>{ if (event.message) toast(`Error inesperado en la interfaz: ${event.message}. Recarga la página si algo no responde.`,'error'); });
 $('#toast').addEventListener('click',()=>{ $('#toast').hidden=true; });
 // Each section has its own address, so reloading or going back returns to it.
-const PLANNING_ROUTES = { configuration: 'configuracion', iteration: 'iteracion', capacity: 'capacidad', planning: 'tareas' };
+const PLANNING_ROUTES = { configuration: 'configuracion', iteration: 'iteracion', capacity: 'capacidad', planning: 'tareas', estimates: 'estimacion', development: 'desarrollo' };
 function currentPath() {
   if (tab === 'home') return '/';
   if (PLANNING_ROUTES[tab]) return `/planificacion/${PLANNING_ROUTES[tab]}`;

@@ -13,13 +13,13 @@ import { randomBytes } from 'node:crypto';
 import { LocalStore } from './store.js';
 import { auditGroup } from './security.js';
 import { AzureGateway } from './azure.js';
-import { Planner, createLocalItem, duplicateItem, addComment, addComments, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
+import { Planner, createLocalItem, createFromTicket, duplicateItem, addComment, addComments, discardComment, discardLocal, stageChanges, resolveConflict, planningWorkspace, stageCapacity, copyPreviousCapacity, discardCapacity, discardAllocation, chooseDownloadedCapacity, setPersonNote, resolveCapacityConflict, discardStateChanges, completeTask, setDescription, reviewTaskChoice, reviewCapacityChoice } from './planner.js';
 import { configFrom } from './config.js';
-import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, demoTestPlans, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME } from './demo.js';
-import { JiraClient, accountOf, jiraSettingsFrom, jqlFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP } from './jira.js';
+import { createDemo, upgradeDemoImportRules, applyDemoImportRules, demoFunctionalIssues, demoMyIteration, demoTestPlans, DEMO_STATES, DemoReviewer, DemoPullRequestGateway, DemoJiraClient, DEMO_JIRA_SETTINGS, DEMO_JIRA_ME, DEMO_PLANNING_FILTER, demoPlanningIssues } from './demo.js';
+import { JiraClient, accountOf, jiraSettingsFrom, jqlFrom, hasFfmpeg, listFiles, readText, sharedName, sharedOf, TOKEN_HELP, LIMITS as JIRA_LIMITS } from './jira.js';
 import { fingerprint, localWork, packState, unpackState } from './jira-share.js';
 import { listScreens, screensFrom } from './jira-desktop.js';
-import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, readCatalog, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf } from './jira-agents.js';
+import { TicketStore, JiraPipeline, CopilotAgent, DemoAgent, collectFilter, readCatalog, syncTickets, checkKey, defaultModel, modelFor, autoLocked, COLUMN_MODES, STAGES, STAGE_IDS, stageOf, CATALOG_FIELDS, catalogEntry } from './jira-agents.js';
 import { choiceFrom, effortFor } from './ai-choice.js';
 import { CopilotReviewer, runReview, publishReview, parsePullRequestUrl, validSuggestionCode, LIMITS as REVIEW_LIMITS } from './pr-review.js';
 import { checkRepository, repositoryKey } from './local-repo.js';
@@ -91,6 +91,17 @@ const jiraRoot = settings => store.data.mode === 'demo' ? join(store.directory, 
 function publicJira() {
   const settings = jiraSettings();
   return settings ? { ...settings, account: jiraMe()?.name ?? null, demo: store.data.mode === 'demo', hasToken: store.data.mode === 'demo' || jiraHasToken, tokenFromEnv: !!process.env.NEO_TEAM_JIRA_TOKEN, root: jiraRoot(settings) } : null;
+}
+// The Jira filter whose estimates and development tickets Planificación shows, apart
+// from the one of Mantenimiento; the same connection reads both.
+const planningJiraFilter = () => store.data.planningJiraFilters?.[store.data.mode] ?? (store.data.mode === 'demo' ? DEMO_PLANNING_FILTER : '');
+async function planningJira() {
+  const settings = jiraSettings(), filter = planningJiraFilter();
+  if (!settings) throw fail('Conecta Jira en Mantenimiento.');
+  if (!filter) return { filter, entries: [], limited: false, at: null, url: settings.url };
+  const demo = store.data.mode === 'demo';
+  const result = demo ? { issues: demoPlanningIssues(), limited: false } : await new JiraClient(settings, await jiraToken()).search(jqlFrom(filter), CATALOG_FIELDS, () => {}, JIRA_LIMITS.catalog);
+  return { filter, entries: result.issues.map(issue => catalogEntry(issue, jiraMe())), limited: !!result.limited, at: new Date().toISOString(), url: settings.url };
 }
 // Models the Copilot account may use, remembered from the last check.
 let copilotModels = [];
@@ -228,7 +239,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira(), planningJiraFilter: planningJiraFilter() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -249,7 +260,7 @@ async function body(req) {
 }
 // Requests that only change the local copy. Their errors are validation
 // messages, so they do not leave a diagnostic report.
-const LOCAL_PATHS = new Set(['/api/timeline', '/api/vacations', '/api/iteration-templates', '/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
+const LOCAL_PATHS = new Set(['/api/timeline', '/api/vacations', '/api/iteration-templates', '/api/pr-finding', '/api/pr-review-delete', '/api/state-rules', '/api/maintenance-settings', '/api/config', '/api/mode', '/api/create', '/api/create-from-jira', '/api/planning-jira-filter', '/api/duplicate', '/api/comment', '/api/comments', '/api/comment-discard', '/api/discard-allocation', '/api/capacity-download-choice', '/api/complete-task', '/api/import-rule', '/api/stage', '/api/capacity', '/api/copy-capacity', '/api/discard-capacity', '/api/resolve-capacity', '/api/discard', '/api/resolve', '/api/description', '/api/pr-local-repo', '/api/copilot-model', '/api/jira-settings', '/api/jira-model', '/api/jira-screens', '/api/jira-mode', '/api/jira-scope', '/api/jira-answer', '/api/jira-done', '/api/jira-tell', '/api/jira-pause', '/api/jira-general-reset', '/api/jira-comment', '/api/jira-seen', '/api/jira-autolock', '/api/jira-learnings', '/api/jira-move', '/api/jira-delete', '/api/jira-run', '/api/jira-auto', '/api/jira-stop', '/api/jira-open', '/api/pipeline-source', '/api/pipeline-analysis-delete']);
 const today = () => new Date().toISOString().slice(0, 10);
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -295,6 +306,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/test-plans') {
       requireSession(req);
       return json(res, { testPlans: currentTestPlans() });
+    }
+    // Read only: the tickets of the filter of Planificación, each time it is asked.
+    if (req.method === 'GET' && path === '/api/planning-jira') {
+      requireSession(req);
+      return json(res, { planningJira: await planningJira() });
     }
     if (req.method === 'GET' && path === '/api/jira') {
       requireSession(req);
@@ -1069,6 +1085,13 @@ const server = http.createServer(async (req, res) => {
           await store.save(data); planner.review = null;
         } else if (path === '/api/create') {
           const data=structuredClone(store.data);createLocalItem(data[data.mode],input);await store.save(data);planner.review=null;
+        } else if (path === '/api/create-from-jira') {
+          const data=structuredClone(store.data);createFromTicket(data[data.mode],input);await store.save(data);planner.review=null;
+        } else if (path === '/api/planning-jira-filter') {
+          const filter=String(input.filter ?? '').trim();
+          if (filter.length>2000) throw fail('El filtro admite hasta 2000 caracteres.');
+          if (filter) jqlFrom(filter);
+          const data=structuredClone(store.data);data.planningJiraFilters={...data.planningJiraFilters,[data.mode]:filter};await store.save(data);
         } else if (path === '/api/comment' || path === '/api/comments' || path === '/api/comment-discard') {
           const data=structuredClone(store.data);
           if(path==='/api/comment') addComment(data[data.mode],input.id,input.text); else if(path==='/api/comments') addComments(data[data.mode],input.ids,input.text); else discardComment(data[data.mode],input.key);
@@ -1172,7 +1195,7 @@ const server = http.createServer(async (req, res) => {
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
     const route = /^\/(planificacion|lineas-temporales|mi-iteracion|planes-prueba|mantenimiento|revision-prs|pipelines|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'sprint-name.js', 'timeline.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'sprint-name.js', 'timeline.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'planning-jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

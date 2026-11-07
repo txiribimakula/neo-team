@@ -330,6 +330,20 @@ function demoTicket(key) {
   if (!DemoJiraClient.synced || !t.afterSync) return t;
   return { ...t, updated: t.afterSync.updated, attachments: [...t.attachments, ...(t.afterSync.attachments ?? [])], comments: [...t.comments, ...(t.afterSync.comments ?? [])] };
 }
+// The filter of Planificación in the example: estimates and development work of the
+// same fictitious application, read as Jira's search returns them.
+export const DEMO_PLANNING_FILTER = '10002';
+const DEMO_PLANNING = [
+  ['NEO-201', 'Estimar la importación de clientes desde CSV', 'Estimación', 'Abierto', 'new', 'High', null],
+  ['NEO-202', 'Valorar el cambio de proveedor de correo', 'Estimación', 'En curso', 'indeterminate', 'Medium', 'Lucía Martín'],
+  ['NEO-203', 'Estimar el informe anual de facturación', 'Estimación', 'Abierto', 'new', 'Low', null],
+  ['NEO-211', 'Importar clientes desde CSV', 'Historia', 'Tareas por hacer', 'new', 'High', 'Marcos Ruiz'],
+  ['NEO-212', 'Recordar el último filtro de clientes', 'Mejora', 'Tareas por hacer', 'new', 'Medium', null],
+  ['NEO-213', 'Exportar albaranes a PDF', 'Desarrollo', 'En curso', 'indeterminate', 'Medium', 'Lucía Martín'],
+];
+export const demoPlanningIssues = () => DEMO_PLANNING.map(([key, summary, type, status, category, priority, assignee], i) => ({ key, fields: {
+  summary, issuetype: { name: type }, status: { name: status, statusCategory: { key: category } }, priority: { name: priority }, assignee: assignee ? demoUser(assignee) : null,
+  reporter: demoUser('Producto'), labels: [], components: [], fixVersions: [], created: `2026-10-0${i + 1}T09:00:00.000+0200`, updated: `2026-10-1${i}T09:00:00.000+0200` } }));
 export const DEMO_JIRA_SETTINGS = { url: 'https://ejemplo.atlassian.net', deployment: 'cloud', email: 'ejemplo@ejemplo.com', filter: '10001', maxIterations: 3, repository: '', baseBranch: '', buildCommand: '', launchCommand: 'winapp run C:\\NeoDesk\\bin\\NeoDesk.exe --detach', ticketsDir: '', models: {} };
 export class DemoJiraClient {
   static published = [];

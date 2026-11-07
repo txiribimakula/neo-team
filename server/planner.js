@@ -44,6 +44,16 @@ export function createLocalItem(workspace, input, { duplicate = false } = {}) {
   stageChanges(workspace,id,{title:item.title,...(input.assignedTo ? {assignedTo:input.assignedTo} : {}),...(input.iterationPath ? {iterationPath:input.iterationPath} : {}),...(input.remainingWork!==undefined ? {remainingWork:input.remainingWork} : {})});
   return id;
 }
+// A Jira ticket brought into the plan: a task with its title (as the person edited
+// it) under the parent chosen or, with `story`, a user story of the same title under
+// that parent and the task under the story. Both stay local until synchronized; the
+// story is sent first, like any parent.
+export function createFromTicket(workspace, input) {
+  const title = typeof input?.title === 'string' ? input.title : '', parent = Number(input?.parent) || null;
+  if (!input?.story) return [createLocalItem(workspace, { type: 'Task', title, parent })];
+  const story = createLocalItem(workspace, { type: 'User Story', title, parent });
+  return [story, createLocalItem(workspace, { type: 'Task', title, parent: story })];
+}
 // Duplicates a task or bug as a new local item: same parent, project, area, owner,
 // iteration, hours, priority, tags and description. It is created in Azure when
 // synchronized; the description is read from the original then (a copy of a copy
