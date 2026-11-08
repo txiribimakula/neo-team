@@ -36,6 +36,17 @@ function createRow(ws, entry, draft) {
     <button class="button subtle small" type="button" data-action="pj-close" aria-label="Cancelar">×</button>
   </form></td></tr>`;
 }
+function commentRow(entry, ui, state) {
+  const draft = ui.comments?.[entry.key] ?? {}, posting = !!draft.posting;
+  return `<tr class="pj-comment-row"><td colspan="6"><form id="pj-comment-form" class="pj-comment" data-key="${escape(entry.key)}" aria-label="Comentar ${escape(entry.key)}" aria-busy="${posting}">
+    <label for="pj-comment-text">Comentario en ${escape(entry.key)}</label>
+    <textarea id="pj-comment-text" name="text" rows="3" maxlength="4000" required data-pj-comment="${escape(entry.key)}" aria-label="Comentario para ${escape(entry.key)}" ${posting ? 'disabled' : ''}>${escape(draft.text ?? '')}</textarea>
+    <small class="text-muted">${state.mode === 'demo' ? 'En modo de prueba se simula la publicación.' : 'Se publica directamente en Jira al pulsar Publicar en Jira.'}</small>
+    ${draft.error ? `<p class="inline-error" role="alert">${escape(draft.error)}</p>` : ''}
+    ${draft.notice ? `<p role="status">${escape(draft.notice)}</p>` : ''}
+    <div class="pj-comment-actions"><button type="submit" class="button small primary" ${posting ? 'disabled' : ''}>${posting ? 'Publicando…' : state.mode === 'demo' ? 'Publicar en el ejemplo' : 'Publicar en Jira'}</button><button type="button" class="button small" data-action="pj-comment-close" ${posting ? 'disabled' : ''}>Cerrar</button></div>
+  </form></td></tr>`;
+}
 export function planningJiraView(tab, state, ui) {
   if (!state.jira) return '<div class="empty-result"><button class="button" data-action="pj-connect">Conectar Jira</button></div>';
   const filter = state.planningJiraFilters?.[tab] ?? state.planningJiraFilter ?? '';
@@ -48,7 +59,7 @@ export function planningJiraView(tab, state, ui) {
   if (!entries.length) return `<section class="pj">${toolbar}${error}<div class="empty-result">Sin tickets</div></section>`;
   const rows = entries.map(e => {
     const items = ticketItems(ws, e), open = ui.open === e.key;
-    return `<tr class="${open ? 'open' : ''}"><td class="pj-key">${typeIcon(e.type)}<a href="${escape(`${data.url}/browse/${encodeURIComponent(e.key)}`)}" target="_blank" rel="noopener">${escape(e.key)}</a></td><td class="pj-title">${escape(e.summary)}</td><td><span class="pill">${escape(e.status)}</span></td><td class="text-muted">${escape(e.assignee ? (e.assignee.me ? 'tú' : e.assignee.name) : '—')}</td><td class="pj-items">${items.map(itemChip).join('')}</td><td class="pj-action">${open ? '' : `<button class="button small" data-action="pj-open" data-key="${escape(e.key)}" title="Crear en Azure DevOps">+ Azure</button>`}</td></tr>${open ? createRow(ws, e, ui.draft) : ''}`;
+    return `<tr class="${open ? 'open' : ''}"><td class="pj-key">${typeIcon(e.type)}<a href="${escape(`${data.url}/browse/${encodeURIComponent(e.key)}`)}" target="_blank" rel="noopener">${escape(e.key)}</a></td><td class="pj-title">${escape(e.summary)}</td><td><span class="pill">${escape(e.status)}</span></td><td class="text-muted">${escape(e.assignee ? (e.assignee.me ? 'tú' : e.assignee.name) : '—')}</td><td class="pj-items">${items.map(itemChip).join('')}</td><td class="pj-action">${open ? '' : `<button class="button small" data-action="pj-open" data-key="${escape(e.key)}" title="Crear en Azure DevOps">+ Azure</button>`}<button type="button" class="button small" data-action="pj-comment-open" data-key="${escape(e.key)}" aria-expanded="${ui.commentOpen === e.key}" aria-label="Comentar ${escape(e.key)}">Comentar</button></td></tr>${open ? createRow(ws, e, ui.draft) : ''}${ui.commentOpen === e.key ? commentRow(e, ui, state) : ''}`;
   }).join('');
   return `<section class="pj">${toolbar}${error}<div class="table-wrap"><table class="pj-table"><thead><tr><th>Clave</th><th>Título</th><th>Estado</th><th>Asignado</th><th>Azure DevOps</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }

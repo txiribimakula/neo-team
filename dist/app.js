@@ -2144,6 +2144,19 @@ document.addEventListener('pointerup', () => { setTimeout(() => { pointerDown = 
 document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
 // The tickets of Planificación are read from Jira on entering Estimación or Desarrollo
 // for the first time with this filter, and again with ⟳ (or Intro in the filter).
+async function submitPlanningJiraComment(form) {
+  const section=tab, ui=planningJiraUi(section), key=form.dataset.key;
+  ui.comments ??= {}; const draft=ui.comments[key] ??= {text:form.elements.text.value};
+  if(draft.posting)return;
+  const text=form.elements.text.value.trim();draft.text=form.elements.text.value;
+  if(!text || text.length>4000){draft.error='Escribe el comentario (hasta 4000 caracteres).';render();return;}
+  draft.posting=true;draft.error='';draft.notice='';render();
+  try {
+    const {posted}=await request('/api/planning-jira-comment',{section,key,text});
+    draft.text='';draft.notice=`Comentario publicado en ${posted.key}${posted.simulated ? ' (simulado)' : ''}.`;
+  } catch(error) {draft.error=error.message;}
+  finally {draft.posting=false;if(tab===section && planningJiraUi(section)===ui)render();}
+}
 function ensurePlanningJira() {
   pjUi = planningJiraUi();
   if (!pjUi.data && !pjUi.loading && !pjUi.error && state.jira && planningFilter(tab)) loadPlanningJira(tab);
@@ -2474,6 +2487,12 @@ const actions = {
   'tl-apply-owners': applyTimelineOwners,
   'open-maintenance': () => openMaintenance(),
   'pj-connect': () => openMaintenance(),
+  'pj-comment-open': el => {
+    if (!pjUi.data?.entries.some(e=>e.key===el.dataset.key)) return;
+    pjUi.commentOpen=el.dataset.key;pjUi.comments ??= {};
+    pjUi.comments[el.dataset.key] ??= {text:''};render();$('#pj-comment-text')?.focus();
+  },
+  'pj-comment-close': () => {pjUi.commentOpen=null;render();},
   'pj-open': el => {
     const entry = pjUi.data?.entries.find(e => e.key === el.dataset.key);
     if (!entry) return;
@@ -2849,6 +2868,7 @@ document.addEventListener('submit', async event => {
   event.preventDefault(); if (pending) return;
   try {
     if (event.target.id === 'new-iteration-form') { await submitNewIteration(event.target); return; }
+    if (event.target.id === 'pj-comment-form') {await submitPlanningJiraComment(event.target);return;}
     if (event.target.id === 'pj-filter-form') {
       const filter = event.target.filter.value.trim(), section = tab;
       if (filter !== planningFilter(section)) await request('/api/planning-jira-filter', { section, filter });
@@ -3001,6 +3021,7 @@ document.addEventListener('input',event=>{
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
+  if(event.target.dataset.pjComment && pjUi){const draft=(pjUi.comments ??= {})[event.target.dataset.pjComment] ??= {};draft.text=event.target.value;draft.notice='';}
   if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=commentText(event.target);updateMentions(event.target);}
 });
 document.addEventListener('toggle',event=>{

@@ -1098,3 +1098,9 @@ details.naming-project{display:block;border-top:1px solid var(--line);padding-to
 .mention-editor:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none}
 .mention-token{display:inline;background:#e6ecfa;color:#234c87;border:1px solid #b7cae7;border-radius:5px;padding:1px 3px;font-weight:650;box-decoration-break:clone;-webkit-box-decoration-break:clone;cursor:default}
 .mention-token::selection{background:#a9c4ee}
+
+.pj-action .button{margin:3px 0 3px 5px}
+.pj-comment-row>td{background:#f7f9f5}.pj-comment{display:flex;flex-direction:column;gap:8px;max-width:850px}
+.pj-comment>label{font-size:13px;font-weight:650}.pj-comment textarea{min-height:90px;resize:vertical;padding:8px 10px;font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px}
+.pj-comment-actions{display:flex;gap:8px}.pj-comment p{margin:0}
+@media(max-width:740px){.pj-table tr.pj-comment-row td{display:table-cell}}

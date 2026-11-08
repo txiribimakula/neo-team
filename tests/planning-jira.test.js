@@ -95,6 +95,25 @@ test('HTTP Planificación reads the Jira filter of the example and creates from 
   await post('/api/mode',{mode:'demo'});
   assert.deepEqual(state.planningJiraFilters,persisted.planningJiraFilters.demo);
 
+  const commentPath='/api/planning-jira-comment';
+  const noSession=await fetch(url+commentPath,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'NEO-211',text:'Hola'})});
+  assert.equal(noSession.status,403);
+  for(const input of [
+    {key:'../other',text:'Hola',section:'estimates'},
+    {key:'NEO-211',text:' ',section:'estimates'},
+    {key:'NEO-211',text:'x'.repeat(4001),section:'development'},
+    {key:'NEO-211',text:'Hola',section:'other'},
+  ])assert.equal((await post(commentPath,input)).status,400);
+  const versionBeforeComment=state.version,itemsBeforeComment=JSON.stringify(state.workspace.items);
+  const estimateComment=await post(commentPath,{key:'NEO-211',section:'estimates',text:'  Comentario de estimación\nSegunda línea  '});
+  assert.equal(estimateComment.status,200);
+  assert.deepEqual(estimateComment.data.posted,{key:'NEO-211',section:'estimates',id:'1',simulated:true});
+  const developmentComment=await post(commentPath,{key:'NEO-212',section:'development',text:'Comentario de desarrollo'});
+  assert.equal(developmentComment.status,200);
+  assert.equal(developmentComment.data.posted.id,'2','invalid requests did not publish');
+  assert.equal(state.version,versionBeforeComment);
+  assert.equal(JSON.stringify(state.workspace.items),itemsBeforeComment,'Jira comments do not change Azure tasks');
+
   const before = state.workspace.items.length;
   const created = await post('/api/create-from-jira', { title: 'Importar clientes desde CSV', parent: 910, story: true });
   assert.equal(created.status, 200);
@@ -143,4 +162,41 @@ test('switching sections keeps separate cached results and late replies cannot o
   context.state.planningJiraFilters.estimates='NEW';
   assert.equal(api.ui('estimates').data,null);
   assert.equal(api.ui('development'),development,'changing estimates preserves development results');
+});
+
+test('estimation and development rows each offer an independent Jira comment editor',async()=>{
+  const {planningJiraView}=await import('../dist/planning-jira.js');
+  const entries=[{key:'NEO-211',type:'Estimación',summary:'Estimar'},{key:'NEO-212',type:'Desarrollo',summary:'Desarrollar'}];
+  const state={mode:'azure',jira:{},planningJiraFilters:{estimates:'EST',development:'DEV'}};
+  for(const [section,key] of [['estimates','NEO-211'],['development','NEO-212']]){
+    const ui={data:{url:'https://jira.example',entries},commentOpen:key,comments:{[key]:{text:'<script>Prueba</script>',error:'Sin permisos'}}};
+    const html=planningJiraView(section,state,ui);
+    assert.match(html,new RegExp(`aria-label="Comentar ${key}"`));
+    assert.match(html,new RegExp(`data-pj-comment="${key}"`));
+    assert.match(html,/Publicar en Jira/);assert.match(html,/directamente en Jira/);
+    assert.match(html,/&lt;script&gt;Prueba&lt;\/script&gt;/);assert.doesNotMatch(html,/<script>/);
+    assert.match(html,/role="alert">Sin permisos/);
+    assert.match(html,/pj-comment-close/);
+  }
+});
+
+test('Jira comment sending retains failed drafts, prevents duplicate clicks and clears only on success',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../dist/app.js',import.meta.url),'utf8');
+  const source=app.slice(app.indexOf('async function submitPlanningJiraComment('),app.indexOf('function ensurePlanningJira()'));
+  const ui={},calls=[];
+  const context={tab:'estimates',planningJiraUi:()=>ui,render:()=>{},request:async(path,input)=>{calls.push([path,input]);throw new Error('Jira: sin permisos');}};
+  const submit=runInNewContext(source+'; submitPlanningJiraComment',context);
+  const form={dataset:{key:'NEO-211'},elements:{text:{value:'Comentario que conservar'}}};
+  await submit(form);
+  assert.equal(ui.comments['NEO-211'].text,'Comentario que conservar');
+  assert.equal(ui.comments['NEO-211'].error,'Jira: sin permisos');
+  assert.equal(ui.comments['NEO-211'].posting,false);
+  assert.equal(calls[0][0],'/api/planning-jira-comment');assert.equal(calls[0][1].section,'estimates');
+  let finish;context.request=()=>new Promise(resolve=>{finish=resolve;});
+  const first=submit(form);await submit(form);
+  assert.equal(ui.comments['NEO-211'].posting,true);
+  finish({posted:{key:'NEO-211',simulated:true}});await first;
+  assert.equal(ui.comments['NEO-211'].text,'');
+  assert.match(ui.comments['NEO-211'].notice,/NEO-211 \(simulado\)/);
 });
