@@ -1090,3 +1090,11 @@ details.naming-project{display:block;border-top:1px solid var(--line);padding-to
 .naming-row{padding:8px 0;border-bottom:1px solid var(--line)}
 .naming-row small{color:var(--muted)}
 .naming-row.invalid small[role=alert]{color:#a33b2b}
+
+/* Selected mentions are atomic identities, visibly distinct from ordinary text. */
+.mention-editor{width:100%;min-height:92px;max-height:50vh;overflow:auto;border:1px solid #d5dfd7;border-radius:7px;padding:8px 10px;font:inherit;font-size:13px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;background:white;cursor:text}
+.mention-editor.compact{min-height:58px;max-height:40vh}
+.mention-editor:focus{outline:2px solid #5b7f60;outline-offset:1px}
+.mention-editor:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none}
+.mention-token{display:inline;background:#e6ecfa;color:#234c87;border:1px solid #b7cae7;border-radius:5px;padding:1px 3px;font-weight:650;box-decoration-break:clone;-webkit-box-decoration-break:clone;cursor:default}
+.mention-token::selection{background:#a9c4ee}

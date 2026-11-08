@@ -1,3 +1,4 @@
+import { planningSection, planningFilters, savePlanningFilter } from './planning-jira-settings.js';
 import { globalTemplate, saveGlobalTemplate } from './iteration-settings.js';
 import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
@@ -93,16 +94,17 @@ function publicJira() {
   const settings = jiraSettings();
   return settings ? { ...settings, account: jiraMe()?.name ?? null, demo: store.data.mode === 'demo', hasToken: store.data.mode === 'demo' || jiraHasToken, tokenFromEnv: !!process.env.NEO_TEAM_JIRA_TOKEN, root: jiraRoot(settings) } : null;
 }
-// The Jira filter whose estimates and development tickets Planificación shows, apart
-// from the one of Mantenimiento; the same connection reads both.
-const planningJiraFilter = () => store.data.planningJiraFilters?.[store.data.mode] ?? (store.data.mode === 'demo' ? DEMO_PLANNING_FILTER : '');
-async function planningJira() {
-  const settings = jiraSettings(), filter = planningJiraFilter();
+// Each planning tab remembers its own query, apart from Mantenimiento.
+const planningJiraFilters = () => planningFilters(store.data, store.data.mode === 'demo' ? DEMO_PLANNING_FILTER : '');
+const planningJiraFilter = (section = 'estimates') => planningJiraFilters()[section];
+async function planningJira(section) {
+  section = planningSection(section);
+  const settings = jiraSettings(), filter = planningJiraFilter(section);
   if (!settings) throw fail('Conecta Jira en Mantenimiento.');
-  if (!filter) return { filter, entries: [], limited: false, at: null, url: settings.url };
+  if (!filter) return { section, filter, entries: [], limited: false, at: null, url: settings.url };
   const demo = store.data.mode === 'demo';
   const result = demo ? { issues: demoPlanningIssues(), limited: false } : await new JiraClient(settings, await jiraToken()).search(jqlFrom(filter), CATALOG_FIELDS, () => {}, JIRA_LIMITS.catalog);
-  return { filter, entries: result.issues.map(issue => catalogEntry(issue, jiraMe())), limited: !!result.limited, at: new Date().toISOString(), url: settings.url };
+  return { section, filter, entries: result.issues.map(issue => catalogEntry(issue, jiraMe())), limited: !!result.limited, at: new Date().toISOString(), url: settings.url };
 }
 // Models the Copilot account may use, remembered from the last check.
 let copilotModels = [];
@@ -238,7 +240,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), iterationTemplate: globalTemplate(store.data, sourcesOf(workspace)), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira(), planningJiraFilter: planningJiraFilter() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), iterationTemplate: globalTemplate(store.data, sourcesOf(workspace)), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira(), planningJiraFilters: planningJiraFilters(), planningJiraFilter: planningJiraFilter() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks
@@ -309,7 +311,7 @@ const server = http.createServer(async (req, res) => {
     // Read only: the tickets of the filter of Planificación, each time it is asked.
     if (req.method === 'GET' && path === '/api/planning-jira') {
       requireSession(req);
-      return json(res, { planningJira: await planningJira() });
+      return json(res, { planningJira: await planningJira(new URL(req.url, 'http://localhost').searchParams.get('section') ?? undefined) });
     }
     if (req.method === 'GET' && path === '/api/jira') {
       requireSession(req);
@@ -1090,7 +1092,9 @@ const server = http.createServer(async (req, res) => {
           const filter=String(input.filter ?? '').trim();
           if (filter.length>2000) throw fail('El filtro admite hasta 2000 caracteres.');
           if (filter) jqlFrom(filter);
-          const data=structuredClone(store.data);data.planningJiraFilters={...data.planningJiraFilters,[data.mode]:filter};await store.save(data);
+          const data=structuredClone(store.data);
+          savePlanningFilter(data,input.section,filter,data.mode==='demo' ? DEMO_PLANNING_FILTER : '');
+          await store.save(data);
         } else if (path === '/api/comment' || path === '/api/comments' || path === '/api/comment-discard') {
           const data=structuredClone(store.data);
           if(path==='/api/comment') addComment(data[data.mode],input.id,input.text); else if(path==='/api/comments') addComments(data[data.mode],input.ids,input.text); else discardComment(data[data.mode],input.key);
@@ -1194,7 +1198,7 @@ const server = http.createServer(async (req, res) => {
     // Every section has its own address (/jira, /revision-prs/…): the page is the same.
     const route = /^\/(planificacion|lineas-temporales|mi-iteracion|planes-prueba|mantenimiento|revision-prs|pipelines|jira|permisos)(\/[^.]*)?$/.test(path);
     const file = path === '/' || route ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'sprint-name.js', 'timeline.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'planning-jira.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
+    if (!['index.html', 'app.js', 'settings.js', 'hierarchy.js', 'permissions.js', 'maintenance.js', 'maintenance-items.js', 'search.js', 'sprint-name.js', 'iteration-dates.js', 'timeline.js', 'my-iteration.js', 'test-plans.js', 'reviews.js', 'pipelines.js', 'jira.js', 'planning-jira.js', 'mention-editor.js', 'ai-choice.js', 'style.css', 'favicon.svg'].includes(file)) throw fail('No encontrado.', 404);
     res.setHeader('Content-Type', types[file.split('.').at(-1)]);
     res.end(await readFile(root + file));
   } catch (error) {

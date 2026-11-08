@@ -1,3 +1,5 @@
+import { mentionMarkup, commentEditor, commentText, commentSelection, replaceCommentRange, installMentionEditors } from './mention-editor.js';
+import { inferIterationDates } from './iteration-dates.js';
 import { configurationView } from './settings.js';
 import { permissionsView, filterPermissions, filterGroups, resetPermissionFilters } from './permissions.js';
 import { maintenanceView, maintenanceHead, maintenanceScope, boardKeys, refreshTargets, filterMaintenance, resetMaintenanceFilters, maintenanceIncludeClosed, setMaintenanceIncludeClosed, maintenanceViewName, setMaintenanceView, setMaintenanceOrigin, addMaintenanceCondition, removeMaintenanceCondition, toggleMaintenanceState, maintenanceSelection, isMaintenanceSelected, selectMaintenance, clearMaintenanceSelection } from './maintenance.js';
@@ -29,7 +31,15 @@ const jiraAsked = new Set();
 let jiraUi = { view: 'board', board: null, detail: null, answers: {}, tells: {} };
 // Planificación · Estimación and Desarrollo: the tickets read from Jira (scope: the mode and
 // filter they belong to), the ticket whose creation row is open and the parents last chosen.
-let pjUi = { data: null, scope: null, loading: false, error: '', open: null, draft: null, parents: {} };
+let pjUi;
+const pjSections = new Map();
+const planningFilter = section => state.planningJiraFilters?.[section] ?? state.planningJiraFilter ?? '';
+function planningJiraUi(section = tab) {
+  const key = JSON.stringify([state.mode, section]), scope = JSON.stringify([planningFilter(section),state.jira?.url,state.jira?.account]);
+  let ui = pjSections.get(key);
+  if (!ui || ui.scope !== scope) { ui = {data:null,scope,loading:false,error:'',open:null,draft:null,parents:{}}; pjSections.set(key,ui); }
+  return ui;
+}
 let state, selectedIteration = '', tab = 'home', query = '', pending = false, review, toastTimer;
 let lastPlanningTab = 'configuration', renderedTab;
 // Global synchronization drawer: review, progress and results from every project.
@@ -777,7 +787,7 @@ function stepContent() {
   if (tab==='iteration') return iterationView();
   if (tab==='capacity') return capacityView();
   if (tab==='planning') return plannerView();
-  if (PLANNING_JIRA_TABS[tab]) return planningJiraView(tab,state,pjUi);
+  if (PLANNING_JIRA_TABS[tab]) { pjUi=planningJiraUi(); return planningJiraView(tab,state,pjUi); }
   if (!iteration) return hierarchyView();
   return board(iteration,state.workspace.effectiveItems.filter(i=>isExecutable(i) && i.iterationPath===iteration.path));
 }
@@ -816,12 +826,20 @@ const namingTemplates=()=>({template:namingTemplate()});
 const namingNumbering=()=>globalNumbers(namingSources());
 const namingPlans=()=>{const numbering=namingNumbering();return namingSources().map(source=>{
   const iterations=source.projectIterations ?? source.iterations;
-  return {source,plan:renamePlan(iterations,namingTemplate(),localDay(),numbering.forIterations(iterations))};
+  const ownReferences=iterations.filter(i=>i.attributes?.startDate && i.attributes?.finishDate && !i.hasChildren && !iterations.some(child=>child!==i && child.path?.startsWith(`${i.path}\\`)));
+  const references=ownReferences.length ? iterations : namingSources().flatMap(s=>s.projectIterations ?? s.iterations);
+  const proposals=inferIterationDates(iterations,namingTemplate(),references);
+  const plan=renamePlan(iterations,namingTemplate(),localDay(),numbering.forIterations(iterations));
+  plan.rows=plan.rows.map(row=>({...row,dateProposal:proposals.get(row.id)})).sort((a,b)=>{
+    const first=a.startDate || a.dateProposal?.startDate || '9999',second=b.startDate || b.dateProposal?.startDate || '9999';
+    return first.localeCompare(second) || a.from.localeCompare(b.from,'es',{numeric:true});
+  });
+  return {source,plan};
 });};
-const proposedName=i=>sprintName(namingTemplate(),{startDate:String(i.attributes?.startDate ?? '').slice(0,10),number:namingNumbering().numbers.get(iterationRange(i))});
+const proposedName=i=>!i.attributes?.startDate ? i.name : sprintName(namingTemplate(),{startDate:String(i.attributes?.startDate ?? '').slice(0,10),number:namingNumbering().numbers.get(iterationRange(i))});
 const namingKind={past:'Anterior',current:'En curso',next:'Siguiente',other:'Sin fechas'};
 function namingRows(plan) {
-  return plan.rows.map(row=>`<li class="naming-row kind-${row.kind==='next' ? 'future' : row.kind} ${row.changed ? 'changed' : ''} ${row.problem ? 'invalid' : ''}"><span class="iteration-when">${namingKind[row.kind]}</span><span>Actual: ${escape(row.from)}</span>${row.changed ? `<span aria-hidden="true">→</span><strong>Propuesta: ${escape(row.to) || '—'}</strong>` : ''}<span>Fechas existentes: ${escape(row.startDate) || 'Sin fecha'} — ${escape(row.finishDate) || 'Sin fecha'}</span><small>${escape(row.explanation)}</small>${row.problem ? `<small role="alert">${escape(row.problem)}</small>` : ''}</li>`).join('');
+  return plan.rows.map(row=>`<li class="naming-row kind-${row.kind==='next' ? 'future' : row.kind} ${row.changed ? 'changed' : ''} ${row.problem ? 'invalid' : ''}"><span class="iteration-when">${namingKind[row.kind]}</span><span>Actual: ${escape(row.from)}</span>${row.changed ? `<span aria-hidden="true">→</span><strong>Propuesta: ${escape(row.to) || '—'}</strong>` : ''}<span>Fechas existentes: ${escape(row.startDate) || 'Sin fecha'} — ${escape(row.finishDate) || 'Sin fecha'}</span>${row.dateProposal ? `${row.dateProposal.startDate ? `<strong class="date-proposal">Propuesta de fechas: ${escape(row.dateProposal.startDate)} — ${escape(row.dateProposal.finishDate)}</strong>` : '<span>Fechas por determinar</span>'}<small>${escape(row.dateProposal.explanation)}</small>` : `<small>${escape(row.explanation)}</small>`}${row.problem ? `<small role="alert">${escape(row.problem)}</small>` : ''}</li>`).join('');
 }
 function namingSection() {
   const plans=namingPlans(), changes=plans.reduce((sum,{plan})=>sum+plan.renames.length,0), problem=plans.find(({plan})=>plan.problem);
@@ -835,7 +853,7 @@ function namingSection() {
   const actions=renameCheck
     ? `${shared.length ? `<ul class="naming-shared" aria-label="También usadas por">${shared.join('')}</ul>` : ''}<button type="button" class="button small primary" data-action="naming-confirm">${state.mode==='demo' ? 'Renombrar en el ejemplo' : 'Renombrar en Azure DevOps'}</button><button type="button" class="button small" data-action="naming-cancel">Cancelar</button>`
     : `<button type="button" class="button small" data-action="naming-save" ${unsaved && !problem ? '' : 'disabled'}>Fijar</button><button type="button" class="button small primary" data-action="naming-apply" ${changes && !problem && !pending && (state.mode==='demo' || namingSources().every(s=>s.projectIterations)) ? '' : 'disabled'}>Renombrar${changes ? ` ${changes}` : ''}</button>${pending && changes ? '<small>Sincroniza o descarta los cambios pendientes para renombrar.</small>' : ''}`;
-  return `<section class="iteration-naming" aria-label="Nombre de las iteraciones"><div class="naming-head"><h3>Patrón global de nombres</h3><button type="button" class="button small" data-action="refresh-section" data-section="iterations">Actualizar histórico completo</button><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span></div><label class="naming-template"><span>Todos los proyectos</span><input data-naming="global" value="${escape(namingTemplate())}" maxlength="255" aria-label="Patrón global de nombres"></label><p>{n}: contador compartido por tramo · {semana}: semana ISO del inicio · los desplazamientos suman semanas, meses, años o días. Renombrar conserva el inicio y fin existentes.</p>${projects}<div class="naming-actions" id="naming-actions">${actions}</div></section>`;
+  return `<section class="iteration-naming" aria-label="Nombre de las iteraciones"><div class="naming-head"><h3>Patrón global de nombres</h3><button type="button" class="button small" data-action="refresh-section" data-section="iterations">Actualizar histórico completo</button><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span></div><label class="naming-template"><span>Todos los proyectos</span><input data-naming="global" value="${escape(namingTemplate())}" maxlength="255" aria-label="Patrón global de nombres"></label><p>{n}: contador compartido por tramo · {semana}: semana ISO del inicio · los desplazamientos suman semanas, meses, años o días. Renombrar conserva el inicio y fin existentes. Para las iteraciones sin fechas se muestran propuestas a partir del nombre y de las referencias fechadas; estas propuestas no se guardan ni se aplican al renombrar.</p>${projects}<div class="naming-actions" id="naming-actions">${actions}</div></section>`;
 }
 function namingInput(el) {
   namingDrafts[el.dataset.naming]=el.value;namingFocus=el.dataset.naming;renameCheck=null;
@@ -1282,14 +1300,15 @@ function updatePlanningView() {
 // Comments are written on the card; @ offers the people of the sprint and «Asignado»,
 // whoever has each task. Mentions are sent as @<email>, which Azure DevOps turns into a
 // real mention; @<asignado> is resolved for each task when it is saved.
-const commentsOpen = new Set(), commentDrafts = {}, commentMentions = {};
+const commentsOpen = new Set(), commentDrafts = {};
 let mentionUi = null;
 const ASSIGNEE = { displayName: 'Asignado', assignee: true };
+installMentionEditors(document,identity=>identity==='asignado' ? 'Asignado' : state?.workspace?.members.find(m=>(m.uniqueName || m.id)?.toLowerCase()===identity.toLowerCase())?.displayName ?? identity);
 // Tasks of the plan chosen with their box, to comment on all of them at once.
 const selectedTasks = new Set();
 function bulkBar() {
   const count=selectedTasks.size;
-  return `<div id="bulk-bar" class="bulk-bar" ${count ? '' : 'hidden'}><span class="bulk-count">${plural(count,'tarea')}</span><div class="comment-box"><textarea rows="2" maxlength="4000" data-comment-for="bulk" data-focus="comment:bulk" placeholder="Comentario… @ para mencionar" aria-label="Comentario para las tareas seleccionadas">${escape(commentDrafts.bulk ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><button type="button" class="button small primary" data-action="add-comment" data-task="bulk">Comentar</button><button type="button" class="close" data-action="clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`;
+  return `<div id="bulk-bar" class="bulk-bar" ${count ? '' : 'hidden'}><span class="bulk-count">${plural(count,'tarea')}</span><div class="comment-box">${commentEditor('bulk',commentDrafts.bulk ?? '', 'Comentario para las tareas seleccionadas',true)}<div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><button type="button" class="button small primary" data-action="add-comment" data-task="bulk">Comentar</button><button type="button" class="close" data-action="clear-selection" title="Quitar la selección" aria-label="Quitar la selección">×</button></div>`;
 }
 // Choosing a box only touches its card and the bar, so the draft and the focus stay.
 function selectTask(id, on) {
@@ -1300,7 +1319,7 @@ function selectTask(id, on) {
 }
 const pendingCommentsOf = id => (state.workspace.pendingComments ?? []).filter(c => c.id === id);
 function renderMentions(text) {
-  return escape(text).replace(/@&lt;([^&\s]+@[^&\s]+)&gt;/g,(_,email)=>`<strong class="mention">@${escape(state.workspace.members.find(m=>(m.uniqueName || '').toLowerCase()===email.toLowerCase())?.displayName ?? email)}</strong>`);
+  return mentionMarkup(text);
 }
 function commentButton(item) {
   const count=pendingCommentsOf(item.id).length;
@@ -1309,7 +1328,7 @@ function commentButton(item) {
 function taskComments(item) {
   if (!commentsOpen.has(item.id)) return '';
   const pendingList=pendingCommentsOf(item.id).map(c=>`<div class="pending-comment"><p>${renderMentions(c.text)}</p><button type="button" class="link-button" data-action="discard-comment" data-key="${escape(c.key)}">Quitar</button></div>`).join('');
-  return `<div class="task-comments">${pendingList}<div class="comment-box"><textarea rows="4" maxlength="4000" data-comment-for="${item.id}" data-focus="comment:${item.id}" placeholder="Comentario… @ para mencionar" aria-label="Comentario para #${item.id}">${escape(commentDrafts[item.id] ?? '')}</textarea><div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><div class="comment-actions"><button type="button" class="button small primary" data-action="add-comment" data-task="${item.id}">Comentar</button></div></div>`;
+  return `<div class="task-comments">${pendingList}<div class="comment-box">${commentEditor(item.id,commentDrafts[item.id] ?? '',`Comentario para #${item.id}`)}<div class="mention-list" role="listbox" aria-label="Personas del sprint" hidden></div></div><div class="comment-actions"><button type="button" class="button small primary" data-action="add-comment" data-task="${item.id}">Comentar</button></div></div>`;
 }
 const duplicateButton = item => `<button type="button" class="icon-button" data-action="duplicate" data-task="${item.id}" title="Duplicar con su mismo padre" aria-label="Duplicar #${item.id}">⧉</button>`;
 // Hour fields are edited on the card itself, with the names they have in Azure DevOps.
@@ -1725,48 +1744,45 @@ async function downloadCapacity() {
   const differences=Object.keys(state.workspace.capacityDownloads?.[iteration.id]?.local ?? {}).length;
   toast(differences ? `Capacidad descargada. ${plural(differences,'diferencia','diferencias')} con tu copia local por validar.` : 'Capacidad descargada. Coincide con tu copia local.');
 }
-// The names picked with @ become @<email> (or @<asignado>), the longest first.
-const withMentions=(id,text)=>Object.entries(commentMentions[id] ?? {}).sort((a,b)=>b[0].length-a[0].length).reduce((result,[name,email])=>result.split(`@${name}`).join(`@<${email}>`),text);
+// Only the selected mention chips carry @<identity>; ordinary names stay text.
 // `id`: a task, or «bulk» for the tasks chosen with their box.
 async function submitComment(id) {
   if (id==='bulk') return submitBulkComment();
   id=Number(id);
   const text=(commentDrafts[id] ?? '').trim();
   if (!text) { $(`[data-comment-for="${id}"]`)?.focus(); return; }
-  await request('/api/comment',{id,text:withMentions(id,text)});
-  delete commentDrafts[id];delete commentMentions[id];mentionUi=null;review=null;render();
+  await request('/api/comment',{id,text});
+  delete commentDrafts[id];mentionUi=null;review=null;render();
   $(`[data-comment-for="${id}"]`)?.focus({preventScroll:true});
   toast('Comentario guardado. Se publicará al sincronizar.');
 }
 async function submitBulkComment() {
   const text=(commentDrafts.bulk ?? '').trim(), ids=[...selectedTasks];
   if (!text || !ids.length) { $('[data-comment-for="bulk"]')?.focus(); return; }
-  await request('/api/comments',{ids,text:withMentions('bulk',text)});
-  delete commentDrafts.bulk;delete commentMentions.bulk;mentionUi=null;selectedTasks.clear();review=null;render();
+  await request('/api/comments',{ids,text});
+  delete commentDrafts.bulk;mentionUi=null;selectedTasks.clear();review=null;render();
   toast(`Comentario guardado en ${plural(ids.length,'tarea')}. Se publicará al sincronizar.`);
 }
 // @ offers «Asignado» and the people in the sprint, filtered as the name is typed.
 function updateMentions(textarea) {
-  const id=textarea.dataset.commentFor, before=textarea.value.slice(0,textarea.selectionStart), match=before.match(/(?:^|\s)@([^\s@<>]*)$/);
+  const id=textarea.dataset.commentFor, caret=commentSelection(textarea).start, before=commentText(textarea).slice(0,caret), match=before.match(/(?:^|\s)@([^@<>\r\n]*)$/);
   const list=textarea.parentElement.querySelector('.mention-list');
   if (!match) { mentionUi=null; list.hidden=true; return; }
   const wanted=plain(match[1]), people=[...(plain(ASSIGNEE.displayName).startsWith(wanted) ? [ASSIGNEE] : []),...planningMembers().filter(m=>plain(`${m.displayName} ${m.uniqueName ?? ''}`).includes(wanted))].slice(0,8);
   if (!people.length) { mentionUi=null; list.hidden=true; return; }
   const index=mentionUi?.id===id ? Math.min(mentionUi.index,people.length-1) : 0;
-  mentionUi={id,start:before.length-match[1].length-1,end:textarea.selectionStart,people,index};
+  mentionUi={id,start:before.length-match[1].length-1,end:caret,people,index};
   list.innerHTML=people.map((m,i)=>`<button type="button" role="option" class="mention-option" data-action="pick-mention" data-index="${i}" aria-selected="${i===index}" ${m.assignee ? 'title="Quien tenga asignada cada tarea"' : ''}>${m.assignee ? '<span class="avatar assignee" aria-hidden="true">@</span>' : `<span class="avatar c${state.workspace.members.indexOf(m)%4}">${escape(initials(m.displayName))}</span>`}${escape(m.displayName)}</button>`).join('');
   list.hidden=false;
 }
 function pickMention(index) {
   const ui=mentionUi, textarea=ui && $(`[data-comment-for="${ui.id}"]`), person=ui?.people[index];
   if (!textarea || !person) return;
-  const inserted=`@${person.displayName} `;
-  textarea.value=textarea.value.slice(0,ui.start)+inserted+textarea.value.slice(ui.end);
-  commentDrafts[ui.id]=textarea.value;
-  commentMentions[ui.id]={...commentMentions[ui.id],[person.displayName]:person.assignee ? 'asignado' : person.uniqueName || person.id};
-  const caret=ui.start+inserted.length;
+  const identity=person.assignee ? 'asignado' : person.uniqueName || person.id;
+  const inserted=`@<${identity}> `;
+  if (!replaceCommentRange(textarea,ui.start,ui.end,inserted)) { toast('El comentario admite hasta 4000 caracteres.','warning');return; }
   mentionUi=null;textarea.parentElement.querySelector('.mention-list').hidden=true;
-  textarea.focus();textarea.setSelectionRange(caret,caret);
+
 }
 // Tasks and hierarchy come from Azure while local changes stay on top of them.
 async function downloadHierarchy() {
@@ -2129,24 +2145,26 @@ document.addEventListener('pointercancel', () => { pointerDown = false; }, true)
 // The tickets of Planificación are read from Jira on entering Estimación or Desarrollo
 // for the first time with this filter, and again with ⟳ (or Intro in the filter).
 function ensurePlanningJira() {
-  const scope = JSON.stringify([state.mode, state.planningJiraFilter]);
-  if (pjUi.scope !== scope) { pjUi.data = null; pjUi.error = ''; pjUi.open = null; pjUi.draft = null; pjUi.scope = scope; }
-  if (!pjUi.data && !pjUi.loading && !pjUi.error && state.jira && state.planningJiraFilter) loadPlanningJira();
+  pjUi = planningJiraUi();
+  if (!pjUi.data && !pjUi.loading && !pjUi.error && state.jira && planningFilter(tab)) loadPlanningJira(tab);
 }
-async function loadPlanningJira() {
-  pjUi.loading = true; pjUi.error = ''; pjUi.scope = JSON.stringify([state.mode, state.planningJiraFilter]); render();
+async function loadPlanningJira(section = tab) {
+  const ui = planningJiraUi(section), mode = state.mode;
+  ui.loading = true; ui.error = ''; render();
+  const url = `/api/planning-jira?section=${encodeURIComponent(section)}`;
   try {
-    let response = await fetch('/api/planning-jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+    let response = await fetch(url, { headers: { 'X-Neo-CSRF': state.csrf } });
     let data = await response.json().catch(() => ({}));
     if (response.status === 403 && data.reason === 'session') {
       await loadState(false);
-      response = await fetch('/api/planning-jira', { headers: { 'X-Neo-CSRF': state.csrf } });
+      if (mode !== state.mode || planningJiraUi(section) !== ui) return;
+      response = await fetch(url, { headers: { 'X-Neo-CSRF': state.csrf } });
       data = await response.json().catch(() => ({}));
     }
     if (!response.ok) throw new Error(data.error || 'No se pudo consultar Jira.');
-    pjUi.data = data.planningJira;
-  } catch (error) { pjUi.error = error.message; pjUi.data = null; }
-  finally { pjUi.loading = false; if (PLANNING_JIRA_TABS[tab]) render(); }
+    ui.data = data.planningJira;
+  } catch (error) { ui.error = error.message; ui.data = null; }
+  finally { ui.loading = false; if (tab === section && mode === state.mode) render(); }
 }
 async function loadJira() {
   let response = await fetch('/api/jira', { headers: { 'X-Neo-CSRF': state.csrf } });
@@ -2832,9 +2850,9 @@ document.addEventListener('submit', async event => {
   try {
     if (event.target.id === 'new-iteration-form') { await submitNewIteration(event.target); return; }
     if (event.target.id === 'pj-filter-form') {
-      const filter = event.target.filter.value.trim();
-      if (filter !== state.planningJiraFilter) await request('/api/planning-jira-filter', { filter });
-      await loadPlanningJira(); return;
+      const filter = event.target.filter.value.trim(), section = tab;
+      if (filter !== planningFilter(section)) await request('/api/planning-jira-filter', { section, filter });
+      await loadPlanningJira(section); return;
     }
     if (event.target.id === 'pj-create-form') {
       const form = event.target, story = form.story.checked, parent = Number(form.parent.value);
@@ -2983,7 +3001,7 @@ document.addEventListener('input',event=>{
   if(event.target.id==='search'){query=event.target.value;updatePlanningView();}
   if(event.target.id==='backlog-search'){backlogQuery=event.target.value;refreshBacklog();}
   if(event.target.id==='assistant-prompt'){assistantOf(tab).draft=event.target.value;}
-  if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=event.target.value;updateMentions(event.target);}
+  if(event.target.dataset.commentFor){commentDrafts[event.target.dataset.commentFor]=commentText(event.target);updateMentions(event.target);}
 });
 document.addEventListener('toggle',event=>{
   const element=event.target;

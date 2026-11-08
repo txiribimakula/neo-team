@@ -5,7 +5,7 @@ export async function readIterationTree(project, get) {
     const node = supplied ?? await get(segments);
     if (!node) throw new Error('No se pudo leer el árbol completo de iteraciones.');
     if (segments.length) iterations.push({ id: node.identifier, name: node.name,
-      path: [project, ...segments].join('\\'), attributes: node.attributes ?? {} });
+      hasChildren: !!node.hasChildren || !!node.children?.length, path: [project, ...segments].join('\\'), attributes: node.attributes ?? {} });
     let children = node.children;
     if (node.hasChildren && !children?.length) {
       const expanded = await get(segments);

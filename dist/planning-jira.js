@@ -38,11 +38,13 @@ function createRow(ws, entry, draft) {
 }
 export function planningJiraView(tab, state, ui) {
   if (!state.jira) return '<div class="empty-result"><button class="button" data-action="pj-connect">Conectar Jira</button></div>';
+  const filter = state.planningJiraFilters?.[tab] ?? state.planningJiraFilter ?? '';
+  const label = tab === 'estimates' ? 'Estimación' : 'Desarrollo';
   const data = ui.data, ws = state.workspace, entries = (data?.entries ?? []).filter(e => kindOf(e.type) === PLANNING_JIRA_TABS[tab]);
   const meta = ui.loading ? '<span class="spinner" aria-label="Consultando Jira"></span>' : data?.at ? `<small class="text-muted">${entries.length}${data.limited ? '+' : ''} · ${new Date(data.at).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}</small>` : '';
-  const toolbar = `<form id="pj-filter-form" class="pj-toolbar"><input name="filter" class="pj-filter" maxlength="2000" value="${escape(state.planningJiraFilter)}" placeholder="Filtro de Jira" aria-label="Filtro de Jira" title="Número del filtro, su URL (?filter= o ?jql=) o una consulta JQL" autocomplete="off"><button class="button small" type="submit" title="Actualizar desde Jira" aria-label="Actualizar desde Jira" ${ui.loading ? 'disabled' : ''}>⟳</button>${meta}</form>`;
+  const toolbar = `<form id="pj-filter-form" class="pj-toolbar"><input name="filter" class="pj-filter" maxlength="2000" value="${escape(filter)}" placeholder="Consulta de Jira de ${label}" aria-label="Consulta de Jira de ${label}" title="Número del filtro, su URL (?filter= o ?jql=) o una consulta JQL" autocomplete="off"><button class="button small" type="submit" title="Guardar la consulta de ${label} y actualizar desde Jira" aria-label="Actualizar ${label} desde Jira" ${ui.loading ? 'disabled' : ''}>⟳ Actualizar</button>${meta}</form>`;
   const error = ui.error ? `<p class="inline-error">${escape(ui.error)}</p>` : '';
-  if (!state.planningJiraFilter || !data) return `<section class="pj">${toolbar}${error}</section>`;
+  if (!filter || !data) return `<section class="pj">${toolbar}${error}</section>`;
   if (!entries.length) return `<section class="pj">${toolbar}${error}<div class="empty-result">Sin tickets</div></section>`;
   const rows = entries.map(e => {
     const items = ticketItems(ws, e), open = ui.open === e.key;

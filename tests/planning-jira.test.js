@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -78,6 +78,23 @@ test('HTTP Planificación reads the Jira filter of the example and creates from 
   assert.equal((await post('/api/planning-jira-filter', { filter: ' project = NEO ' })).status, 200);
   assert.equal(state.planningJiraFilter, 'project = NEO');
 
+  assert.deepEqual(state.planningJiraFilters, {estimates:'project = NEO',development:'10002'}, 'saving estimates preserves the development query');
+  assert.equal((await post('/api/planning-jira-filter', {section:'development',filter:'project = DEV'})).status,200);
+  assert.equal(state.planningJiraFilters.estimates,'project = NEO');
+  assert.equal(state.planningJiraFilters.development,'project = DEV');
+  assert.equal((await get('/api/planning-jira?section=estimates')).data.planningJira.filter,'project = NEO');
+  const development=await get('/api/planning-jira?section=development');
+  assert.equal(development.data.planningJira.filter,'project = DEV');
+  assert.equal(development.data.planningJira.section,'development');
+  assert.equal((await get('/api/planning-jira?section=other')).status,400);
+  assert.equal((await post('/api/planning-jira-filter',{section:'other',filter:'project = BAD'})).status,400);
+  const persisted=JSON.parse(await readFile(join(directory,'workspace.json'),'utf8'));
+  assert.deepEqual(persisted.planningJiraFilters.demo,{estimates:'project = NEO',development:'project = DEV'},'both queries survive a server restart');
+  await post('/api/mode',{mode:'azure'});
+  assert.deepEqual(state.planningJiraFilters,{estimates:'',development:''},'demo queries do not leak to real mode');
+  await post('/api/mode',{mode:'demo'});
+  assert.deepEqual(state.planningJiraFilters,persisted.planningJiraFilters.demo);
+
   const before = state.workspace.items.length;
   const created = await post('/api/create-from-jira', { title: 'Importar clientes desde CSV', parent: 910, story: true });
   assert.equal(created.status, 200);
@@ -87,4 +104,43 @@ test('HTTP Planificación reads the Jira filter of the example and creates from 
   const wrong = await post('/api/create-from-jira', { title: 'X', parent: 910 });
   assert.equal(wrong.status, 400);
   assert.equal(state.workspace.items.length, before + 2, 'a rejected creation leaves nothing');
+});
+
+test('legacy queries supply both sections until independently saved, including explicit empty queries',async()=>{
+  const {planningFilters,savePlanningFilter}=await import('../server/planning-jira-settings.js');
+  const data={mode:'azure',planningJiraFilters:{azure:'project = OLD'}};
+  assert.deepEqual(planningFilters(data),{estimates:'project = OLD',development:'project = OLD'});
+  savePlanningFilter(data,'development','project = DEV');
+  assert.deepEqual(planningFilters(data),{estimates:'project = OLD',development:'project = DEV'});
+  savePlanningFilter(data,'estimates','');
+  assert.deepEqual(planningFilters(data),{estimates:'',development:'project = DEV'});
+});
+
+test('each query is rendered in its own section with an explicit refresh button',async()=>{
+  const {planningJiraView}=await import('../dist/planning-jira.js');
+  const state={jira:{},planningJiraFilters:{estimates:'project = EST',development:'project = DEV'}};
+  const estimates=planningJiraView('estimates',state,{}),development=planningJiraView('development',state,{});
+  assert.match(estimates,/value="project = EST"/);assert.doesNotMatch(estimates,/project = DEV/);
+  assert.match(development,/value="project = DEV"/);assert.doesNotMatch(development,/project = EST/);
+  assert.match(estimates,/Actualizar Estimación desde Jira/);assert.match(development,/Actualizar Desarrollo desde Jira/);
+});
+
+test('switching sections keeps separate cached results and late replies cannot overwrite another section',async()=>{
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../dist/app.js',import.meta.url),'utf8');
+  const cache=app.slice(app.indexOf('let pjUi;'),app.indexOf('let state,'));
+  const loader=app.slice(app.indexOf('function ensurePlanningJira()'),app.indexOf('async function loadJira()'));
+  const context={state:{mode:'azure',csrf:'x',jira:{url:'https://jira.example'},planningJiraFilters:{estimates:'EST',development:'DEV'}},tab:'estimates',render:()=>{},loadState:async()=>{},encodeURIComponent};
+  const pending=new Map();context.fetch=url=>new Promise(resolve=>pending.set(url,resolve));
+  const api=runInNewContext(cache+loader+'; ({ui:planningJiraUi,load:loadPlanningJira})',context);
+  const estimates=api.ui('estimates'),development=api.ui('development');
+  assert.notEqual(estimates,development);
+  const first=api.load('estimates');context.tab='development';const second=api.load('development');
+  pending.get('/api/planning-jira?section=development')({ok:true,json:async()=>({planningJira:{filter:'DEV',entries:[{key:'DEV-1'}]}})});await second;
+  pending.get('/api/planning-jira?section=estimates')({ok:true,json:async()=>({planningJira:{filter:'EST',entries:[{key:'EST-1'}]}})});await first;
+  assert.equal(api.ui('development').data.entries[0].key,'DEV-1');
+  assert.equal(api.ui('estimates').data.entries[0].key,'EST-1');
+  context.state.planningJiraFilters.estimates='NEW';
+  assert.equal(api.ui('estimates').data,null);
+  assert.equal(api.ui('development'),development,'changing estimates preserves development results');
 });

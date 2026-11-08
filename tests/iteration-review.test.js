@@ -101,7 +101,7 @@ test('review UI has one global input, every project in details, visible original
   let section=app.slice(app.indexOf('const namingSources='),app.indexOf('function namingInput('));
   section=section.replace(/document.addEventListener\([^\n]+\n/,'');
   const result=runInNewContext(section+'; ({html:namingSection(),name:proposedName(state.workspace.sources[0].iterations[0])})',{
-    ...helpers,state,localDay:()=> '2026-11-08',escape:s=>String(s??''),pendingCount:()=>0,
+    ...helpers,inferIterationDates:(await import('../dist/iteration-dates.js')).inferIterationDates,state,localDay:()=> '2026-11-08',escape:s=>String(s??''),pendingCount:()=>0,
   });
   assert.equal((result.html.match(/data-naming="global"/g)??[]).length,1);
   assert.equal((result.html.match(/<details /g)??[]).length,2);
