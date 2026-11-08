@@ -10,7 +10,7 @@ const TOKEN = /\{\s*(n|semana|a[ñn]i?o|mes|d[ií]a)\s*(?:([+-])\s*(\d{1,3}))?\s
 const INVALID = /[/$?*:"&<>#%|+\u0000-\u001f]/;
 const DAY = 86400000;
 const day = value => String(value ?? '').slice(0, 10);
-const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`));
+const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 const at = value => new Date(`${value}T00:00:00Z`);
 export const addDays = (value, days) => new Date(+at(value) + days * DAY).toISOString().slice(0, 10);
 const pad = value => String(value).padStart(2, '0');
@@ -96,18 +96,29 @@ export const placeName = (template, name, folder) => String(template ?? '').incl
 // The team's iterations with the name a template gives them, each keeping its own
 // number. Only dated ones: the date tokens need a start. The renames come in an
 // order where no target is still taken by another iteration of the list.
-export function renamePlan(iterations, template, today = new Date().toISOString().slice(0, 10)) {
-  const { numbers } = sequence(iterations), list = dated(iterations), lower = value => value.toLowerCase();
+export function renamePlan(iterations, template, today = new Date().toISOString().slice(0, 10), numbers = sequence(iterations).numbers) {
+  const list = dated(iterations), lower = value => value.toLowerCase();
   const current = list.find(i => day(i.attributes.finishDate) >= today);
   const rows = list.map(i => {
     const from = relativePath(i.path), name = sprintName(template, { startDate: day(i.attributes.startDate), number: numbers.get(i.id) });
     const to = placeName(template, name, folderOf(from));
+    const dateIssue = datesProblem(day(i.attributes.startDate), day(i.attributes.finishDate));
     const kind = i === current ? 'current' : day(i.attributes.finishDate) < today ? 'past' : 'next';
-    return { id: i.id, kind, startDate: day(i.attributes.startDate), finishDate: day(i.attributes.finishDate), from, to, changed: from !== to, problem: nameProblem(name && to) };
+    return { id: i.id, kind, startDate: day(i.attributes.startDate), finishDate: day(i.attributes.finishDate), from, to, changed: from !== to, problem: dateIssue || nameProblem(name && to) };
+  });
+  for (const row of rows) {
+    row.explanation = row.changed
+      ? `El nombre no coincide con el patrón global para el inicio ${row.startDate} (semana ISO ${isoWeek(row.startDate)}) y el fin ${row.finishDate} (semana ISO ${isoWeek(row.finishDate)}). Propuesta: ${row.to}. Se conservan las fechas existentes.`
+      : 'El nombre coincide con el patrón global y las fechas existentes.';
+  }
+  for (const i of iterations.filter(i => !list.includes(i))) rows.push({
+    id: i.id, kind: 'other', from: relativePath(i.path), to: relativePath(i.path), changed: false,
+    startDate: day(i.attributes?.startDate), finishDate: day(i.attributes?.finishDate),
+    explanation: 'Faltan fechas válidas: no se puede comprobar el patrón ni proponer un nombre. Revisa las fechas por separado; no se modificarán al renombrar.',
   });
   const others = iterations.filter(i => !list.includes(i)).map(i => lower(relativePath(i.path)));
   for (const row of rows) {
-    if (row.problem) continue;
+    if (row.problem || !list.some(i => i.id === row.id)) continue;
     if (rows.some(other => other !== row && lower(other.to) === lower(row.to))) row.problem = 'Dos iteraciones tendrían el mismo nombre.';
     else if (others.includes(lower(row.to))) row.problem = 'Ya hay otra iteración con ese nombre.';
   }
@@ -143,4 +154,18 @@ export function datesProblem(startDate, finishDate) {
   if (finishDate < startDate) return 'La fecha de fin es anterior a la de inicio.';
   if ((at(finishDate) - at(startDate)) / DAY > 366) return 'Una iteración no puede durar más de un año.';
   return '';
+}
+
+// One counter per date range across projects, independent of team membership.
+export const iterationRange = i => `${day(i.attributes?.startDate)}/${day(i.attributes?.finishDate)}`;
+export function globalNumbers(sources) {
+  const ranges = new Map();
+  for (const source of sources) for (const i of source.projectIterations ?? source.iterations) {
+    if (dated([i]).length && !ranges.has(iterationRange(i))) ranges.set(iterationRange(i), i);
+  }
+  const representatives = [...ranges].map(([range, i]) => ({ ...i, id: range }));
+  representatives.sort((a,b)=>iterationRange(a).localeCompare(iterationRange(b)));
+  const inferred = sequence(representatives).numbers, first = inferred.get(representatives[0]?.id) ?? 1;
+  const numbers = new Map(representatives.map((i,index)=>[i.id,first+index]));
+  return { numbers, forIterations: iterations => new Map(iterations.map(i => [i.id, numbers.get(iterationRange(i))])) };
 }

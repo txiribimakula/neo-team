@@ -65,7 +65,7 @@ test('the example data adds the iteration to the local copy', () => {
   assert.equal(latestIteration(demo.iterations).id, added.id);
 });
 
-const project = (id, iterations, items = []) => ({ mode: 'azure', config: { organization: 'org', project: id, team: 'Team' }, settings: { backlogIteration: { path: id } }, iterations, members: [], items, drafts: {}, capacities: {} });
+const project = (id, iterations, items = []) => ({ mode: 'azure', config: { organization: 'org', project: id, team: 'Team' }, settings: { backlogIteration: { path: id } }, iterations, projectIterations: structuredClone(iterations), members: [], items, drafts: {}, capacities: {} });
 
 test('the counting number is the one that grows by one and does not repeat a date', () => {
   const list = [iteration('a', 'Sprint 24 · S42', '2026-10-12', '2026-10-23'), iteration('b', 'Sprint 25 · S44', '2026-10-26', '2026-11-06'), iteration('c', 'Hardening', '2026-11-09', '2026-11-20')];
@@ -111,14 +111,16 @@ test('existing iterations are renamed one by one in Azure and the local copy fol
   assert.equal(local.items[1].iterationPath, 'Project');
 });
 
-test('each project has its own template for new and existing iterations', () => {
+test('one global template and counter apply to every project, including legacy requests', () => {
   const a = project('A', [iteration('a1', 'Sprint 7', '2026-10-26', '2026-11-06', 'A\\Sprint 7')]), b = project('B', [iteration('b1', 'Iteración 40', '2026-10-26', '2026-11-06', 'B\\2026\\Iteración 40')]);
   const workspace = mergeProjects(a, b), [ia, ib] = workspace.sources.map(s => s.id);
-  const plan = iterationPlan(workspace, { templates: { [ia]: 'Sprint {n}', [ib]: '{año}\\It {n}' }, startDate: '2026-11-09', finishDate: '2026-11-20' });
-  assert.deepEqual(plan.sources.map(({ name, parentPath }) => ({ name, parentPath })), [{ name: 'Sprint 8', parentPath: '' }, { name: 'It 41', parentPath: '2026' }]);
-  const renames = iterationRenames(workspace, { templates: { [ib]: 'Iter {n}' } }, '2026-10-25');
-  assert.deepEqual(renames.sources.map(s => [s.source.config.project, s.renames.map(r => r.to)]), [['B', ['2026\\Iter 40']]], 'only the projects given are renamed');
-  const local = renameLocally(structuredClone(workspace), renames.sources.flatMap(({ source, renames }) => renames.map(rename => ({ source: { id: source.id }, rename }))));
-  assert.equal(local.sources[1].iterations[0].path, 'B\\2026\\Iter 40');
-  assert.equal(local.iterations[0].sourceIterations[ib], 'b1', 'the shared calendar goes by identifier and is not touched');
+  assert.throws(()=>iterationPlan(workspace,{templates:{[ia]:'Sprint {n}',[ib]:'Iter {n}'}}),/único patrón global/);
+  const plan = iterationPlan(workspace, { template:'Sprint {n}', startDate:'2026-11-09',finishDate:'2026-11-20' });
+  assert.deepEqual(plan.sources.map(s=>s.name),['Sprint 8','Sprint 8']);
+  const renames=iterationRenames(workspace,{templates:{[ib]:'Iter {n}'}},'2026-10-25');
+  assert.equal(renames.sources.length,2);
+  assert.deepEqual(renames.sources.map(s=>s.renames[0].to),['Iter 7','2026\\Iter 7']);
+  const local=renameLocally(structuredClone(workspace),renames.sources.flatMap(({source,renames})=>renames.map(rename=>({source,rename}))));
+  assert.equal(local.sources[1].projectIterations[0].name,'Iter 7');
+  assert.deepEqual(local.sources.map(s=>s.projectIterations[0].attributes),workspace.sources.map(s=>s.projectIterations[0].attributes));
 });

@@ -104,6 +104,7 @@ function backlogGateway({backlog = {id:'root',name:'Iteration',path:''}, iterati
   gateway.call = async (name, args) => {
     if (name === 'work' && args.action === 'get_team_settings') return {backlogIteration:backlog, defaultIteration:{id:'s1',path:'\\Release\\Sprint'}, workingDays:[1,2,3,4,5]};
     if (name === 'work' && args.action === 'list_team_iterations') return iterations;
+    if (name === 'neo_project_iterations') return iterations;
     if (name === 'neo_team_members') return members;
     if (name === 'neo_work_item_types') return [];
     if (name === 'wit_backlog' && args.action === 'list') return levels;

@@ -71,6 +71,10 @@ export async function refreshSection(workspace,section,azure,rules,report=()=>{}
     }
     next.capacities=remapped;
   }
+  if (section !== 'capacity') {
+    if (next.sources) next.sources.forEach((source, index) => { source.projectIterations = refreshed[index].projectIterations; });
+    else next.projectIterations = refreshed[0].projectIterations;
+  }
   next.refreshedAt={...next.refreshedAt,[section]:new Date().toISOString()};
   return next;
 }

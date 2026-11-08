@@ -17,6 +17,7 @@ import { configureCoreTools } from '@azure-devops/mcp/dist/tools/core.js';
 import { configureWorkTools } from '@azure-devops/mcp/dist/tools/work.js';
 import { configureWorkItemTools } from '@azure-devops/mcp/dist/tools/work-items.js';
 import { wrapExternalToolResponse } from '@azure-devops/mcp/dist/shared/content-safety.js';
+import { readIterationTree } from './iteration-tree.js';
 import { configurePipelineTools } from './mcp-pipelines.js';
 
 const [organization, authentication = 'interactive', tenant] = process.argv.slice(2);
@@ -182,7 +183,7 @@ server.tool('neo_team_days_off_write', 'Replace the team-wide days off of an ite
 // The REST client resolves a 404 as null, so a missing node reads as null.
 async function iterationNodes(project) {
   const wit = await (await connectionProvider()).getWorkItemTrackingApi(), options = wit.createRequestOptions('application/json', '7.1');
-  const url = segments => `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations${segments.map(s => `/${encodeURIComponent(s)}`).join('')}?api-version=7.1`;
+  const url = segments => `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations${segments.map(s => `/${encodeURIComponent(s)}`).join('')}?api-version=7.1&$depth=1`;
   const nodes = {
     get: async segments => (await wit.rest.get(url(segments), options)).result,
     create: async (parent, body) => (await wit.rest.create(url(parent), body, options)).result,
@@ -197,6 +198,10 @@ async function iterationNodes(project) {
   };
   return nodes;
 }
+server.tool('neo_project_iterations', 'Read the complete iteration tree of a project, including every historical iteration and folder.', { project: z.string().min(1) }, async ({ project }) => {
+  const nodes = await iterationNodes(project);
+  return { content: [{ type: 'text', text: JSON.stringify(await readIterationTree(project, nodes.get)) }] };
+});
 const segmentsOf = path => path.split(/[\\/]/).filter(Boolean);
 const lower = segments => segments.join('\\').toLowerCase();
 // A new iteration is created under the parent of the team's last one (or in the

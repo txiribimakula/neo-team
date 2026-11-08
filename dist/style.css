@@ -1082,3 +1082,11 @@ span.tl-who{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden
 .pj-create{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pj-create [name="title"]{flex:2 1 280px}.pj-create select{flex:1 1 240px;width:auto}
 .pj-story{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap;cursor:pointer}.pj-story input{width:auto;margin:0}
 @media(max-width:740px){.pj-table th:nth-child(n+3):nth-child(-n+4),.pj-table tr:not(.pj-create-row) td:nth-child(n+3):nth-child(-n+4){display:none}}
+
+/* Full project history stays navigable without hiding dates in tooltips. */
+details.naming-project{display:block;border-top:1px solid var(--line);padding-top:10px}
+.naming-project summary{cursor:pointer;font-weight:700;padding:6px 0}
+.naming-project[open] .naming-rows{margin-top:10px}
+.naming-row{padding:8px 0;border-bottom:1px solid var(--line)}
+.naming-row small{color:var(--muted)}
+.naming-row.invalid small[role=alert]{color:#a33b2b}

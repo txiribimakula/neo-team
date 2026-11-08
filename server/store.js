@@ -1,3 +1,4 @@
+import { migrateIterationTemplates } from './iteration-settings.js';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -11,7 +12,7 @@ export class LocalStore {
       this.data = JSON.parse(await readFile(this.file, 'utf8'));
       if (this.data.schema !== 1 || !Number.isInteger(this.data.version) || !['azure', 'demo'].includes(this.data.mode)) throw new Error('Formato de planificación no compatible');
       const next = structuredClone(this.data);
-      const upgraded = [upgradeDemoHierarchy(next.demo), upgradeDemoPreviousIteration(next.demo), upgradeDemoImportRules(next.demo)];
+      const upgraded = [migrateIterationTemplates(next), upgradeDemoHierarchy(next.demo), upgradeDemoPreviousIteration(next.demo), upgradeDemoImportRules(next.demo)];
       if (upgraded.some(Boolean)) await this.save(next);
     } catch (error) {
       if (error.code !== 'ENOENT') throw new Error(`No se pudo leer ${this.file}. Se conserva el archivo original. ${error.message}`);

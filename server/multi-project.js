@@ -7,7 +7,7 @@ const period = iteration => {
   return start && end ? `${start}/${end}` : null;
 };
 export function sourcesOf(workspace) {
-  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates, workItemStates: workspace.workItemStates, estimateFields: workspace.estimateFields }] : []);
+  return workspace?.sources ?? (workspace ? [{ id: sourceId(workspace.config), config: workspace.config, settings: workspace.settings, backlogLevels:workspace.backlogLevels, iterations: workspace.iterations, projectIterations: workspace.projectIterations, members: workspace.members, capacities: workspace.capacities, completedStates: workspace.completedStates, workItemStates: workspace.workItemStates, estimateFields: workspace.estimateFields }] : []);
 }
 export function sourceFor(workspace, item) {
   const source = sourcesOf(workspace).find(s => s.id === item?.sourceId) ?? (!workspace.sources ? sourcesOf(workspace)[0] : null);

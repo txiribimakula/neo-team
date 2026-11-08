@@ -1,3 +1,4 @@
+import { globalTemplate, saveGlobalTemplate } from './iteration-settings.js';
 import { availableImportRules } from './import-query.js';
 import {refreshSection,downloadCapacity} from './refresh.js';
 import { iterationPlan, createIteration, addDemoIteration, templatesFor, iterationRenames, sharedIterations, renameIterations, renameLocally } from './iterations.js';
@@ -183,15 +184,13 @@ const myIterationScope = () => JSON.stringify([store.data.mode, store.data.confi
 const currentMyIteration = () => myIteration?.scope === myIterationScope() ? myIteration : null;
 // The last test plan query, kept only in memory like maintenance.
 let testPlans = null;
-// The name template of iterations, remembered per project and team (apart for the
-// example data). Before there was one per planning, kept under its first team.
-const iterationTemplateKey = id => store.data.mode === 'demo' ? `demo:${id}` : id;
+// A single criterion per mode, migrated from the first configured legacy source.
 function iterationTemplates() {
-  const workspace = store.data[store.data.mode], saved = store.data.iterationTemplates ?? {};
-  const legacy = saved[store.data.mode === 'demo' ? 'demo' : store.data.azure ? sourceId(store.data.azure.config) : ''];
-  return Object.fromEntries(sourcesOf(workspace).map((source, index) => [source.id, saved[iterationTemplateKey(source.id)] ?? (index ? null : legacy ?? null)]).filter(([, template]) => template));
+  const sources = sourcesOf(store.data[store.data.mode]);
+  const template = globalTemplate(store.data, sources);
+  return template ? Object.fromEntries(sources.map(s => [s.id, template])) : {};
 }
-const withTemplates = (data, templates) => { data.iterationTemplates = { ...data.iterationTemplates, ...Object.fromEntries(Object.entries(templates).map(([id, template]) => [iterationTemplateKey(id), template])) }; return data; };
+const withTemplates = saveGlobalTemplate;
 const currentTestPlans = () => testPlans?.scope === maintenanceScope() ? testPlans : null;
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 // Local steps after the Azure queries join the activity, so a failure shows
@@ -239,7 +238,7 @@ function publicState({ operationComplete = false } = {}) {
   const active = busy && !operationComplete;
   const workspace = planner.workspace();
   return { csrf, version: store.data.version, outdated: serverOutdated(), config: store.data.config, mode: store.data.mode, hasAzure: !!store.data.azure, maintenanceSettings: currentMaintenanceSettings(), importRules: availableImportRules(workspace,store.data.mode==='azure' ? store.data.stateRules : workspace?.importRules), busy: active, operation: active ? operation : null, stateReview,
-    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira(), planningJiraFilter: planningJiraFilter() };
+    workspace: workspace ? planningWorkspace(workspace) : null, prReviews: currentReviews(), localRepositories: store.data.localRepositories ?? {}, iterationTemplates: iterationTemplates(), iterationTemplate: globalTemplate(store.data, sourcesOf(workspace)), copilotModel: store.data.copilotModel ?? null, copilotEffort: store.data.copilotEffort ?? null, assistantModel: store.data.assistantModel ?? null, assistantEffort: store.data.assistantEffort ?? null, pipelineAnalyses: currentAnalyses(), pipelineSources: store.data.pipelineSources ?? {}, pipelineModel: store.data.pipelineModel ?? null, pipelineEffort: store.data.pipelineEffort ?? null, timelines: store.data.timelines?.[store.data.mode] ?? [], vacations: store.data.vacations?.[store.data.mode] ?? {}, jira: publicJira(), planningJiraFilter: planningJiraFilter() };
 }
 const BODY_LIMIT = 100000;
 // Chunks are joined before decoding, so a character split between two chunks

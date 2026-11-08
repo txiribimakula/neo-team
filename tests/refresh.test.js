@@ -8,6 +8,7 @@ function fixture(){const ws=createDemo();ws.mode='azure';ws.iterations=ws.iterat
 function gateway(ws){
  const azure=new AzureGateway(),calls=[];azure.open=async()=>{};
  azure.call=async(name,args)=>{calls.push([name,args]);
+  if(name==='neo_project_iterations')return ws.iterations;
   if(name==='work' && args.action==='list_team_iterations')return ws.iterations.map(i=>({...i,name:i.name+' actualizada'}));
   if(name==='work' && args.action==='get_team_settings')return ws.settings;
   if(name==='work' && args.action==='get_team_capacity')return {teamMembers:ws.members.map(m=>({teamMember:m,activities:[{name:'Development',capacityPerDay:3}],daysOff:[]}))};
@@ -23,7 +24,7 @@ test('iteration refresh reads only iteration metadata, preserving tasks, members
  const next=await refreshSection(ws,'iterations',azure,[]);
  assert.ok(next.iterations[0].name.endsWith('actualizada'));
  for(const field of ['items','members','capacities','settings'])assert.deepEqual(next[field],ws[field]);
- assert.deepEqual(calls.map(([name,args])=>[name,args.action]),[['work','list_team_iterations']]);assert.deepEqual(ws,before);
+ assert.deepEqual(calls.map(([name,args])=>[name,args.action]),[['work','list_team_iterations'],['neo_project_iterations',undefined]]);assert.deepEqual(ws,before);
 });
 test('capacity refresh reads only capacity and holidays and keeps pending task edits',async()=>{
  const ws=fixture();ws.drafts={[ws.items[0].id]:{title:'Local'}};
@@ -37,7 +38,7 @@ test('task download asks with the team current sprints and areas but keeps the l
  const {azure,calls}=gateway(ws),next=await refreshSection(ws,'tasks',azure,[]);
  assert.deepEqual(next.items,[]);
  for(const field of ['capacities','capacityDrafts','iterations','members','settings'])assert.deepEqual(next[field],ws[field]);
- assert.ok(calls.every(([name])=>['work','neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)),'no members or capacities are read');
+ assert.ok(calls.every(([name])=>['work','neo_project_iterations','neo_work_item_types','neo_work_item_states','neo_query_work_items'].includes(name)),'no members or capacities are read');
  assert.ok(!calls.some(([name,args])=>name==='work' && args.action==='get_team_capacity'));
 });
 test('the task download brings the latest finished iteration to decide its open tasks',async()=>{
@@ -125,7 +126,7 @@ test('with pending changes, refreshing iterations only adds the new ones, and re
  const next=await refreshSection(ws,'iterations',azure,[]);
  assert.deepEqual(next.iterations.map(i=>i.id),[...ws.iterations.map(i=>i.id),'sprint-new']);
  for(const field of ['items','drafts','capacities','members'])assert.deepEqual(next[field],ws[field]);
- assert.deepEqual(calls,[],'nothing but the iterations is read');
+ assert.deepEqual(calls.map(([name])=>name),['neo_project_iterations'],'only team iterations and complete project history are read');
  azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? [{...ws.iterations[0],attributes:{...ws.iterations[0].attributes,finishDate:'2099-12-31T00:00:00Z'}},...ws.iterations.slice(1)] : base(name,args);
  await assert.rejects(()=>refreshSection(ws,'iterations',azure,[]),/ha cambiado o ya no está/);
  azure.call=async(name,args)=>name==='work' && args.action==='list_team_iterations' ? ws.iterations.slice(1) : base(name,args);

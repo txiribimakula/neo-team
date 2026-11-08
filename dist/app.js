@@ -10,7 +10,7 @@ import { jiraView, ticketDetail, ticketHead, settingsFrom as jiraSettingsFrom, s
 import { matchesQuery, compileQuery } from './search.js';
 import { planningJiraView, parentOptions, PLANNING_JIRA_TABS } from './planning-jira.js';
 import { timelineView, timelinePicker, timelineGroups, newTimeline, editableRanges, storeRanges, resetRanges, addDay, zoomStep, DAY_WIDTH } from './timeline.js';
-import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf } from './sprint-name.js';
+import { SPRINT_TOKENS, sprintName, guessTemplate, nextDates, latestIteration, addDays, sequence, renamePlan, placeName, relativePath, folderOf, globalNumbers, iterationRange } from './sprint-name.js';
 import { hierarchy, ancestors, filterHierarchy, isExecutable, typeRank, hasPlanningCapacity, estimateFields, previousIteration, currentIteration, hasEnded, completedState, isCompleted, markSnapshot, localDay } from './hierarchy.js';
 const localFolderOf = el => localFolder(state, el.dataset.project, el.dataset.repository);
 const $ = (selector, parent = document) => parent.querySelector(selector);
@@ -797,40 +797,45 @@ const iterationKindLabel={past:'Anterior',current:'En curso',next:'Siguiente',fu
 function iterationView() {
   const ws=state.workspace, selectedOne=selected();
   if (!ws) return '<div class="empty-result">Importa un equipo con iteraciones para empezar a planificar.</div>';
-  const iterations=planningIterations(), kinds=iterationKinds(iterations);
+  const iterations=[...new Map(planningIterations().map(i=>[iterationRange(i),i])).values()], kinds=iterationKinds(iterations);
   return `<section class="iteration-step"><div class="iteration-options">${finishedIterations()}${iterations.map(i=>{
     const planned=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path).length, kind=kinds.get(i.id), active=i.id===selectedOne?.id;
-    return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
+    return `<button class="iteration-option kind-${kind} ${active ? 'active' : ''}" data-action="choose-iteration" data-iteration="${escape(i.id)}" aria-pressed="${active}"><span class="iteration-tags"><span class="iteration-when">${iterationKindLabel[kind]}</span>${active ? '<span class="iteration-chosen">✓ Planificando</span>' : ''}</span><strong>${escape(proposedName(i))}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${planned} tarea${planned===1 ? '' : 's'} planificada${planned===1 ? '' : 's'}</small></button>`;
   }).join('')}${newIterationCard()}</div>${namingSection()}</section>`;
 }
-// The name criterion of each project: its template, remembered for new iterations,
-// and what it gives to the previous, current and next ones. Applying it renames
-// those in Azure DevOps after a confirmation on the same page.
-const namingSources=()=>state.workspace.sources ?? [{id:null,config:state.workspace.config,iterations:state.workspace.iterations,settings:state.workspace.settings}];
+// One global criterion, with a complete expandable history for each project.
+const namingSources=()=>state.workspace.sources ?? [{id:null,config:state.workspace.config,iterations:state.workspace.iterations,projectIterations:state.workspace.projectIterations,settings:state.workspace.settings}];
 const namingId=source=>source.id ?? 'single';
 let namingDrafts={}, namingFocus=null, renameCheck=null;
+const namingExpanded=new Set();
+document.addEventListener('toggle',event=>{const id=event.target.dataset?.namingProject;if(id) event.target.open ? namingExpanded.add(id) : namingExpanded.delete(id);},true);
 // With one project the server knows its key; with several, each goes by its own.
-const savedTemplate=source=>(source.id ? state.iterationTemplates?.[source.id] : Object.values(state.iterationTemplates ?? {})[0]) ?? null;
-const namingTemplate=source=>namingDrafts[namingId(source)] ?? savedTemplate(source) ?? guessTemplate(latestIteration(source.iterations)?.name,sequence(source.iterations).position);
-const namingTemplates=()=>state.workspace.sources ? {templates:Object.fromEntries(namingSources().map(source=>[source.id,namingTemplate(source)]))} : {template:namingTemplate(namingSources()[0])};
-const namingPlans=()=>namingSources().map(source=>({source,plan:renamePlan(source.iterations,namingTemplate(source),localDay())}));
-const namingKind={past:'Anterior',current:'En curso',next:'Siguiente'};
+const savedTemplate=()=>state.iterationTemplate ?? Object.values(state.iterationTemplates ?? {})[0] ?? null;
+const namingTemplate=()=>{const iterations=namingSources()[0].projectIterations ?? namingSources()[0].iterations;return namingDrafts.global ?? savedTemplate() ?? guessTemplate(latestIteration(iterations)?.name,sequence(iterations).position);};
+const namingTemplates=()=>({template:namingTemplate()});
+const namingNumbering=()=>globalNumbers(namingSources());
+const namingPlans=()=>{const numbering=namingNumbering();return namingSources().map(source=>{
+  const iterations=source.projectIterations ?? source.iterations;
+  return {source,plan:renamePlan(iterations,namingTemplate(),localDay(),numbering.forIterations(iterations))};
+});};
+const proposedName=i=>sprintName(namingTemplate(),{startDate:String(i.attributes?.startDate ?? '').slice(0,10),number:namingNumbering().numbers.get(iterationRange(i))});
+const namingKind={past:'Anterior',current:'En curso',next:'Siguiente',other:'Sin fechas'};
 function namingRows(plan) {
-  return plan.rows.map(row=>`<li class="naming-row kind-${row.kind==='next' ? 'future' : row.kind} ${row.changed ? 'changed' : ''} ${row.problem ? 'invalid' : ''}" title="${date(row.startDate)} — ${date(row.finishDate)}"><span class="iteration-when">${namingKind[row.kind]}</span>${row.changed ? `<span class="naming-from">${escape(row.from)}</span><span aria-hidden="true">→</span>` : ''}<strong>${escape(row.to) || '—'}</strong>${row.problem ? `<small role="alert">${escape(row.problem)}</small>` : ''}</li>`).join('');
+  return plan.rows.map(row=>`<li class="naming-row kind-${row.kind==='next' ? 'future' : row.kind} ${row.changed ? 'changed' : ''} ${row.problem ? 'invalid' : ''}"><span class="iteration-when">${namingKind[row.kind]}</span><span>Actual: ${escape(row.from)}</span>${row.changed ? `<span aria-hidden="true">→</span><strong>Propuesta: ${escape(row.to) || '—'}</strong>` : ''}<span>Fechas existentes: ${escape(row.startDate) || 'Sin fecha'} — ${escape(row.finishDate) || 'Sin fecha'}</span><small>${escape(row.explanation)}</small>${row.problem ? `<small role="alert">${escape(row.problem)}</small>` : ''}</li>`).join('');
 }
 function namingSection() {
-  const plans=namingPlans(), many=plans.length>1, changes=plans.reduce((sum,{plan})=>sum+plan.renames.length,0), problem=plans.find(({plan})=>plan.problem);
-  const unsaved=namingSources().some(source=>namingDrafts[namingId(source)]!==undefined && namingDrafts[namingId(source)]!==savedTemplate(source));
+  const plans=namingPlans(), changes=plans.reduce((sum,{plan})=>sum+plan.renames.length,0), problem=plans.find(({plan})=>plan.problem);
+  const unsaved=namingDrafts.global!==undefined && namingDrafts.global!==savedTemplate();
   const pending=pendingCount()>0;
-  const projects=plans.map(({source,plan})=>`<div class="naming-project"><label class="naming-template">${many ? `<span>${escape(source.config.project)}</span>` : ''}<input data-naming="${escape(namingId(source))}" value="${escape(namingTemplate(source))}" maxlength="255" aria-label="Criterio de nombre${many ? ` de ${escape(source.config.project)}` : ''}" title="{n} conserva el número de cada iteración · {semana}, {mes}, {año} y {día} salen del inicio · \\ separa carpetas desde el proyecto"></label><ol class="naming-rows">${namingRows(plan)}</ol></div>`).join('');
+  const projects=plans.map(({source,plan})=>`<details class="naming-project" data-naming-project="${escape(namingId(source))}" ${namingExpanded.has(namingId(source)) ? 'open' : ''}><summary>${escape(source.config.project)} · ${plan.rows.length} iteraciones y carpetas</summary>${!source.projectIterations && state.mode!=='demo' ? '<p role="status">Histórico pendiente de descargar. Actualiza las iteraciones para leer el árbol completo del proyecto.</p>' : ''}<ol class="naming-rows">${namingRows(plan)}</ol></details>`).join('');
   const shared=renameCheck ? Object.entries(renameCheck.shared).flatMap(([id,iterations])=>Object.entries(iterations).map(([iteration,teams])=>{
-    const source=namingSources().find(s=>(s.id ?? '')===id || !s.id), name=source?.iterations.find(i=>i.id===iteration)?.name ?? iteration;
+    const source=namingSources().find(s=>(s.id ?? '')===id || !s.id), name=(source?.projectIterations ?? source?.iterations)?.find(i=>i.id===iteration)?.name ?? iteration;
     return `<li>«${escape(name)}» · ${teams.map(escape).join(', ')}</li>`;
   })) : [];
   const actions=renameCheck
     ? `${shared.length ? `<ul class="naming-shared" aria-label="También usadas por">${shared.join('')}</ul>` : ''}<button type="button" class="button small primary" data-action="naming-confirm">${state.mode==='demo' ? 'Renombrar en el ejemplo' : 'Renombrar en Azure DevOps'}</button><button type="button" class="button small" data-action="naming-cancel">Cancelar</button>`
-    : `<button type="button" class="button small" data-action="naming-save" ${unsaved && !problem ? '' : 'disabled'}>Fijar</button><button type="button" class="button small primary" data-action="naming-apply" ${changes && !problem && !pending ? '' : 'disabled'}>Renombrar${changes ? ` ${changes}` : ''}</button>${pending && changes ? '<small>Sincroniza o descarta los cambios pendientes para renombrar.</small>' : ''}`;
-  return `<section class="iteration-naming" aria-label="Nombre de las iteraciones"><div class="naming-head"><h3>Nombres</h3><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span></div>${projects}<div class="naming-actions" id="naming-actions">${actions}</div></section>`;
+    : `<button type="button" class="button small" data-action="naming-save" ${unsaved && !problem ? '' : 'disabled'}>Fijar</button><button type="button" class="button small primary" data-action="naming-apply" ${changes && !problem && !pending && (state.mode==='demo' || namingSources().every(s=>s.projectIterations)) ? '' : 'disabled'}>Renombrar${changes ? ` ${changes}` : ''}</button>${pending && changes ? '<small>Sincroniza o descarta los cambios pendientes para renombrar.</small>' : ''}`;
+  return `<section class="iteration-naming" aria-label="Nombre de las iteraciones"><div class="naming-head"><h3>Patrón global de nombres</h3><button type="button" class="button small" data-action="refresh-section" data-section="iterations">Actualizar histórico completo</button><span class="iteration-tokens">${SPRINT_TOKENS.map(token=>`<button type="button" data-action="iteration-token" data-token="${token}" title="Añadir ${token}">${token}</button>`).join('')}</span></div><label class="naming-template"><span>Todos los proyectos</span><input data-naming="global" value="${escape(namingTemplate())}" maxlength="255" aria-label="Patrón global de nombres"></label><p>{n}: contador compartido por tramo · {semana}: semana ISO del inicio · los desplazamientos suman semanas, meses, años o días. Renombrar conserva el inicio y fin existentes.</p>${projects}<div class="naming-actions" id="naming-actions">${actions}</div></section>`;
 }
 function namingInput(el) {
   namingDrafts[el.dataset.naming]=el.value;namingFocus=el.dataset.naming;renameCheck=null;
@@ -859,13 +864,10 @@ async function confirmNaming() {
 // gives it, and its dates.
 let newIteration=null;
 function newIterationNames() {
-  return namingSources().map(source=>{
-    const template=namingTemplate(source), last=latestIteration(source.iterations);
-    const name=sprintName(template,{startDate:newIteration.startDate,number:last ? sequence(source.iterations).numbers.get(last.id)+1 : 1});
-    return {project:source.config.project,path:name && placeName(template,name,last ? folderOf(relativePath(last.path)) : relativePath(source.settings?.backlogIteration?.path))};
-  });
+  const numbers=namingNumbering().numbers;
+  return [{path:sprintName(namingTemplate(),{startDate:newIteration.startDate,number:numbers.get(`${newIteration.startDate}/${newIteration.finishDate}`) ?? Math.max(0,...numbers.values())+1})}];
 }
-const newIterationPreview=()=>{const names=newIterationNames();return names.map(({project,path})=>`<span>${names.length>1 ? `<small>${escape(project)}</small> ` : ''}${escape(path) || '—'}</span>`).join('');};
+const newIterationPreview=()=>newIterationNames().map(({path})=>`<span>${escape(path) || '—'}</span>`).join('');
 function openNewIteration() {
   newIteration={...nextDates(state.workspace.iterations),error:''};
 }
@@ -898,9 +900,9 @@ async function submitNewIteration(form) {
 function finishedIterations() {
   const ws=state.workspace, past=ws.iterations.filter(i=>i.past).sort((a,b)=>String(a.attributes?.startDate ?? '').localeCompare(String(b.attributes?.startDate ?? '')));
   if (!past.length) return ws.mode==='azure' && !ws.iterations.some(i=>hasEnded(i)) ? `<div class="iteration-option kind-past"><span class="iteration-tags"><span class="iteration-when">Anterior</span></span><button class="button small" data-action="refresh-section" data-section="tasks">Descargar</button></div>` : '';
-  return past.map(i=>{
+  return [...new Map(past.map(i=>[iterationRange(i),i])).values()].map(i=>{
     const open=ws.effectiveItems.filter(item=>isExecutable(item) && item.iterationPath===i.path && !isCompleted(item,ws)).length;
-    return `<div class="iteration-option kind-past"><span class="iteration-tags"><span class="iteration-when">Anterior</span></span><strong>${escape(i.name)}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${open} tarea${open===1 ? '' : 's'} abierta${open===1 ? '' : 's'}</small></div>`;
+    return `<div class="iteration-option kind-past"><span class="iteration-tags"><span class="iteration-when">Anterior</span></span><strong>${escape(proposedName(i))}</strong><span>${date(i.attributes?.startDate)} — ${date(i.attributes?.finishDate)}</span><small>${open} tarea${open===1 ? '' : 's'} abierta${open===1 ? '' : 's'}</small></div>`;
   }).join('');
 }
 // Step 2: each open task of the previous iteration moves to the one being

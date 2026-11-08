@@ -76,7 +76,7 @@ export class AzureGateway {
       const { tools } = await client.listTools();
       // Every tool used by imports, reviews and writes, so a missing one is reported
       // on connecting rather than in the middle of a synchronization.
-      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write', 'neo_test_plans', 'neo_test_plan_points', 'neo_iteration_create_write', 'neo_iteration_rename_write', 'neo_iteration_teams']) {
+      for (const name of ['work', 'wit_backlog', 'wit_work_item', 'wit_work_item_write', 'wit_query', 'neo_create_item', 'neo_team_members', 'neo_team_days_off', 'neo_team_capacity_write', 'neo_team_days_off_write', 'neo_work_item_states', 'neo_work_item_type_fields', 'neo_security_read', 'neo_security_login', 'neo_query_work_items', 'neo_work_item_types', 'neo_work_items_batch', 'neo_work_item_texts', 'neo_git_repositories', 'neo_pull_requests', 'neo_my_pull_requests', 'neo_pull_request', 'neo_pull_request_threads', 'neo_pull_request_comment_write', 'neo_pull_request_create_write', 'neo_pull_request_reply_write', 'neo_test_plans', 'neo_test_plan_points', 'neo_project_iterations', 'neo_iteration_create_write', 'neo_iteration_rename_write', 'neo_iteration_teams']) {
         if (!tools.some(t => t.name === name)) throw new Error(`El MCP no ofrece ${name}`);
       }
       if (this.openingClient !== client) throw new Error('Conexión cancelada.');
@@ -304,6 +304,8 @@ export class AzureGateway {
     if(section!=='tasks') report('iterations', 'Consultando las iteraciones del equipo…', { settings: 1 });
     const rawIterations = await this.call('work', { action: 'list_team_iterations', ...context });
     if (!Array.isArray(rawIterations)) throw new Error('Azure DevOps no devolvió una lista válida de iteraciones del equipo.');
+    const projectIterations = await this.call('neo_project_iterations', { project: config.project });
+    if (!Array.isArray(projectIterations)) throw new Error('No se pudo leer el histórico completo del proyecto.');
     const today = localDay();
     // The latest finished iteration comes too, to decide its open work before
     // planning; it is never planned. Older ones are left out.
@@ -311,7 +313,7 @@ export class AzureGateway {
     const latest=past.reduce((last,i)=>!last || finish(i)>=finish(last) ? i : last,null);
     const pastPaths=past.filter(i=>i!==latest).map(i=>normalizeIteration(i,config.project,'una iteración anterior').path);
     const iterations=rawIterations.filter(i=>i===latest || !isPastIteration(i,today)).map(i=>({...normalizeIteration(i,config.project,'una iteración del equipo'),...(i===latest ? {past:true} : {})}));
-    if(section==='iterations') return {...snapshot,iterations};
+    if(section==='iterations') return {...snapshot,iterations,projectIterations};
     const added=section==='tasks' ? iterations.filter(i=>!i.past && !snapshot.iterations.some(known=>known.id===i.id)) : [];
     const querySettings={...settings,importIterationPaths:iterations.map(i=>i.path)};
     if(!snapshot) report('members', 'Obteniendo los integrantes del equipo…', { iterations: iterations.length, iterationsExcluded: rawIterations.length - iterations.length });
@@ -382,7 +384,7 @@ export class AzureGateway {
     }
     if(added.length) warnings.push(`${config.project}: el equipo tiene iteraciones nuevas en Azure DevOps (${added.map(i=>i.name).join(', ')}). Sus tareas ya se han descargado; actualiza las iteraciones para planificarlas.`);
     report('saving', 'Guardando la copia local…', { imported: items.length, warnings: warnings.length });
-    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, workItemStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
+    return { mode: 'azure', config, importedAt: new Date().toISOString(), settings, iterations, projectIterations, members, capacities:section==='tasks' ? snapshot.capacities : capacities, backlogLevels:levels, items, completedStates, workItemStates, estimateFields, warnings, drafts: {}, conflicts: {}, participants: {} };
   }
   // Pull request review: repositories, pull requests and their changes are read
   // through the local MCP; comments are only added after the person confirms them.

@@ -8,6 +8,7 @@ function gatewayFor({unknown=false,page=false}={}) {
  gateway.call=async(name,args)=>{
   calls.push({name,args});
   if(name==='work' && args.action==='get_team_settings')return {backlogIteration:{path:''},areaPaths:[{value:'Project\\Team',includeChildren:true}],workingDays:[1,2,3,4,5]};
+  if(name==='neo_project_iterations')return [];
   if(name==='work' && args.action==='list_team_iterations')return [{id:'older',name:'Older',path:'Project\\Older',attributes:{timeFrame:'past',finishDate:'2026-01-02T00:00:00Z'}},{id:'old',name:'Old',path:'Project\\Old',attributes:{timeFrame:'past',finishDate:'2026-01-16T00:00:00Z'}},{id:'now',name:'Now',path:'Project\\Now',attributes:{timeFrame:'current'}}];
   if(name==='neo_team_members')return [{id:'ana',displayName:'Ana'}];
   if(name==='wit_backlog' && args.action==='list')return [{workItemTypes:[{name:'User Story'}]}];
